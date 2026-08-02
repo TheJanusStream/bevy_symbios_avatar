@@ -43,7 +43,9 @@ pub mod convert;
 pub mod spawn;
 
 pub use convert::{atlas_image, mesh_of, polymesh_to_bevy};
-pub use spawn::{AvatarBody, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar};
+pub use spawn::{
+    AvatarBody, AvatarClosure, AvatarEye, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar,
+};
 
 use bevy::prelude::*;
 
@@ -59,7 +61,12 @@ impl Plugin for AvatarPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (spawn::build_requested_avatars, spawn::apply_avatar_poses).chain(),
+            (
+                spawn::build_requested_avatars,
+                spawn::apply_avatar_poses,
+                spawn::apply_avatar_closures,
+            )
+                .chain(),
         );
     }
 }

@@ -10,6 +10,8 @@
 //! cargo run --release --example viewer -- --seed 7
 //! cargo run --release --example viewer -- --quadruped
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
+//! cargo run --release --example viewer -- --walk --shot walking.png
+//! cargo run --release --example viewer -- --still           # no blink, no tracking
 //! ```
 //!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints
@@ -18,19 +20,25 @@
 //! What to do with it:
 //!
 //! - Drag with the left mouse button to turn the body, scroll to move in.
-//! - `W` walks. The gait comes from the engine, so a walk that reads wrong here
-//!   and right in the software renderer is this crate's fault, and one that
-//!   reads wrong in both is the engine's.
+//! - `W` walks, or `--walk` walks without holding anything. The gait comes from
+//!   the engine, so a walk that reads wrong here and right in the software
+//!   renderer is this crate's fault, and one that reads wrong in both is the
+//!   engine's.
+//! - The eyes blink and follow a target that circles the body, both driven by
+//!   the engine. `--still` turns that off. A blink is geometry rather than a
+//!   pose — nothing rigs a lid — so following one rebuilds two small meshes a
+//!   frame, which is a fair reading of what it costs today.
 //! - `Space` re-rolls the seed and rebuilds, `P` saves a picture.
 //! - `B` prints what the body costs, against the budget it is judged by.
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, AvatarPose, SpawnAvatar};
-use symbios_avatar::anim::{gait, plant_feet_of};
+use bevy_symbios_avatar::{AvatarBody, AvatarClosure, AvatarPlugin, AvatarPose, SpawnAvatar};
+use symbios_avatar::anim::{GazeConfig, gait, gaze, plant_feet_of};
 use symbios_avatar::{
-    Archetype, AvatarRecord, FootingConfig, Gait, Ground, Pose, QuadrupedParams, Stride,
+    Archetype, AvatarRecord, Blink, FootingConfig, Gait, Ground, Pose, QuadrupedParams, Stride,
+    Zone,
 };
 
 /// How far the camera starts from the body, as a multiple of its height.
@@ -39,10 +47,29 @@ const START_BACK: f32 = 1.9;
 const TURN_PER_PIXEL: f32 = 0.006;
 /// How fast the walk cycles, in cycles per second.
 const CADENCE: f32 = 1.1;
+/// Radians per second the gaze target circles the body at.
+///
+/// Slow enough that the head is plainly tracking rather than snapping, which is
+/// the thing being judged.
+const GAZE_SPEED: f32 = 0.6;
 /// How many frames to let a body appear in before photographing it.
 const SETTLE: u32 = 12;
 /// How many frames to wait for the picture before giving up on it.
 const GIVE_UP: u32 = 600;
+
+/// Whether a bare flag was passed on the command line.
+fn flag(name: &str) -> bool {
+    std::env::args().any(|arg| arg == name)
+}
+
+/// The number following a flag, if it was given one.
+fn value(name: &str) -> Option<f32> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|at| args.get(at + 1))
+        .and_then(|value| value.parse().ok())
+}
 
 fn main() {
     App::new()
@@ -56,8 +83,31 @@ fn main() {
             }),
             AvatarPlugin,
         ))
-        .init_resource::<Orbit>()
-        .init_resource::<Walk>()
+        .insert_resource(Orbit {
+            // A stride is almost entirely forward and back, so it is nearly
+            // invisible head-on: judged from the default camera this body's
+            // walk reads far stiffer than the software renderer's sheet, which
+            // includes a side view. That difference is the camera, not the
+            // body, and a second instrument that manufactures one is worse than
+            // no second instrument.
+            turn: value("--yaw").unwrap_or(0.0),
+            ..default()
+        })
+        .insert_resource(Walk {
+            always: flag("--walk"),
+            // So a captured frame can be placed in the cycle rather than
+            // wherever the twelfth frame happened to land. Judging a gait from
+            // one arbitrary phase is how a walk gets called stiff when it is
+            // only ever been seen at mid-stance.
+            cycle: value("--phase").unwrap_or(0.0),
+            ..default()
+        })
+        .insert_resource(Face {
+            live: !flag("--still"),
+            held: value("--closure"),
+            aimed: value("--gaze"),
+            ..default()
+        })
         .init_resource::<Shot>()
         .add_systems(Startup, (stage, body))
         .add_systems(
@@ -94,6 +144,49 @@ impl Default for Orbit {
 struct Walk {
     cycle: f32,
     walking: bool,
+    /// Set by `--walk`: walks without anyone holding a key down.
+    ///
+    /// Not a convenience either. `--shot` is the only way this instrument can be
+    /// looked through without a person at the keyboard, and until this existed
+    /// every captured frame was of a body standing still — so the gate's
+    /// "walk, idle and run judged in-app" could not be answered by the one tool
+    /// that could have answered it.
+    always: bool,
+}
+
+/// Blinking, and where the eyes are looking.
+///
+/// Both come from the engine. The point is not that this crate can blink; it is
+/// that the engine's own blink and gaze can be seen through a second renderer,
+/// which until now they could not — every judgement of either was made from a
+/// contact sheet of a body that was told to hold still.
+#[derive(Resource)]
+struct Face {
+    blink: Blink,
+    /// How long the body has been alive, for moving the gaze target.
+    elapsed: f32,
+    /// Whether to blink and track at all.
+    live: bool,
+    /// A closure to hold, from `--closure`, instead of blinking.
+    held: Option<f32>,
+    /// An angle to hold the gaze target at, from `--gaze`, instead of circling.
+    ///
+    /// Same reason as `held`: a target that moves with the clock cannot be
+    /// captured twice at the same place, so a still cannot show what the gaze
+    /// did without one.
+    aimed: Option<f32>,
+}
+
+impl Default for Face {
+    fn default() -> Self {
+        Self {
+            blink: Blink::seeded(7),
+            elapsed: 0.0,
+            live: true,
+            held: None,
+            aimed: None,
+        }
+    }
 }
 
 /// Marks the avatar's root.
@@ -211,17 +304,32 @@ fn walk(
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut state: ResMut<Walk>,
+    mut face: ResMut<Face>,
     mut commands: Commands,
     bodies: Query<(Entity, &AvatarBody)>,
 ) {
-    let walking = keys.pressed(KeyCode::KeyW);
-    if !walking && !state.walking {
+    let walking = state.always || keys.pressed(KeyCode::KeyW);
+    let tracking = face.live;
+    // A held closure is a reason to run even when nothing else moves. Without
+    // this, `--still --closure 1` early-returned and produced a frame
+    // byte-identical to `--closure 0` — a shut eye that was never asked for,
+    // which reads exactly like a blink that does not work.
+    if !walking && !state.walking && !tracking && face.held.is_none() && face.aimed.is_none() {
         return;
     }
     state.walking = walking;
     if walking {
         state.cycle = (state.cycle + time.delta_secs() * CADENCE).fract();
     }
+    face.elapsed += time.delta_secs();
+    // A blink is stochastic, so a single captured frame almost never catches
+    // one. `--closure` holds the lids at a chosen point instead, which is what
+    // makes the geometry path checkable from a still.
+    let closure = match (face.held, tracking) {
+        (Some(held), _) => held,
+        (None, true) => face.blink.advance(time.delta_secs()),
+        (None, false) => 0.0,
+    };
 
     for (entity, body) in &bodies {
         let rig = &body.avatar.rig;
@@ -239,7 +347,23 @@ fn walk(
                 &FootingConfig::default(),
             );
         }
+        if tracking || face.aimed.is_some() {
+            // A target that circles the body at head height, so the gaze is
+            // seen to follow something rather than to be aimed once. Applied
+            // after the gait, because looking somewhere is a turn added to
+            // whatever the spine is already doing.
+            let angle = face.aimed.unwrap_or(face.elapsed * GAZE_SPEED);
+            let head = rig
+                .in_zone(Zone::Head)
+                .first()
+                .map_or(1.5, |&joint| rig.joints[joint].position.y);
+            let target = Vec3::new(angle.sin() * 2.0, head, angle.cos() * 2.0);
+            gaze::look_at(rig, &mut pose, target, &GazeConfig::default());
+        }
         commands.entity(entity).insert(AvatarPose(pose));
+        if tracking || face.held.is_some() {
+            commands.entity(entity).insert(AvatarClosure(closure));
+        }
     }
 }
 

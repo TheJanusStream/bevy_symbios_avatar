@@ -85,6 +85,27 @@ pub struct AvatarJoints(pub Vec<Entity>);
 #[derive(Component, Debug, Clone)]
 pub struct AvatarPose(pub Pose);
 
+/// How shut a body's eyes are, `0` open and `1` shut.
+///
+/// Write a new one and the eyes follow, which is what makes a blink something
+/// this crate can show rather than only describe. A blink is geometry — a lid
+/// swings about the eye's pivot and no joint drives it — so following one means
+/// rebuilding two small meshes rather than writing a transform. That is what it
+/// costs today, and it is worth seeing: [`symbios_avatar`] issue #35 decided a
+/// bone-driven face, which turns this into a pose and this component into a
+/// driver for it.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct AvatarClosure(pub f32);
+
+/// One of the meshes a blink rebuilds, and its place in [`Avatar::eyes_at`].
+///
+/// The index is the contract. Globes and lids come back in a fixed order and
+/// are made of different stuff — drawn in one colour a shut eye is invisible —
+/// so they are separate meshes with separate materials, and each has to be
+/// given back the one it was built from.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AvatarEye(pub usize);
+
 /// Builds every body that has been asked for.
 ///
 /// Runs in `Update` rather than at startup so a body can be asked for at any
@@ -161,21 +182,32 @@ pub fn spawn_avatar(
     ));
 
     let atlas = images.add(atlas_image(&avatar.skin));
-    for drawn in avatar.drawn(closure) {
+    // The body's own meshes, then the eyes, rather than the one list
+    // `Avatar::drawn` hands over. The eyes are the half a blink rebuilds, and
+    // they have to be findable again to be given new geometry.
+    let eyes = avatar.eyes_at(closure);
+    let body_meshes = avatar.meshes.len();
+    for (index, drawn) in avatar.meshes.iter().chain(&eyes).enumerate() {
         let material = materials.add(material_for(drawn.kind, &atlas));
-        commands.spawn((
-            Mesh3d(meshes.add(mesh_of(&drawn))),
-            MeshMaterial3d(material),
-            // Ignored for a skinned mesh — see the module note — but a mesh
-            // entity still needs one to have a place in the hierarchy.
-            Transform::default(),
-            SkinnedMesh {
-                inverse_bindposes: inverse.clone(),
-                joints: joints.clone(),
-            },
-            ChildOf(root),
-        ));
+        let mesh = commands
+            .spawn((
+                Mesh3d(meshes.add(mesh_of(drawn))),
+                MeshMaterial3d(material),
+                // Ignored for a skinned mesh — see the module note — but a mesh
+                // entity still needs one to have a place in the hierarchy.
+                Transform::default(),
+                SkinnedMesh {
+                    inverse_bindposes: inverse.clone(),
+                    joints: joints.clone(),
+                },
+                ChildOf(root),
+            ))
+            .id();
+        if index >= body_meshes {
+            commands.entity(mesh).insert(AvatarEye(index - body_meshes));
+        }
     }
+    commands.entity(root).insert(AvatarClosure(closure));
 
     commands
         .entity(root)
@@ -231,6 +263,32 @@ pub fn apply_avatar_poses(
     }
 }
 
+/// Rebuilds the eyes of every body whose [`AvatarClosure`] changed.
+///
+/// A blink is the one thing a body does that a transform cannot express, so
+/// following one means handing back new geometry. Both meshes keep their vertex
+/// count across the whole range — a lid swings, it does not grow — so this
+/// rewrites the mesh in place rather than allocating a handle per frame, which
+/// a blink at any believable rate would otherwise do sixty times a second.
+pub fn apply_avatar_closures(
+    mut meshes: ResMut<Assets<Mesh>>,
+    bodies: Query<(&AvatarClosure, &AvatarBody, &Children), Changed<AvatarClosure>>,
+    eyes: Query<(&AvatarEye, &Mesh3d)>,
+) {
+    for (closure, body, children) in &bodies {
+        let rebuilt = body.avatar.eyes_at(closure.0);
+        for child in children {
+            let Ok((eye, handle)) = eyes.get(*child) else {
+                continue;
+            };
+            let (Some(drawn), Some(mesh)) = (rebuilt.get(eye.0), meshes.get_mut(&handle.0)) else {
+                continue;
+            };
+            *mesh = mesh_of(drawn);
+        }
+    }
+}
+
 /// How each kind of mesh is shaded.
 ///
 /// Deliberately plain. The point of this crate is to see what the engine built,
@@ -274,7 +332,12 @@ mod tests {
         .init_asset::<SkinnedMeshInverseBindposes>()
         .add_systems(
             Update,
-            (build_requested_avatars, apply_avatar_poses).chain(),
+            (
+                build_requested_avatars,
+                apply_avatar_poses,
+                apply_avatar_closures,
+            )
+                .chain(),
         );
         app
     }
@@ -433,6 +496,54 @@ mod tests {
         assert_eq!(
             textured, expected,
             "{textured} meshes sampled the skin atlas, against {expected} that are skin"
+        );
+    }
+
+    #[test]
+    fn shutting_the_eyes_changes_the_eye_geometry_and_nothing_else() {
+        // A blink is the one thing a body does that a transform cannot express,
+        // so this is the only way to know the lids moved at all. Asserted on
+        // the vertex positions rather than on the component, because writing
+        // AvatarClosure and having nothing happen is exactly the failure worth
+        // catching: the viewer's first version of this early-returned before
+        // the closure was ever applied and produced a frame byte-identical to
+        // the open-eyed one.
+        let mut app = app();
+        let root = spawn(&mut app);
+
+        let positions = |app: &App| -> Vec<Vec<[f32; 3]>> {
+            let meshes = app.world().resource::<Assets<Mesh>>();
+            let mut query = app.world().try_query::<(&AvatarEye, &Mesh3d)>().unwrap();
+            let mut found: Vec<(usize, Vec<[f32; 3]>)> = query
+                .iter(app.world())
+                .filter_map(|(eye, handle)| {
+                    let mesh = meshes.get(&handle.0)?;
+                    let values = mesh.attribute(Mesh::ATTRIBUTE_POSITION)?.as_float3()?;
+                    Some((eye.0, values.to_vec()))
+                })
+                .collect();
+            found.sort_by_key(|(index, _)| *index);
+            found.into_iter().map(|(_, values)| values).collect()
+        };
+
+        let open = positions(&app);
+        assert!(!open.is_empty(), "a body drew no eyes");
+
+        app.world_mut().entity_mut(root).insert(AvatarClosure(1.0));
+        app.update();
+        let shut = positions(&app);
+
+        assert_eq!(open.len(), shut.len(), "an eye mesh went missing");
+        assert!(
+            open.iter().zip(&shut).any(|(a, b)| a != b),
+            "shutting the eyes moved nothing"
+        );
+        // The globes do not move when a lid swings over them, so at least one
+        // of the two must be unchanged — if both moved, something is rebuilding
+        // more than the lids.
+        assert!(
+            open.iter().zip(&shut).any(|(a, b)| a == b),
+            "shutting the eyes rebuilt the globes as well as the lids"
         );
     }
 
