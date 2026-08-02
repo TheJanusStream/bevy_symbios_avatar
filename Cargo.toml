@@ -1,0 +1,30 @@
+[package]
+name = "bevy_symbios_avatar"
+version = "0.1.0"
+edition = "2024"
+authors = ["Janus"]
+description = "Bevy integration for parametric avatars on atproto."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/TheJanusStream/bevy_symbios_avatar"
+keywords = ["avatar", "procedural", "generative", "bevy", "atproto"]
+categories = ["game-development", "graphics"]
+
+[dependencies]
+bevy = "0.18"
+
+# A path dependency on purpose, and for as long as the engine is pre-release.
+# This crate exists to be a *second instrument* on the same body: if the two
+# ever read a different version of the engine they stop being comparable, which
+# is the one thing it is here to do.
+symbios-avatar = { path = "../symbios-avatar" }
+
+[lints.rust]
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+# A Bevy system takes its parameters by value; that is the contract, not an
+# oversight, and there is no way to write one that satisfies this lint.
+needless_pass_by_value = "allow"
