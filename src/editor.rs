@@ -215,7 +215,13 @@ pub struct RecordEditorPlugin;
 impl Plugin for RecordEditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<RecordEditor>()
-            .add_systems(Update, rebuild_edited_avatar)
+            // A rebuild destroys a body and makes another, which is exactly
+            // what [`crate::AvatarSystems::Build`] is for: nothing downstream
+            // should ever hold the entity this despawned.
+            .add_systems(
+                Update,
+                rebuild_edited_avatar.in_set(crate::AvatarSystems::Build),
+            )
             .add_systems(EguiPrimaryContextPass, record_editor_panel);
     }
 }

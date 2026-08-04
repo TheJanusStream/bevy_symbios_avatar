@@ -55,12 +55,19 @@
 //! so what is photographed is the same body, light and camera it always was.
 //! Turn the feature off with `default-features = false` and this crate is
 //! exactly what it was.
+//!
+//! [`animator`] is the second window, and holds to the same line: every number
+//! that decides how a body *moves* comes from [`symbios_avatar::anim`], and
+//! this crate ticks a cycle and writes the result onto components. Its driving
+//! half needs no GUI and is always compiled.
 
+pub mod animator;
 pub mod convert;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod spawn;
 
+pub use animator::{Animator, AnimatorPlugin, GaitKind};
 pub use convert::{atlas_image, mesh_of, polymesh_to_bevy};
 #[cfg(feature = "editor")]
 pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
@@ -70,24 +77,55 @@ pub use spawn::{
 
 use bevy::prelude::*;
 
+/// The order a frame does things to a body in.
+///
+/// Three phases, and the ordering between them is a correctness requirement
+/// rather than tidiness. A body can be **destroyed and rebuilt** mid-frame —
+/// that is what a re-roll is, and what every step of a slider in the record
+/// editor is — and anything that decided what to do with a body before that
+/// happened is holding an entity that no longer exists. Queuing a component
+/// onto one is not a subtle failure: Bevy panics on applying the command, and
+/// it did, the first time these two ran unordered.
+///
+/// Chained in [`Update`], which puts a command flush between each pair, so a
+/// system in a later set never sees a body an earlier set removed.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AvatarSystems {
+    /// Bodies come into existence and go out of it.
+    Build,
+    /// What each body should be doing is decided.
+    Animate,
+    /// The decision is written onto the entities.
+    Apply,
+}
+
 /// Draws avatars.
 ///
-/// Adds the system that turns a [`SpawnAvatar`] request into geometry. Bring
-/// your own camera and lights: this crate draws a body and holds no opinion
-/// about the scene it stands in.
+/// Adds the system that turns a [`SpawnAvatar`] request into geometry, and
+/// declares the [`AvatarSystems`] order every other plugin in this crate hangs
+/// off. Bring your own camera and lights: this crate draws a body and holds no
+/// opinion about the scene it stands in.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AvatarPlugin;
 
 impl Plugin for AvatarPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.configure_sets(
             Update,
             (
-                spawn::build_requested_avatars,
-                spawn::apply_avatar_poses,
-                spawn::apply_avatar_closures,
+                AvatarSystems::Build,
+                AvatarSystems::Animate,
+                AvatarSystems::Apply,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            spawn::build_requested_avatars.in_set(AvatarSystems::Build),
+        )
+        .add_systems(
+            Update,
+            (spawn::apply_avatar_poses, spawn::apply_avatar_closures).in_set(AvatarSystems::Apply),
         );
     }
 }

@@ -56,9 +56,19 @@ cargo run --release --example viewer -- --quadruped
 cargo run --release --example viewer -- --shot body.png
 ```
 
-Drag to turn, scroll to move in, `W` to walk, `Space` to re-roll, `B` to print
-what the body costs. Run it in release: building a body subdivides, binds,
-unwraps and paints a megapixel atlas.
+Right-drag orbits, middle-drag pans, the wheel zooms — the same bindings as the
+sibling application, so the hands that use one do not have to relearn the other.
+`W` walks, `Space` re-rolls, `H` hides the windows, `B` prints what the body
+costs. Run it in release: building a body subdivides, binds, unwraps and paints
+a megapixel atlas.
+
+Left-drag is deliberately not a camera control. It belongs to the GUI, and a
+camera that also answered to it would fight every slider on the screen. What is
+left to arbitrate is handled by a gate that blocks camera input while a window
+wants the pointer, with one exception: a **held** right or middle button always
+drives the camera, so an orbit never dies because the drag crossed a window.
+(The camera crate ships a `bevy_egui` feature that would do this; it is off on
+purpose — its gate is all-or-nothing and kills exactly that case.)
 
 ## The record editor
 
@@ -87,6 +97,22 @@ open and nothing moving it costs 0.1 ms a frame.
 
 `default-features = false` removes it, and with it the only dependency this
 crate has beyond Bevy and the engine.
+
+## The motion window
+
+The second window, for what a body is *doing* rather than what it is: walk on
+or off, which gait pattern, cadence, pace, arm swing, foot planting, blinking,
+a held lid closure, and where the gaze is aimed. All of it comes from the
+engine's own `anim` module — this crate ticks a cycle and writes the result onto
+components — so a walk that reads wrong here and right in the software renderer
+is this crate's fault, and one that reads wrong in both is the engine's.
+
+`scrub` is the control that earns the window: it holds the gait at one point in
+its cycle, which is the only way to actually look at a foot plant. A gait judged
+at whatever phase a capture landed on is a gait judged at one pose.
+
+Driving a body needs no GUI and is always compiled; only the window is behind
+the `editor` feature.
 
 ## Versions
 
