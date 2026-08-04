@@ -38,11 +38,32 @@
 //! down beside it, because a difference between the two instruments that is
 //! really a difference in those choices is exactly the false diagnosis this
 //! crate is meant to prevent.
+//!
+//! # The panel, and the rule it does not break
+//!
+//! [`editor`] adds a control for every axis an
+//! [`symbios_avatar::AvatarRecord`] can hold, so a body can be watched while an
+//! axis moves rather than judged from four fixed angles after the fact. That
+//! reads like a contradiction of the viewer's own rule — a body, a light and a
+//! camera, nothing else, because every feature that is not a body is another
+//! thing that could be blamed for what is on the screen — and it would be, but
+//! for two things it owes that rule and pays.
+//!
+//! It edits the **record and only the record**, so nothing tuned through it is
+//! a body no one else can rebuild. And it **never appears in a judgement
+//! image**: the panel hides on a key and does not draw at all under `--shot`,
+//! so what is photographed is the same body, light and camera it always was.
+//! Turn the feature off with `default-features = false` and this crate is
+//! exactly what it was.
 
 pub mod convert;
+#[cfg(feature = "editor")]
+pub mod editor;
 pub mod spawn;
 
 pub use convert::{atlas_image, mesh_of, polymesh_to_bevy};
+#[cfg(feature = "editor")]
+pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
 pub use spawn::{
     AvatarBody, AvatarClosure, AvatarEye, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar,
 };

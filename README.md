@@ -53,17 +53,47 @@ follow.
 cargo run --release --example viewer
 cargo run --release --example viewer -- --seed 7
 cargo run --release --example viewer -- --quadruped
+cargo run --release --example viewer -- --shot body.png
 ```
 
 Drag to turn, scroll to move in, `W` to walk, `Space` to re-roll, `B` to print
 what the body costs. Run it in release: building a body subdivides, binds,
 unwraps and paints a megapixel atlas.
 
+## The record editor
+
+A panel holding every axis an `AvatarRecord` can carry — about forty of them,
+across archetype, skin, eyes, face, hair, outfit, name, seed and the per-category
+locks a re-roll honours. Drag one and the body follows.
+
+It is not a debug panel, and two rules are what keep it from becoming one.
+
+**The record, and only the record.** No slider touches an engine constant. A
+body tuned against something a record cannot hold could not be saved, shared or
+rebuilt by anyone else, and an afternoon spent perfecting one would produce
+nothing anybody could keep. `copy` puts the record on the clipboard as JSON and
+`load` reads one back, so a body somebody was fiddling with becomes a body
+anybody can rebuild. Every value is quantised the way the wire format is —
+scaled integers in thousandths, no floats — so what a slider shows is what a
+record would hold.
+
+**A judgement image is never a screenshot of a UI.** `H` hides the panel, `P`
+hides it for the frame it captures, and `--shot` never opens it at all.
+
+A rebuild costs 68 ms at a draft atlas and 277 at the full one, so an axis
+being dragged rebuilds at the draft size — about fourteen frames a second — and
+the full-size build lands a quarter of a second after it stops. With the panel
+open and nothing moving it costs 0.1 ms a frame.
+
+`default-features = false` removes it, and with it the only dependency this
+crate has beyond Bevy and the engine.
+
 ## Versions
 
-Bevy 0.18. `symbios-avatar` is a path dependency for as long as the engine is
-pre-release — if the two instruments ever read different versions of it they
-stop being comparable, which is the one thing this crate is here to do.
+Bevy 0.18, `bevy_egui` 0.39 — the pair known to work together, rather than
+whatever is latest. `symbios-avatar` is a path dependency for as long as the
+engine is pre-release: if the two instruments ever read different versions of it
+they stop being comparable, which is the one thing this crate is here to do.
 
 ## Licence
 

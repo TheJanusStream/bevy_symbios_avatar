@@ -1,9 +1,11 @@
 //! The second instrument.
 //!
-//! A body, a light, and a camera you can walk round it with. Nothing else, on
-//! purpose: this is here so a body can be judged by eye through a real GPU, and
-//! every feature that is not a body is another thing that could be blamed for
-//! what is on the screen.
+//! A body, a light, and a camera you can walk round it with — and, since #87, a
+//! panel holding every axis a record can carry. The rule this started with
+//! stands: every feature that is not a body is another thing that could be
+//! blamed for what is on the screen, so a judgement image never contains one.
+//! The panel hides on `H` and does not draw at all under `--shot`. What it buys
+//! is the thing four fixed angles cannot give — an axis you can watch move.
 //!
 //! ```text
 //! cargo run --release --example viewer
@@ -12,6 +14,7 @@
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release --example viewer -- --walk --shot walking.png
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
+//! cargo run --release --example viewer -- --bare            # no panel at all
 //! ```
 //!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints
@@ -20,6 +23,12 @@
 //! What to do with it:
 //!
 //! - Drag with the left mouse button to turn the body, scroll to move in.
+//! - The panel on the left edits the record. Drag an axis and the body follows
+//!   at a draft atlas, about fourteen frames a second; a quarter of a second
+//!   after it stops the full-size build lands. `copy` puts the record on the
+//!   clipboard as JSON and `load` reads one back, which is how a body somebody
+//!   was fiddling with becomes a body anybody can rebuild.
+//! - `H` hides the panel, and `--shot` never shows it.
 //! - `W` walks, or `--walk` walks without holding anything. The gait comes from
 //!   the engine, so a walk that reads wrong here and right in the software
 //!   renderer is this crate's fault, and one that reads wrong in both is the
@@ -28,13 +37,16 @@
 //!   the engine. `--still` turns that off. A blink is geometry rather than a
 //!   pose — nothing rigs a lid — so following one rebuilds two small meshes a
 //!   frame, which is a fair reading of what it costs today.
-//! - `Space` re-rolls the seed and rebuilds, `P` saves a picture.
+//! - `Space` re-rolls the seed and rebuilds, honouring the panel's locks.
+//! - `P` saves a picture, with the panel hidden for the frame it captures.
 //! - `B` prints what the body costs, against the budget it is judged by.
 
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_symbios_avatar::{AvatarBody, AvatarClosure, AvatarPlugin, AvatarPose, SpawnAvatar};
+use bevy_egui::EguiPlugin;
+use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
+use bevy_symbios_avatar::{AvatarBody, AvatarClosure, AvatarPlugin, AvatarPose};
 use symbios_avatar::anim::{GazeConfig, gait, gaze, plant_feet_of};
 use symbios_avatar::{
     Archetype, AvatarRecord, Blink, FootingConfig, Gait, Ground, Pose, QuadrupedParams, Stride,
@@ -82,7 +94,10 @@ fn main() {
                 ..default()
             }),
             AvatarPlugin,
+            EguiPlugin::default(),
+            RecordEditorPlugin,
         ))
+        .insert_resource(starting_editor())
         .insert_resource(Orbit {
             // A stride is almost entirely forward and back, so it is nearly
             // invisible head-on: judged from the default camera this body's
@@ -109,10 +124,10 @@ fn main() {
             ..default()
         })
         .init_resource::<Shot>()
-        .add_systems(Startup, (stage, body))
+        .add_systems(Startup, stage)
         .add_systems(
             Update,
-            (orbit, walk, reroll, report, shoot)
+            (orbit, walk, reroll, report, hide_panel, shoot)
                 .after(bevy_symbios_avatar::spawn::apply_avatar_poses),
         )
         .run();
@@ -126,6 +141,8 @@ struct Orbit {
     distance: f32,
     /// What it is looking at, set once a body exists to measure.
     centre: Vec3,
+    /// Whether a body has already set the distance.
+    framed: bool,
 }
 
 impl Default for Orbit {
@@ -135,6 +152,7 @@ impl Default for Orbit {
             pitch: 0.12,
             distance: 3.0,
             centre: Vec3::Y,
+            framed: false,
         }
     }
 }
@@ -189,10 +207,6 @@ impl Default for Face {
     }
 }
 
-/// Marks the avatar's root.
-#[derive(Component)]
-struct Subject;
-
 /// A ground plane, a key light and a camera.
 ///
 /// A figure in a void has nothing to be lit against and nothing to cast a
@@ -238,8 +252,12 @@ fn stage(
     ));
 }
 
-/// Asks for the body named on the command line.
-fn body(mut commands: Commands) {
+/// The record named on the command line, in an editor holding it.
+///
+/// The editor spawns the body itself, so the record the panel shows and the
+/// body on screen are the same thing from the first frame. There is no second
+/// place a record can come from and therefore no way for the two to disagree.
+fn starting_editor() -> RecordEditor {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let archetype = if args.iter().any(|arg| arg == "--quadruped") {
         Archetype::Quadruped(QuadrupedParams::default())
@@ -255,7 +273,12 @@ fn body(mut commands: Commands) {
     {
         record.reroll(seed);
     }
-    commands.spawn((Subject, SpawnAvatar::from(record), Transform::default()));
+    let mut editor = RecordEditor::new(record);
+    // A captured frame must be a body, a light and a camera and nothing else,
+    // so under `--shot` the panel never opens rather than being hidden at the
+    // moment of capture. `--bare` is the same promise for a live session.
+    editor.open = !flag("--bare") && !flag("--shot");
+    editor
 }
 
 /// Turns the camera round the body and frames it on what was actually built.
@@ -269,10 +292,20 @@ fn orbit(
 ) {
     // Framed on the body that exists rather than on a guess: a quadruped is
     // longer than it is tall, and a frame sized by height crops the ends off.
+    //
+    // The centre follows every rebuild and the distance only the first, which
+    // is not fussiness. A body is rebuilt on every step of a slider now, so a
+    // distance that re-derived itself would undo the viewer's zoom several
+    // times a second while an axis was being dragged — and a centre that did
+    // not follow would let a body walk out of frame as its height was taken
+    // across its range, which is exactly the thing the panel exists to watch.
     for body in &bodies {
         let (lo, hi) = body.avatar.parts.body.bounds();
         orbit.centre = (lo + hi) * 0.5;
-        orbit.distance = (hi - lo).max_element().max(0.2) * START_BACK;
+        if !orbit.framed {
+            orbit.distance = (hi - lo).max_element().max(0.2) * START_BACK;
+            orbit.framed = true;
+        }
     }
 
     if buttons.pressed(MouseButton::Left) {
@@ -367,38 +400,36 @@ fn walk(
     }
 }
 
-/// Rebuilds the body on a fresh seed.
-fn reroll(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut commands: Commands,
-    subjects: Query<Entity, With<Subject>>,
-) {
+/// Rebuilds the body on the next seed, honouring the panel's locks.
+///
+/// The seed goes up by one rather than coming off the clock, and that is a
+/// change from what this key used to do. A clock seed is a body nobody can go
+/// back to: the number that produced it is discarded the moment the next press
+/// happens, so "the one three re-rolls ago had the jaw I meant" is unanswerable.
+/// The panel has somewhere to put the number now, and shows it.
+fn reroll(keys: Res<ButtonInput<KeyCode>>, mut editor: ResMut<RecordEditor>) {
     if !keys.just_pressed(KeyCode::Space) {
         return;
     }
-    for entity in &subjects {
-        // Despawned and asked for again rather than patched: a re-roll changes
-        // the skeleton, so every mesh, chart and weight is a different one.
-        commands.entity(entity).despawn();
+    let next = editor.record.seed.wrapping_add(1);
+    editor.reroll(next);
+}
+
+/// Hides and shows the panel.
+///
+/// Guarded on egui wanting the keyboard, or typing an `h` into the name field
+/// would make the panel vanish mid-word.
+fn hide_panel(
+    mut contexts: bevy_egui::EguiContexts,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut editor: ResMut<RecordEditor>,
+) {
+    let typing = contexts
+        .ctx_mut()
+        .is_ok_and(|ctx| ctx.wants_keyboard_input());
+    if !typing && keys.just_pressed(KeyCode::KeyH) {
+        editor.open = !editor.open;
     }
-    let mut record = AvatarRecord::new("Viewed", Archetype::default());
-    // A seed from the frame count would be reproducible; one from the clock is
-    // what a re-roll button is for.
-    record.reroll(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            // The low half only, which is the part of a nanosecond clock that
-            // differs between two presses. A seed is an arbitrary label, so
-            // discarding the high bits costs nothing.
-            .map_or(1, |since| {
-                i64::from_ne_bytes(
-                    u64::try_from(since.as_nanos() & u128::from(u64::MAX))
-                        .unwrap_or_default()
-                        .to_ne_bytes(),
-                )
-            }),
-    );
-    commands.spawn((Subject, SpawnAvatar::from(record), Transform::default()));
 }
 
 /// Whether a screenshot has been asked for, and how long to wait for it.
@@ -411,7 +442,21 @@ fn reroll(
 struct Shot {
     frames: u32,
     taken: bool,
+    /// A picture `P` asked for, held until the panel is off the screen.
+    ///
+    /// Not a nicety. A judgement image with a UI in it is an image nobody can
+    /// compare against the software renderer's sheet, and hiding the panel in
+    /// the same frame as the capture does not work — egui has already drawn by
+    /// the time a key is read, so the picture would still have it in.
+    pending: Option<(String, u32)>,
+    /// Frames left before a hidden panel goes back up.
+    reopen: u32,
+    /// Whether the panel was open before a pending shot hid it.
+    restore: bool,
 }
+
+/// How many frames to let the panel disappear in before capturing.
+const CLEAR: u32 = 2;
 
 /// Saves a picture and quits, for `--shot <path>`.
 ///
@@ -421,6 +466,7 @@ struct Shot {
 fn shoot(
     mut commands: Commands,
     mut state: ResMut<Shot>,
+    mut editor: ResMut<RecordEditor>,
     keys: Res<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -430,10 +476,30 @@ fn shoot(
         .position(|arg| arg == "--shot")
         .and_then(|at| args.get(at + 1));
 
-    if keys.just_pressed(KeyCode::KeyP) {
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk("viewer.png"));
+    if keys.just_pressed(KeyCode::KeyP) && state.pending.is_none() && state.reopen == 0 {
+        state.restore = editor.open;
+        editor.open = false;
+        state.pending = Some((String::from("viewer.png"), CLEAR));
+    }
+    // Put back a frame *after* the capture rather than in the same one. Which
+    // side of `Update` the egui pass runs is not this example's to know, and
+    // guessing wrong puts the panel back into the picture it was hidden for.
+    if state.reopen > 0 {
+        state.reopen -= 1;
+        if state.reopen == 0 {
+            editor.open = state.restore;
+        }
+        return;
+    }
+    if let Some((path, wait)) = state.pending.take() {
+        if wait > 0 {
+            state.pending = Some((path, wait - 1));
+        } else {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+            state.reopen = CLEAR;
+        }
         return;
     }
 
