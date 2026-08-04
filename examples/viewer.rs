@@ -39,6 +39,9 @@
 //!   is the engine's. `scrub` holds the gait at one phase, which is the only
 //!   way to look at a foot plant.
 //! - `H` hides both windows, and `--shot` never shows them.
+//! - `F` frames the camera on the body again. Editing a record never moves the
+//!   camera — a view that shifts while you are changing something else is a view
+//!   you cannot judge from — so re-framing is a key rather than a side effect.
 //! - `W` walks while it is held, as it always did.
 //! - `Space` re-rolls the seed and rebuilds, honouring the panel's locks.
 //! - `P` saves a picture, with the windows hidden for the frame it captures.
@@ -109,10 +112,12 @@ fn main() {
 }
 
 /// Marks the camera as one a body should be framed in.
-#[derive(Component)]
+#[derive(Component, Default)]
 struct Framed {
-    /// Whether a body has already set the distance.
-    sized: bool,
+    /// Whether a body has framed this camera already.
+    done: bool,
+    /// Whether somebody has asked for it to be framed again.
+    asked: bool,
 }
 
 /// A ground plane, a key light and a camera.
@@ -144,7 +149,7 @@ fn stage(
     ));
     commands.spawn((
         Camera3d::default(),
-        Framed { sized: false },
+        Framed::default(),
         PanOrbitCamera {
             // The sibling application's bindings, and the reason for them is
             // not only habit. Left-drag is what a GUI uses, so a camera bound
@@ -246,29 +251,52 @@ fn windows_wanted() -> bool {
     !flag("--bare") && !flag("--shot")
 }
 
-/// Frames the camera on the body that exists.
+/// Frames the camera on the body, once, and again when `F` asks.
 ///
-/// A quadruped is longer than it is tall, and a frame sized by height crops the
-/// ends off. The focus follows every rebuild and the distance only the first,
-/// which is not fussiness: a body is rebuilt on every step of a slider now, so
-/// a distance that re-derived itself would undo the viewer's zoom several times
-/// a second while an axis was being dragged — and a focus that did not follow
-/// would let a body walk out of frame as its height was taken across its range,
-/// which is exactly the thing the record panel exists to watch.
+/// A quadruped is longer than it is tall, so the frame is sized on the body
+/// that exists rather than on a guess about height.
+///
+/// **The camera is never moved by an edit**, and getting that wrong is what
+/// this system was written twice for. A body is destroyed and rebuilt on every
+/// step of a slider, so anything keyed on a new body being there is keyed on
+/// the record being edited. The first version re-centred on every rebuild, on
+/// the argument that a body should not walk out of frame as its height is taken
+/// across its range — which sounds reasonable and is wrong in the hand: it
+/// throws away the viewer's pan several times a second while an axis is being
+/// dragged, and a view that moves while you are changing something else is a
+/// view you cannot judge from. Nothing about a record's contents is the
+/// camera's business.
+///
+/// So it frames the first body and then leaves the camera to whoever is holding
+/// the mouse. `F` re-frames on demand, which is the whole of what the automatic
+/// version was for and costs a keypress at the moment somebody actually wants
+/// it.
 fn frame_on_body(
-    bodies: Query<&AvatarBody, Added<AvatarBody>>,
+    bodies: Query<&AvatarBody>,
     mut cameras: Query<(&mut PanOrbitCamera, &mut Framed)>,
 ) {
-    for body in &bodies {
-        let (lo, hi) = body.avatar.parts.body.bounds();
-        for (mut camera, mut framed) in &mut cameras {
-            camera.target_focus = (lo + hi) * 0.5;
-            if !framed.sized {
-                camera.target_radius = (hi - lo).max_element().max(0.2) * START_BACK;
-                camera.radius = Some(camera.target_radius);
-                framed.sized = true;
-            }
+    let Some(body) = bodies.iter().next() else {
+        return;
+    };
+    let (lo, hi) = body.avatar.parts.body.bounds();
+    for (mut camera, mut framed) in &mut cameras {
+        if framed.done && !framed.asked {
+            continue;
         }
+        // Both halves of each pair AND `force_update`, which is the crate's own
+        // door for writing its state directly. Without it the camera never
+        // moves at all: it decides there is work to do by comparing each value
+        // against its target, so snapping the two together is indistinguishable
+        // from having already arrived — the transform stays wherever
+        // initialisation left it, and the first version of this fix put the
+        // camera on the floor between the body's feet.
+        camera.target_focus = (lo + hi) * 0.5;
+        camera.focus = camera.target_focus;
+        camera.target_radius = (hi - lo).max_element().max(0.2) * START_BACK;
+        camera.radius = Some(camera.target_radius);
+        camera.force_update = true;
+        framed.done = true;
+        framed.asked = false;
     }
 }
 
@@ -318,6 +346,9 @@ fn gate_camera_on_gui(
 /// panel walks the body on the `w`, hides both windows on the `h`, and re-rolls
 /// the seed on the space bar.
 ///
+/// - `F` frames the camera on the body again. The only thing that moves the
+///   camera other than a hand on the mouse, and it takes a keypress precisely so
+///   that editing a record never does.
 /// - `W` walks while it is held. Kept alongside the motion window's own toggle
 ///   because a key is faster than reaching for one, and read on press and
 ///   release rather than as "walking = pressed" — the latter would overwrite
@@ -339,10 +370,16 @@ fn shortcuts(
     mut editor: ResMut<RecordEditor>,
     mut animator: ResMut<Animator>,
     mut shot: ResMut<Shot>,
+    mut framed: Query<&mut Framed>,
     bodies: Query<&AvatarBody>,
 ) {
     if typing(&mut contexts) {
         return;
+    }
+    if keys.just_pressed(KeyCode::KeyF) {
+        for mut framed in &mut framed {
+            framed.asked = true;
+        }
     }
     if keys.just_pressed(KeyCode::KeyW) {
         animator.walking = true;

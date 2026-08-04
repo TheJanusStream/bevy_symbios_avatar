@@ -58,9 +58,15 @@ cargo run --release --example viewer -- --shot body.png
 
 Right-drag orbits, middle-drag pans, the wheel zooms — the same bindings as the
 sibling application, so the hands that use one do not have to relearn the other.
-`W` walks, `Space` re-rolls, `H` hides the windows, `B` prints what the body
-costs. Run it in release: building a body subdivides, binds, unwraps and paints
-a megapixel atlas.
+`W` walks, `Space` re-rolls, `H` hides the windows, `F` frames the camera on the
+body again, `B` prints what the body costs. Run it in release: building a body
+subdivides, binds, unwraps and paints a megapixel atlas.
+
+Editing a record never moves the camera. A body is destroyed and rebuilt on
+every step of a slider, so anything that re-framed on a new body would be
+re-framing on every edit — throwing away the pan and zoom several times a second
+while an axis is being dragged. `F` is the re-frame, and it takes a keypress on
+purpose.
 
 Left-drag is deliberately not a camera control. It belongs to the GUI, and a
 camera that also answered to it would fight every slider on the screen. What is
