@@ -25,8 +25,10 @@
 //! has a rig of its own — see [`crate::spawn::AvatarClosure`].
 
 use bevy::prelude::*;
-use symbios_avatar::anim::{GazeConfig, gait, gaze, plant_feet_of};
-use symbios_avatar::{Blink, FootingConfig, Gait, Ground, Pose, Stride, Zone};
+use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};
+use symbios_avatar::{
+    Blink, ClipLibrary, FootingConfig, Gait, Ground, Inertializer, Pose, Stride, Zone,
+};
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
 
@@ -85,6 +87,55 @@ impl GaitKind {
     }
 }
 
+/// The baked clips a body can be asked to play.
+///
+/// A resource rather than a field on [`Animator`], because it is data and that
+/// is a control surface. It also has to be **replaceable**: the artifact is
+/// embedded only when `symbios-avatar/builtin-clips` is on, and a consumer that
+/// fetches `clips.bin` over the network instead — which is what a wasm build
+/// should do rather than carry 200 KiB it may never play — inserts its own.
+///
+/// Empty is a legitimate state and not an error. With no clips the motion window
+/// offers the procedural gait and says so, which is exactly what this crate did
+/// before there were any.
+#[derive(Resource, Default)]
+pub struct Clips(pub ClipLibrary);
+
+impl Clips {
+    /// The clips this build carries, or none if it carries none.
+    #[must_use]
+    pub fn builtin() -> Self {
+        #[cfg(feature = "builtin-clips")]
+        {
+            // A parse failure here would mean the embedded artifact and this
+            // build's reader disagree, which `symbios-avatar`'s own tests make a
+            // test failure. Falling back to empty rather than panicking keeps
+            // that from taking a viewer down.
+            Self(ClipLibrary::builtin().unwrap_or_default())
+        }
+        #[cfg(not(feature = "builtin-clips"))]
+        {
+            Self::default()
+        }
+    }
+}
+
+/// A transition in progress on one body, and the two frames it came from.
+///
+/// Per body rather than a resource, because a blend is state about a *body* and
+/// not about what the viewer is asking for. The two poses are the last two
+/// frames of whatever was playing: [`Inertializer::start`] takes their
+/// difference as the velocity to carry through, and without them a switch snaps.
+#[derive(Component)]
+pub struct Blending {
+    /// The transition, once one has been started.
+    running: Option<Inertializer>,
+    /// The frame before last.
+    previous: Pose,
+    /// Last frame.
+    current: Pose,
+}
+
 /// What every body in the world is doing.
 ///
 /// One resource rather than a component per body: this drives a viewer, where
@@ -130,10 +181,53 @@ pub struct Animator {
     pub gaze_angle: f32,
     /// Furthest the whole chain may turn from facing forward, in radians.
     pub gaze_limit: f32,
+    /// Which baked clip is playing, as an index into [`Clips`].
+    ///
+    /// `None` is the procedural gait alone, which is what this crate did before
+    /// there were clips and is one half of the comparison #141 exists to make.
+    pub clip: Option<usize>,
+    /// Whether the clip plays **over** the gait rather than instead of it.
+    ///
+    /// The third answer to the locomotion question, and the one that cannot be
+    /// seen without a control for it: [`symbios_avatar::PoseClip::apply`] writes
+    /// only the joints its own tracks name and leaves the rest alone, so a
+    /// gesture baked from the upper body can ride a procedural walk. Legs from
+    /// the engine, arms from the library.
+    pub layered: bool,
+    /// Whether a clip's horizontal root travel is taken out.
+    ///
+    /// **On by default, and the comparison is not honest without it.** A baked
+    /// `Walk` carries its root about a stride forward and a looping clip wraps,
+    /// so played as baked the body walks off and snaps back once a cycle while
+    /// the procedural gait stays where it is. Zeroing `x` and `z` puts them on
+    /// the same footing; the vertical bob is **kept**, because that is the
+    /// weight the procedural gait has to be judged against and throwing it away
+    /// would rig the comparison.
+    pub in_place: bool,
+    /// How steeply the ground rises toward `+x`, as a rise over run.
+    ///
+    /// The viewer's floor tilts with it. A clip's ankle angles are fixed at bake
+    /// time and a slope changes what they should be, so this is where an
+    /// imported walk is asked the question a procedural one answers by solving.
+    pub slope: f32,
+    /// How long a transition between sources takes, in seconds. Zero snaps.
+    pub blend: f32,
+    /// How far the footing solve had to move the feet on the last frame, in
+    /// metres.
+    ///
+    /// A readout rather than a control, and the number the locomotion question
+    /// should be settled on rather than on taste: a pose whose feet already land
+    /// where the ground is needs no correction, and one whose do not is being
+    /// held together by the solve.
+    pub lift: f32,
+    /// How many contacts the solve could not reach on the last frame.
+    pub straining: usize,
     /// The engine's blink timer.
     blink: Blink,
     /// How long the body has been alive, for circling the gaze target.
     elapsed: f32,
+    /// What was playing last frame, so a change can start a blend.
+    was: (Option<usize>, bool, bool),
 }
 
 impl Default for Animator {
@@ -156,8 +250,18 @@ impl Default for Animator {
             gaze_speed: 0.6,
             gaze_angle: 0.0,
             gaze_limit: GazeConfig::default().limit,
+            clip: None,
+            layered: false,
+            in_place: true,
+            slope: 0.0,
+            // Short enough to be a transition rather than a dissolve, long
+            // enough to see. The number worth arguing about is on #141.
+            blend: 0.15,
+            lift: 0.0,
+            straining: 0,
             blink: Blink::seeded(7),
             elapsed: 0.0,
+            was: (None, false, false),
         }
     }
 }
@@ -169,7 +273,16 @@ impl Animator {
     /// the viewer stays honest about what a body that is doing nothing costs.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        !self.walking && !self.blinking && !self.tracking
+        !self.walking && !self.blinking && !self.tracking && self.clip.is_none()
+    }
+
+    /// What is driving the body, as a value that changes when the source does.
+    ///
+    /// A blend has to start on the frame the answer changes, and comparing this
+    /// against last frame's is how that moment is found. Scrubbing and cadence
+    /// are deliberately not in it: moving a phase slider is not a transition.
+    fn source(&self) -> (Option<usize>, bool, bool) {
+        (self.clip, self.layered, self.walking)
     }
 }
 
@@ -183,13 +296,15 @@ pub struct AnimatorPlugin;
 
 impl Plugin for AnimatorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<Animator>().add_systems(
-            Update,
-            // After bodies are built and destroyed, before poses are applied.
-            // A body rebuilt this frame must be posed this frame, and a body
-            // destroyed this frame must not be posed at all.
-            drive_avatar_animation.in_set(crate::AvatarSystems::Animate),
-        );
+        app.init_resource::<Animator>()
+            .insert_resource(Clips::builtin())
+            .add_systems(
+                Update,
+                // After bodies are built and destroyed, before poses are applied.
+                // A body rebuilt this frame must be posed this frame, and a body
+                // destroyed this frame must not be posed at all.
+                drive_avatar_animation.in_set(crate::AvatarSystems::Animate),
+            );
         #[cfg(feature = "editor")]
         app.add_systems(bevy_egui::EguiPrimaryContextPass, animator_panel);
     }
@@ -216,8 +331,9 @@ impl Plugin for AnimatorPlugin {
 pub fn drive_avatar_animation(
     mut commands: Commands,
     time: Res<Time>,
+    clips: Res<Clips>,
     mut animator: ResMut<Animator>,
-    bodies: Query<(Entity, Ref<AvatarBody>)>,
+    mut bodies: Query<(Entity, Ref<AvatarBody>, Option<&mut Blending>)>,
 ) {
     let asked = animator.is_changed();
     if animator.is_idle() && !asked {
@@ -227,7 +343,16 @@ pub fn drive_avatar_animation(
     let delta = time.delta_secs();
     // Every write below is guarded on the thing it advances actually running,
     // which is what keeps the change-detection signal above from latching on.
-    if animator.walking && !animator.scrub {
+    //
+    // **One cursor for both sources, deliberately.** `anim::Play` is the
+    // engine's own cursor and this window already has one — the phase slider,
+    // which exists so a gait can be held still at one point in its cycle. Two
+    // cursors would disagree the first time somebody scrubbed, and the single
+    // thing an A/B most needs is that the gait and the clip are at the same
+    // point when they are compared. So `cycle` runs both, and a clip's time is
+    // `cycle * duration`.
+    let running = animator.walking || animator.clip.is_some();
+    if running && !animator.scrub {
         animator.cycle = (animator.cycle + delta * animator.cadence).fract();
     }
     if animator.tracking {
@@ -242,25 +367,62 @@ pub fn drive_avatar_animation(
         animator.closure
     };
 
-    for (entity, body) in &bodies {
+    let clip = animator
+        .clip
+        .and_then(|which| clips.0.clips.get(which))
+        .filter(|clip| clip.duration() > 0.0);
+    // A clip replaces the gait unless it is asked to layer over it. Layering is
+    // the interesting case and is why this is not simply `walking && clip.is_none()`.
+    let gaiting = animator.walking && (clip.is_none() || animator.layered);
+    let source = animator.source();
+    let switched = source != animator.was;
+    animator.was = source;
+
+    for (entity, body, blending) in &mut bodies {
         let rig = &body.avatar.rig;
         let mut pose = Pose::rest(rig);
-        if animator.walking {
+        let mut stance = Vec::new();
+        if gaiting {
             let gait = animator.gait.of(rig);
             let stride = Stride::for_body(rig, animator.pace);
             let steps = gait::step(rig, &mut pose, &gait, &stride, animator.cycle);
             if animator.swing_arms {
                 gait::swing_arms(rig, &mut pose, &gait, animator.cycle);
             }
-            if animator.footing {
-                plant_feet_of(
-                    rig,
-                    &mut pose,
-                    &steps.stance,
-                    |foot| Some(Ground::level(Vec3::new(foot.x, 0.0, foot.z))),
-                    &FootingConfig::default(),
-                );
+            stance = steps.stance;
+        }
+        if let Some(clip) = clip {
+            // After the gait, because `PoseClip::apply` writes only the joints
+            // its own tracks name — which is what lets an imported gesture ride
+            // a procedural walk.
+            clip.apply(rig, &mut pose, animator.cycle * clip.duration());
+            if animator.in_place {
+                pose.translation.x = 0.0;
+                pose.translation.z = 0.0;
             }
+            // A clip does not say which feet are carrying the body, so the clip
+            // is asked instead. A gait does say, and its answer is better.
+            //
+            // `contacts_during` and not `contacts_in`: a walking foot lifts
+            // about 150 mm, so for much of its swing the height test alone calls
+            // it planted, and planting a swinging foot drags it to the floor and
+            // ruins the walk. It reads speed off the TRAVELLING clip, which is
+            // why it takes the time rather than the pose — the pose above has
+            // had its root travel taken out and a planted foot in it is sliding
+            // backwards at walking pace.
+            if stance.is_empty() {
+                stance = contacts_during(rig, clip, animator.cycle * clip.duration());
+            }
+        }
+
+        if animator.footing && !stance.is_empty() {
+            let (lift, straining) = solve_footing(rig, &mut pose, &stance, animator.slope);
+            // Through `bypass_change_detection`, because these are a readout and
+            // not an instruction: writing them through the `ResMut` would mark
+            // the resource changed every frame and defeat the still-body rule
+            // this whole system is built on.
+            animator.bypass_change_detection().lift = lift;
+            animator.bypass_change_detection().straining = straining;
         }
         // A target at head height, applied after the gait, because looking
         // somewhere is a turn added to whatever the spine is already doing.
@@ -283,7 +445,22 @@ pub fn drive_avatar_animation(
                 ..GazeConfig::default()
             },
         );
-        commands.entity(entity).insert(AvatarPose(pose));
+        // The blend, last, so it corrects whatever the sources produced rather
+        // than being overwritten by them.
+        let posed = if let Some(mut blending) = blending {
+            blend_into(&mut blending, pose, switched, animator.blend, delta)
+        } else {
+            // A body seen for the first time has no two frames to take a
+            // velocity from, so it starts settled rather than blending out of
+            // nothing.
+            commands.entity(entity).insert(Blending {
+                running: None,
+                previous: pose.clone(),
+                current: pose.clone(),
+            });
+            pose
+        };
+        commands.entity(entity).insert(AvatarPose(posed));
         // A closure is geometry, not a transform: writing one rebuilds two
         // meshes. That is the honest cost of a blink and nothing else should
         // pay it, so a held closure is written when it is asked for and when a
@@ -296,13 +473,111 @@ pub fn drive_avatar_animation(
     }
 }
 
+/// Puts the pose's feet on the ground and reports what that took.
+///
+/// The lift is measured **per joint, each against itself**, before and after —
+/// not as the movement of "the lowest joint of each foot", which changes
+/// identity when an ankle turns and would report a heel against a toe.
+///
+/// A readout rather than a diagnostic: a pose whose feet already land where the
+/// ground is needs no correction, and one whose do not is being held together by
+/// this. That difference is the locomotion question stated as a number rather
+/// than as a matter of taste.
+fn solve_footing(
+    rig: &symbios_avatar::Rig,
+    pose: &mut Pose,
+    stance: &[symbios_avatar::Limb],
+    grade: f32,
+) -> (f32, usize) {
+    let ground = |foot: Vec3| Some(Ground::level(Vec3::new(foot.x, foot.x * grade, foot.z)));
+    let before = pose.forward(rig).positions;
+    let footing = plant_feet_of(rig, pose, stance, ground, &FootingConfig::default());
+    let after = pose.forward(rig).positions;
+    let lift = stance
+        .iter()
+        .flat_map(|&limb| rig.extremity_joints(limb))
+        .fold(0.0f32, |worst, joint| {
+            worst.max(before[joint].distance(after[joint]))
+        });
+    (lift, footing.straining.len())
+}
+
+/// Carries one body's transition forward, and remembers this frame.
+///
+/// A transition starts on the frame the source changes and decays from there;
+/// [`Inertializer::apply`] on a finished one returns the target unchanged, so a
+/// settled body costs a clone and nothing else.
+fn blend_into(
+    blending: &mut Blending,
+    target: Pose,
+    switched: bool,
+    duration: f32,
+    delta: f32,
+) -> Pose {
+    if switched && duration > 0.0 {
+        let (previous, current) = (blending.previous.clone(), blending.current.clone());
+        blending.running = Some(Inertializer::start(
+            &previous, &current, &target, delta, duration,
+        ));
+    }
+    let posed = match &mut blending.running {
+        Some(running) if !running.finished() => {
+            running.advance(delta);
+            running.apply(&target)
+        }
+        _ => {
+            blending.running = None;
+            target
+        }
+    };
+    blending.previous = std::mem::replace(&mut blending.current, posed.clone());
+    posed
+}
+
+/// The clip picker and the two switches that go with it.
+///
+/// `none` is the procedural gait alone, and it is the first entry rather than a
+/// checkbox somewhere else because it is one of the things being chosen between
+/// and not the absence of a choice.
+#[cfg(feature = "editor")]
+fn clip_controls(ui: &mut bevy_egui::egui::Ui, clips: &Clips, animator: &mut Animator) {
+    if clips.0.is_empty() {
+        ui.label("no baked clips in this build");
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .selectable_label(animator.clip.is_none(), "none")
+            .clicked()
+        {
+            animator.clip = None;
+        }
+        for (which, clip) in clips.0.clips.iter().enumerate() {
+            let picked = animator.clip == Some(which);
+            if ui.selectable_label(picked, &clip.name).clicked() {
+                animator.clip = Some(which);
+            }
+        }
+    });
+    ui.add_enabled_ui(animator.clip.is_some(), |ui| {
+        ui.horizontal(|ui| {
+            ui.toggle_value(&mut animator.layered, "over the gait");
+            ui.toggle_value(&mut animator.in_place, "in place");
+        });
+    });
+}
+
 /// The window.
 ///
 /// A window rather than a panel, and deliberately so: the record editor claims
 /// an edge of the screen because it is long and is read top to bottom, and this
 /// is short, consulted in passing, and belongs somewhere the body is not.
 #[cfg(feature = "editor")]
-pub fn animator_panel(mut contexts: bevy_egui::EguiContexts, mut animator: ResMut<Animator>) {
+pub fn animator_panel(
+    mut contexts: bevy_egui::EguiContexts,
+    clips: Res<Clips>,
+    mut animator: ResMut<Animator>,
+) {
     use bevy_egui::egui;
 
     if !animator.open {
@@ -336,6 +611,9 @@ pub fn animator_panel(mut contexts: bevy_egui::EguiContexts, mut animator: ResMu
                     }
                 }
             });
+
+            ui.separator();
+            clip_controls(ui, &clips, &mut animator);
             ui.add(
                 egui::Slider::new(&mut animator.cycle, 0.0..=1.0)
                     .text("phase")
@@ -347,6 +625,29 @@ pub fn animator_panel(mut contexts: bevy_egui::EguiContexts, mut animator: ResMu
                 ui.toggle_value(&mut animator.swing_arms, "arms");
                 ui.toggle_value(&mut animator.footing, "footing");
             });
+            ui.add(
+                egui::Slider::new(&mut animator.slope, -0.4..=0.4)
+                    .text("slope")
+                    .fixed_decimals(2),
+            );
+            ui.add(
+                egui::Slider::new(&mut animator.blend, 0.0..=0.6)
+                    .text("blend s")
+                    .fixed_decimals(2),
+            );
+            // The readout the locomotion question should be settled on. A pose
+            // whose feet already land where the ground is needs no correction;
+            // one whose do not is being held together by the solve, and the
+            // difference between an imported clip and a procedural gait shows
+            // here before it shows in anybody's opinion.
+            ui.label(format!(
+                "footing lifts {:.0} mm{}",
+                animator.lift * 1000.0,
+                match animator.straining {
+                    0 => String::new(),
+                    n => format!(", {n} straining"),
+                }
+            ));
 
             ui.separator();
             ui.toggle_value(&mut animator.blinking, "blink");
@@ -411,6 +712,9 @@ mod tests {
         .init_asset::<StandardMaterial>()
         .init_asset::<SkinnedMeshInverseBindposes>()
         .init_resource::<Animator>()
+        // Empty by default; the tests that need clips insert their own, which is
+        // also the shape a consumer fetching them at run time uses.
+        .init_resource::<Clips>()
         .init_resource::<Wrote>()
         .add_systems(
             Update,
@@ -427,6 +731,171 @@ mod tests {
         )));
         app.update();
         app
+    }
+
+    #[cfg(feature = "builtin-clips")]
+    #[test]
+    fn a_picked_clip_poses_the_body_and_the_gait_does_not() {
+        // The A/B this window exists for, asserted rather than eyeballed: a clip
+        // replaces the gait unless it is asked to layer, so the two must produce
+        // different poses from the same phase — and the clip's must differ from
+        // rest, or "playing" a clip would be indistinguishable from standing.
+        let mut app = app();
+        app.insert_resource(Clips::builtin());
+        assert!(
+            !app.world().resource::<Clips>().0.is_empty(),
+            "this build carries no clips to pick"
+        );
+
+        let at = |app: &mut App| {
+            app.update();
+            let mut bodies = app.world_mut().query::<&AvatarPose>();
+            bodies
+                .iter(app.world())
+                .next()
+                .expect("a body was posed")
+                .0
+                .clone()
+        };
+
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.walking = true;
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.scrub = true;
+            animator.cycle = 0.3;
+            animator.blend = 0.0;
+        }
+        let gaited = at(&mut app);
+
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.clip = Some(0);
+        }
+        let clipped = at(&mut app);
+
+        let apart = |a: &Pose, b: &Pose| {
+            a.rotations
+                .iter()
+                .zip(b.rotations.iter())
+                .filter(|(x, y)| x.angle_between(**y) > 1e-3)
+                .count()
+        };
+        assert!(
+            apart(&gaited, &clipped) > 0,
+            "picking a clip changed nothing about the pose"
+        );
+        assert!(
+            apart(&clipped, &Pose::rest(&rig_of(&mut app))) > 0,
+            "the clip posed the body no differently from rest"
+        );
+    }
+
+    #[cfg(feature = "builtin-clips")]
+    #[test]
+    fn switching_source_starts_a_blend_that_advances() {
+        // What #141 lists as a thing to watch — what it costs to blend out of a
+        // clip — asserted at both ends. A blend that never starts is a snap, and
+        // one that never finishes is a body permanently offset from what it is
+        // being told to do.
+        let mut app = app();
+        app.insert_resource(Clips::builtin());
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.walking = true;
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.blend = 0.2;
+        }
+        app.update();
+
+        app.world_mut().resource_mut::<Animator>().clip = Some(0);
+        app.update();
+        assert!(
+            blending(&mut app),
+            "switching from the gait to a clip did not start a blend"
+        );
+
+        // **Not "it finishes within N frames".** A headless `app.update()` costs
+        // microseconds of wall clock and `Time` reports wall clock, so a loop of
+        // any length advances the transition by almost nothing — the first
+        // version of this asserted a finish and failed for that reason rather
+        // than for a defect. What is this crate's to assert is the WIRING: the
+        // transition moves forward on its own, and finiteness is
+        // `Inertializer`'s own property and is tested where it lives.
+        let started = progress(&mut app);
+        for _ in 0..8 {
+            app.update();
+        }
+        assert!(
+            progress(&mut app) > started,
+            "the blend was started and then never advanced"
+        );
+
+        // And a zero duration is a snap rather than a transition, which is what
+        // the slider's own bottom end means.
+        let mut snapping = app_with_clips();
+        {
+            let mut animator = snapping.world_mut().resource_mut::<Animator>();
+            animator.walking = true;
+            animator.blend = 0.0;
+        }
+        snapping.update();
+        snapping.world_mut().resource_mut::<Animator>().clip = Some(0);
+        snapping.update();
+        assert!(
+            !blending(&mut snapping),
+            "a zero-second blend still started a transition"
+        );
+    }
+
+    /// A headless app whose clips are the ones this build carries.
+    #[cfg(feature = "builtin-clips")]
+    fn app_with_clips() -> App {
+        let mut app = app();
+        app.insert_resource(Clips::builtin());
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+        }
+        app
+    }
+
+    /// How far through its transition the one body is.
+    #[cfg(feature = "builtin-clips")]
+    fn progress(app: &mut App) -> f32 {
+        let mut bodies = app.world_mut().query::<&Blending>();
+        bodies
+            .iter(app.world())
+            .next()
+            .and_then(|b| b.running.as_ref())
+            .map_or(1.0, symbios_avatar::Inertializer::progress)
+    }
+
+    /// Whether the one body has a transition running.
+    #[cfg(feature = "builtin-clips")]
+    fn blending(app: &mut App) -> bool {
+        let mut bodies = app.world_mut().query::<&Blending>();
+        bodies
+            .iter(app.world())
+            .next()
+            .and_then(|b| b.running.as_ref())
+            .is_some_and(|running| !running.finished())
+    }
+
+    /// The one body's rig.
+    #[cfg(feature = "builtin-clips")]
+    fn rig_of(app: &mut App) -> symbios_avatar::Rig {
+        let mut bodies = app.world_mut().query::<&AvatarBody>();
+        bodies
+            .iter(app.world())
+            .next()
+            .expect("a body")
+            .avatar
+            .rig
+            .clone()
     }
 
     #[test]

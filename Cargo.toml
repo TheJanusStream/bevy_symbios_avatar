@@ -17,12 +17,20 @@ default = ["editor"]
 # body should not inherit a GUI toolkit, and `default-features = false` is how
 # they say so.
 editor = ["dep:bevy_egui", "dep:serde_json"]
+# Carries the engine's baked CC0 clip set in the binary.
+#
+# **Off by default, for the same reason it is off upstream.** The artifact is
+# 200 KiB, and a consumer that only draws bodies should not pay for motion it
+# never plays — least of all a wasm one, where a linked build measured 210 KiB
+# larger with it and 125 KiB larger gzipped. A consumer that fetches `clips.bin`
+# at run time inserts its own `Clips` resource and pays nothing here.
+builtin-clips = ["symbios-avatar/builtin-clips"]
 
 [[example]]
 name = "viewer"
 # The two windows are most of what this example is for now, so it does not build
-# without them.
-required-features = ["editor"]
+# without them — and the clip picker is not a picker with nothing to pick.
+required-features = ["editor", "builtin-clips"]
 
 [dependencies]
 bevy = "0.18"

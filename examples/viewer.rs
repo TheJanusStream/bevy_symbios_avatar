@@ -15,6 +15,9 @@
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release --example viewer -- --walk --shot walking.png
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
+//! cargo run --release --example viewer -- --clip Walk       # a baked CC0 clip instead
+//! cargo run --release --example viewer -- --clip Greeting --layer --walk  # over the gait
+//! cargo run --release --example viewer -- --slope 0.2       # tilt the ground
 //! cargo run --release --example viewer -- --bare            # no windows at all
 //! ```
 //!
@@ -53,7 +56,7 @@ use bevy_egui::EguiPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin};
 use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
-use bevy_symbios_avatar::{AvatarBody, AvatarPlugin};
+use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, Clips};
 use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
 
 /// How far the camera starts from the body, as a multiple of its longest side.
@@ -70,6 +73,15 @@ const CLEAR: u32 = 2;
 /// Whether a bare flag was passed on the command line.
 fn flag(name: &str) -> bool {
     std::env::args().any(|arg| arg == name)
+}
+
+/// The word following a flag, if it was given one.
+fn word(name: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|at| args.get(at + 1))
+        .cloned()
 }
 
 /// The number following a flag, if it was given one.
@@ -100,8 +112,8 @@ fn main() {
         .insert_resource(starting_editor())
         .insert_resource(starting_animator())
         .init_resource::<Shot>()
-        .add_systems(Startup, stage)
-        .add_systems(Update, (frame_on_body, shortcuts, shoot))
+        .add_systems(Startup, (stage, pick_clip))
+        .add_systems(Update, (frame_on_body, shortcuts, shoot, tilt_floor))
         .add_systems(
             PostUpdate,
             // Before the crate reads its input for the frame, which is what
@@ -120,6 +132,30 @@ struct Framed {
     asked: bool,
 }
 
+/// The ground the body stands on, so the slope control can tilt it.
+#[derive(Component)]
+struct Floor;
+
+/// Tilts the floor to match the slope the footing solve is being given.
+///
+/// **Both, or neither.** The motion window feeds `Ground` a plane rising toward
+/// `+x`; if the visible floor stayed flat the body would appear to walk through
+/// or above it, and a viewer that lies about where the ground is cannot be used
+/// to judge what a walk does on a slope — which is the whole reason the control
+/// exists.
+fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Floor>>) {
+    if !animator.is_changed() {
+        return;
+    }
+    // The plane is the world's `xz`, and `slope` is a rise over run toward `+x`,
+    // so the tilt is a rotation about `z` of `atan(slope)` — negative because a
+    // positive rotation about `z` carries `+x` downward.
+    let tilt = Quat::from_rotation_z(-animator.slope.atan());
+    for mut transform in &mut floor {
+        transform.rotation = tilt;
+    }
+}
+
 /// A ground plane, a key light and a camera.
 ///
 /// A figure in a void has nothing to be lit against and nothing to cast a
@@ -132,6 +168,7 @@ fn stage(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     commands.spawn((
+        Floor,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(12.0, 12.0))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(0.30, 0.31, 0.35),
@@ -239,7 +276,31 @@ fn starting_animator() -> Animator {
     // at the same place, so a still cannot show what the gaze did without one.
     animator.tracking = live && value("--gaze").is_none();
     animator.gaze_angle = value("--gaze").unwrap_or(0.0);
+    animator.slope = value("--slope").unwrap_or(0.0);
+    animator.layered = flag("--layer");
     animator
+}
+
+/// Points the animator at a clip named on the command line.
+///
+/// A startup system rather than part of [`starting_animator`], because the clip
+/// set is a resource this crate inserts and the flags are parsed before any of
+/// it exists. Naming a clip that is not there is a hard stop with the list
+/// printed: a viewer that quietly ignored the flag would photograph the
+/// procedural gait and label it the import, which is the one mistake a
+/// comparison must not make.
+fn pick_clip(clips: Res<Clips>, mut animator: ResMut<Animator>) {
+    let Some(wanted) = word("--clip") else {
+        return;
+    };
+    let Some(which) = clips.0.names().iter().position(|name| *name == wanted) else {
+        eprintln!("no clip called {wanted}. This build carries:");
+        for name in clips.0.names() {
+            eprintln!("  {name}");
+        }
+        std::process::exit(1);
+    };
+    animator.clip = Some(which);
 }
 
 /// Whether the windows should be on screen at all.
