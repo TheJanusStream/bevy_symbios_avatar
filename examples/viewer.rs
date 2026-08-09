@@ -15,6 +15,8 @@
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release --example viewer -- --walk --shot walking.png
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
+//! cargo run --release --example viewer -- --talk             # the jaw speaks
+//! cargo run --release --example viewer -- --open 0.2         # hold the jaw open, radians
 //! cargo run --release --example viewer -- --clip Walk       # a baked CC0 clip instead
 //! cargo run --release --example viewer -- --clip Greeting --layer --walk  # over the gait
 //! cargo run --release --example viewer -- --slope 0.2       # tilt the ground
@@ -272,6 +274,12 @@ fn starting_animator() -> Animator {
     // makes the geometry path checkable from a still.
     animator.blinking = live && value("--closure").is_none();
     animator.closure = value("--closure").unwrap_or(0.0);
+    // Talking is opt-in where blinking is opt-out: a body at rest blinks, but
+    // a body that mutters to itself in every screenshot would be the viewer
+    // manufacturing motion nobody asked to judge. `--open` holds the jaw at an
+    // angle instead, exactly as `--closure` holds the lids.
+    animator.talking = flag("--talk");
+    animator.opening = value("--open").unwrap_or(0.0);
     // Same reason: a target that moves with the clock cannot be captured twice
     // at the same place, so a still cannot show what the gaze did without one.
     animator.tracking = live && value("--gaze").is_none();

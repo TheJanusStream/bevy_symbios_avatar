@@ -27,7 +27,7 @@
 use bevy::prelude::*;
 use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};
 use symbios_avatar::{
-    Blink, ClipLibrary, FootingConfig, Gait, Ground, Inertializer, Pose, Stride, Zone,
+    Blink, ClipLibrary, FootingConfig, Gait, Ground, Inertializer, Pose, Rig, Stride, Talk, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
@@ -173,6 +173,15 @@ pub struct Animator {
     pub blinking: bool,
     /// How shut the lids are held when they are not blinking.
     pub closure: f32,
+    /// Whether the jaw talks.
+    pub talking: bool,
+    /// The pivot angle the jaw is held at when it is not talking, in radians.
+    ///
+    /// The still-frame control, for the same reason [`Animator::closure`]
+    /// exists: speech is stochastic, so a captured frame almost never catches
+    /// a syllable at its peak, and judging the mandible region's deformation
+    /// needs the jaw held somewhere.
+    pub opening: f32,
     /// Whether the gaze follows a target circling the body.
     pub tracking: bool,
     /// Radians per second that target travels.
@@ -224,6 +233,8 @@ pub struct Animator {
     pub straining: usize,
     /// The engine's blink timer.
     blink: Blink,
+    /// The engine's speech driver.
+    talk: Talk,
     /// How long the body has been alive, for circling the gaze target.
     elapsed: f32,
     /// What was playing last frame, so a change can start a blend.
@@ -244,6 +255,8 @@ impl Default for Animator {
             footing: true,
             blinking: true,
             closure: 0.0,
+            talking: false,
+            opening: 0.0,
             tracking: true,
             // Slow enough that the head is plainly tracking rather than
             // snapping, which is the thing being judged.
@@ -260,6 +273,7 @@ impl Default for Animator {
             lift: 0.0,
             straining: 0,
             blink: Blink::seeded(7),
+            talk: Talk::seeded(7),
             elapsed: 0.0,
             was: (None, false, false),
         }
@@ -273,7 +287,7 @@ impl Animator {
     /// the viewer stays honest about what a body that is doing nothing costs.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        !self.walking && !self.blinking && !self.tracking && self.clip.is_none()
+        !self.walking && !self.blinking && !self.tracking && !self.talking && self.clip.is_none()
     }
 
     /// What is driving the body, as a value that changes when the source does.
@@ -366,6 +380,13 @@ pub fn drive_avatar_animation(
     } else {
         animator.closure
     };
+    // Speech is a pose, not geometry: the mandible region (#152) hangs off the
+    // jaw pivot, so talking costs a rotation where a blink costs a rebuild.
+    let jaw_angle = if animator.talking {
+        animator.talk.advance(delta)
+    } else {
+        animator.opening
+    };
 
     let clip = animator
         .clip
@@ -445,6 +466,11 @@ pub fn drive_avatar_animation(
                 ..GazeConfig::default()
             },
         );
+        // The jaw, after the gaze for the same reason the gaze comes after the
+        // gait: speech is a rotation added to wherever the head already is.
+        if let Some(pivot) = jaw_pivot(rig) {
+            pose.rotations[pivot] = Quat::from_rotation_x(jaw_angle);
+        }
         // The blend, last, so it corrects whatever the sources produced rather
         // than being overwritten by them.
         let posed = if let Some(mut blending) = blending {
@@ -471,6 +497,19 @@ pub fn drive_avatar_animation(
             commands.entity(entity).insert(AvatarClosure(closure));
         }
     }
+}
+
+/// The jaw's pivot: the parent of the marker chain's tip (#152).
+///
+/// The same identification `rig::skin::bind` uses — the two markers are the
+/// only joints in a rig that carry the flag — so the joint the animator turns
+/// is by construction the joint the mandible region is bound to. A quadruped
+/// has no markers and gets `None`, which leaves its pose untouched.
+fn jaw_pivot(rig: &Rig) -> Option<usize> {
+    (0..rig.len()).find_map(|tip| {
+        let pivot = rig.joints[tip].parent?;
+        (rig.joints[tip].marker && rig.joints[pivot].marker).then_some(pivot)
+    })
 }
 
 /// Puts the pose's feet on the ground and reports what that took.
@@ -659,6 +698,15 @@ pub fn animator_panel(
             );
 
             ui.separator();
+            ui.toggle_value(&mut animator.talking, "talk");
+            ui.add_enabled(
+                !animator.talking,
+                egui::Slider::new(&mut animator.opening, 0.0..=0.35)
+                    .text("open rad")
+                    .fixed_decimals(2),
+            );
+
+            ui.separator();
             ui.toggle_value(&mut animator.tracking, "track");
             ui.add_enabled(
                 !animator.tracking,
@@ -731,6 +779,54 @@ mod tests {
         )));
         app.update();
         app
+    }
+
+    #[test]
+    fn a_held_opening_turns_the_jaw_and_only_the_jaw() {
+        // The still-frame path: `opening` is to the jaw what `closure` is to
+        // the lids, and it must land in the written pose as a local rotation
+        // on the pivot — the joint the mandible region (#152) is bound to.
+        let mut app = app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.talking = false;
+            animator.opening = 0.25;
+        }
+        app.update();
+        let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarPose)>();
+        let (body, pose) = bodies.single(app.world()).expect("a driven body");
+        let rig = &body.avatar.rig;
+        let pivot = jaw_pivot(rig).expect("a humanoid has a jaw");
+        let (axis, angle) = pose.0.rotations[pivot].to_axis_angle();
+        assert!(
+            (angle - 0.25).abs() < 1e-3 && axis.x > 0.99,
+            "the pivot holds {angle:.3} rad about {axis:?} against the 0.25 asked for"
+        );
+        let head = *rig.in_zone(Zone::Head).first().expect("a head");
+        assert!(
+            pose.0.rotations[head].to_axis_angle().1.abs() < 0.35,
+            "the held opening leaked a whole-head rotation"
+        );
+    }
+
+    #[test]
+    fn talking_alone_keeps_the_body_posed() {
+        // A body that is only talking is not idle: the jaw is stochastic, so
+        // its pose must be written every frame, the same contract blinking has.
+        let mut app = app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.walking = false;
+            animator.talking = true;
+        }
+        app.update();
+        app.update();
+        assert!(
+            app.world().resource::<Wrote>().0 > 0,
+            "a talking body went unwritten"
+        );
     }
 
     #[cfg(feature = "builtin-clips")]
