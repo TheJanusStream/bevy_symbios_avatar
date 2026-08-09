@@ -454,25 +454,51 @@ fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
         .default_open(true)
         .show(ui, |ui| match archetype {
             Archetype::Humanoid(params) => {
-                changed |= axis(ui, "height", &mut params.height, 0.6..=2.6);
-                changed |= signed(ui, "build", &mut params.build);
-                changed |= axis(ui, "muscle", &mut params.muscle, 0.0..=1.0);
-                changed |= signed(ui, "shoulder width", &mut params.shoulder_width);
-                changed |= signed(ui, "hip width", &mut params.hip_width);
-                changed |= signed(ui, "limb length", &mut params.limb_length);
-                changed |= signed(ui, "neck length", &mut params.neck_length);
-                changed |= signed(ui, "head size", &mut params.head_size);
-                changed |= signed(ui, "extremity size", &mut params.extremity_size);
+                // Envelope ranges (symbios-avatar #160), and the head's two
+                // skull axes join the panel: an exploration editor that
+                // cannot reach `head_breadth` is missing the loudest axis a
+                // skull has.
+                let stature = symbios_avatar::HumanoidParams::height_envelope();
+                changed |= axis(ui, "height", &mut params.height, stature.0..=stature.1);
+                changed |= explored(ui, "build", &mut params.build, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "muscle", &mut params.muscle, 0.0, (0.0, 1.0));
+                changed |= explored(
+                    ui,
+                    "shoulder width",
+                    &mut params.shoulder_width,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+                changed |= explored(ui, "hip width", &mut params.hip_width, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "limb length", &mut params.limb_length, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "neck length", &mut params.neck_length, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "head size", &mut params.head_size, 0.0, (-1.0, 1.0));
+                changed |= explored(
+                    ui,
+                    "head breadth",
+                    &mut params.head_breadth,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+                changed |= explored(ui, "face length", &mut params.face_length, 0.0, (-1.0, 1.0));
+                changed |= explored(
+                    ui,
+                    "extremity size",
+                    &mut params.extremity_size,
+                    0.0,
+                    (-1.0, 1.0),
+                );
             }
             Archetype::Quadruped(params) => {
-                changed |= axis(ui, "height", &mut params.height, 0.2..=2.0);
-                changed |= signed(ui, "body length", &mut params.body_length);
-                changed |= signed(ui, "build", &mut params.build);
-                changed |= axis(ui, "muscle", &mut params.muscle, 0.0..=1.0);
-                changed |= signed(ui, "leg length", &mut params.leg_length);
-                changed |= signed(ui, "neck length", &mut params.neck_length);
-                changed |= signed(ui, "head size", &mut params.head_size);
-                changed |= signed(ui, "tail length", &mut params.tail_length);
+                let stature = symbios_avatar::QuadrupedParams::height_envelope();
+                changed |= axis(ui, "height", &mut params.height, stature.0..=stature.1);
+                changed |= explored(ui, "body length", &mut params.body_length, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "build", &mut params.build, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "muscle", &mut params.muscle, 0.0, (0.0, 1.0));
+                changed |= explored(ui, "leg length", &mut params.leg_length, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "neck length", &mut params.neck_length, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "head size", &mut params.head_size, 0.0, (-1.0, 1.0));
+                changed |= explored(ui, "tail length", &mut params.tail_length, 0.0, (-1.0, 1.0));
             }
             // An archetype this build does not know about is kept verbatim
             // rather than edited into something else — a panel that offered
@@ -501,10 +527,10 @@ fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("eyes").show(ui, |ui| {
-        changed |= axis(ui, "size", &mut record.eyes.size, 0.0..=1.0);
-        changed |= signed(ui, "spacing", &mut record.eyes.spacing);
-        changed |= signed(ui, "depth", &mut record.eyes.depth);
-        changed |= axis(ui, "aperture", &mut record.eyes.aperture, 0.0..=1.0);
+        changed |= explored(ui, "size", &mut record.eyes.size, 0.5, (0.0, 1.0));
+        changed |= explored(ui, "spacing", &mut record.eyes.spacing, 0.0, (-1.0, 1.0));
+        changed |= explored(ui, "depth", &mut record.eyes.depth, 0.0, (-1.0, 1.0));
+        changed |= explored(ui, "aperture", &mut record.eyes.aperture, 0.8, (0.0, 1.0));
     });
     changed
 }
@@ -513,10 +539,24 @@ fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("face").show(ui, |ui| {
-        changed |= axis(ui, "nose", &mut record.face.nose, 0.0..=1.0);
-        changed |= axis(ui, "brow", &mut record.face.brow, 0.0..=1.0);
-        changed |= axis(ui, "mouth", &mut record.face.mouth, 0.0..=1.0);
-        changed |= axis(ui, "ears", &mut record.face.ears, 0.0..=1.0);
+        changed |= explored(ui, "nose", &mut record.face.nose, 0.5, (0.0, 1.0));
+        changed |= explored(
+            ui,
+            "nose width",
+            &mut record.face.nose_width,
+            0.5,
+            (0.0, 1.0),
+        );
+        changed |= explored(ui, "brow", &mut record.face.brow, 0.5, (0.0, 1.0));
+        changed |= explored(ui, "mouth", &mut record.face.mouth, 0.5, (0.0, 1.0));
+        changed |= explored(
+            ui,
+            "mouth width",
+            &mut record.face.mouth_width,
+            0.5,
+            (0.0, 1.0),
+        );
+        changed |= explored(ui, "ears", &mut record.face.ears, 0.5, (0.0, 1.0));
     });
     changed
 }
@@ -622,6 +662,25 @@ fn axis(
 /// A `-1..=1` axis.
 fn signed(ui: &mut egui::Ui, name: &str, value: &mut f32) -> bool {
     axis(ui, name, value, -1.0..=1.0)
+}
+
+/// A shape axis over its exploration envelope (symbios-avatar #160).
+///
+/// The range comes from the engine's own [`explore_range`] over the axis's
+/// default and conservative span, so the sliders and `sanitize` cannot
+/// disagree about where an axis ends. Style axes — complexion, hair, outfit —
+/// deliberately keep their classic sliders; the envelope is a shape idea.
+///
+/// [`explore_range`]: symbios_avatar::plan::explore_range
+fn explored(
+    ui: &mut egui::Ui,
+    name: &str,
+    value: &mut f32,
+    default: f32,
+    conservative: (f32, f32),
+) -> bool {
+    let (low, high) = symbios_avatar::plan::explore_range(default, conservative);
+    axis(ui, name, value, low..=high)
 }
 
 /// The record as JSON, out and back in.
