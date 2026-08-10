@@ -56,8 +56,8 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, Category, HumanoidParams, Leg, QuadrupedParams,
-    Sleeve,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, Category, HumanoidParams, Leg, Limb,
+    QuadrupedParams, Rig, Sleeve, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -126,6 +126,14 @@ pub struct RecordEditor {
     json: String,
     /// Whether that box is following the record or has been typed in.
     json_state: Json,
+    /// The share-code box's contents.
+    ///
+    /// Held rather than derived, because this box is two things at once: what
+    /// this record's look renders to, and somewhere to paste one from a friend.
+    /// A field that recomputed itself every frame could not be typed into.
+    code: String,
+    /// Whether that box is showing this record's code or one somebody pasted.
+    code_state: Json,
     /// What the last load or copy did.
     status: String,
     /// The aperture reading.
@@ -137,6 +145,7 @@ impl RecordEditor {
     #[must_use]
     pub fn new(record: AvatarRecord) -> Self {
         let json = to_json(&record);
+        let code = record.share_code();
         Self {
             record,
             open: true,
@@ -149,6 +158,8 @@ impl RecordEditor {
             last_panel: Duration::ZERO,
             json,
             json_state: Json::Following,
+            code,
+            code_state: Json::Following,
             status: String::new(),
             measuring: Measuring::Idle,
         }
@@ -175,6 +186,13 @@ impl RecordEditor {
     pub fn restate(&mut self) {
         if self.json_state == Json::Following {
             self.json = to_json(&self.record);
+        }
+        // The share code follows the record on exactly the same terms, and for
+        // the same reason: a code shown beside a body that is no longer the one
+        // it names is worse than no code at all, because somebody will read it
+        // out. Both boxes stop following the moment they are typed in.
+        if self.code_state == Json::Following {
+            self.code = self.record.share_code();
         }
     }
 
@@ -347,6 +365,15 @@ pub fn record_editor_panel(
                 rebuild |= built;
                 restate |= noted;
                 ui.separator();
+                // The high tier first and open, the low tier below and shut.
+                // That order is the parameterisation's, not a layout
+                // preference: a composite says something about the person and
+                // fans out to a dozen quantities, and the axes under it are
+                // corrections to what it derived. Showing them the other way
+                // round invites somebody to hand-build from the offsets a body
+                // one slider up would have given them.
+                rebuild |= composite_axes(ui, &mut editor.record);
+                ui.separator();
                 rebuild |= body_axes(ui, &mut editor.record.archetype);
                 rebuild |= skin_axes(ui, &mut editor.record);
                 rebuild |= eye_axes(ui, &mut editor.record);
@@ -354,6 +381,9 @@ pub fn record_editor_panel(
                 rebuild |= hair_axes(ui, &mut editor.record);
                 rebuild |= outfit_axes(ui, &mut editor.record);
                 ui.separator();
+                derived(ui, &editor.record);
+                ui.separator();
+                share(ui, &mut editor);
                 wire(ui, &mut editor);
                 ui.separator();
                 readout(ui, &mut editor, &bodies);
@@ -404,13 +434,30 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
         noted |= ui
             .add(egui::DragValue::new(&mut editor.record.seed).speed(1.0))
             .changed();
-        // Deliberately the next seed rather than one off the clock. This is an
-        // instrument: a seed you cannot go back to is a body you cannot show
-        // anybody, and the viewer's own re-roll button used the clock precisely
-        // because it had nowhere to put the number.
-        if ui.button("re-roll").clicked() {
-            let next = editor.record.seed.wrapping_add(1);
-            editor.record.reroll(next);
+        // **A hunt, not a shuffle** (#122). Deliberately the neighbouring seed
+        // rather than one off the clock: this is an instrument, and a seed you
+        // cannot go back to is a body you cannot show anybody — the viewer's
+        // first re-roll button drew off the clock precisely because it had
+        // nowhere to put the number, and every body it made was unreachable the
+        // moment it left the screen.
+        //
+        // Both directions for the same reason. The interaction is walking seed
+        // space with what you have already found pinned, and a walk that only
+        // goes forward makes the body you just passed unrecoverable.
+        if ui
+            .button("◀")
+            .on_hover_text("the seed before this")
+            .clicked()
+        {
+            editor.record.reroll(editor.record.seed.wrapping_sub(1));
+            changed = true;
+        }
+        if ui
+            .button("▶")
+            .on_hover_text("the seed after this")
+            .clicked()
+        {
+            editor.record.reroll(editor.record.seed.wrapping_add(1));
             changed = true;
         }
     });
@@ -432,6 +479,16 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
     });
     if editor.record.locks.is_everything() {
         ui.small("every category locked: a re-roll would do nothing");
+    } else {
+        // What the hunt is actually searching, said plainly. Locking IS the
+        // technique — keep what you have found, step the seed, judge only what
+        // is still moving — and it stays invisible unless the panel says which
+        // part of the body the next step is allowed to touch.
+        let held = editor.record.locks.locked();
+        if !held.is_empty() {
+            let names: Vec<&str> = held.into_iter().map(category_name).collect();
+            ui.small(format!("hunting, holding {}", names.join(", ")));
+        }
     }
     (changed, noted)
 }
@@ -454,6 +511,55 @@ fn category_name(category: Category) -> &'static str {
         Category::Hair => "hair",
         Category::Age => "age",
     }
+}
+
+/// The high tier: what the body is, said at the level a person is described at.
+///
+/// Four axes that each reach many quantities, against the dozens below that
+/// each reach one. They sit at the top and open by default because that is the
+/// order somebody should meet them in — decide who this is, then correct what
+/// the formulas got wrong about them.
+///
+/// **Two of these are not exploration axes and must not get an envelope
+/// slider.** `femininity` and `mass` are shape axes and carry the usual widened
+/// range; `bodyFat` is a real fraction of body mass over its own bounds and
+/// `age` is a count of whole years. Handing either the ±3 treatment would offer
+/// a negative body-fat fraction and a two-hundred-year-old, which is why the
+/// engine does not stretch them (symbios-avatar #162).
+fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    use symbios_avatar::plan::{AGE_RANGE, BODY_FAT_RANGE};
+
+    let mut changed = false;
+    egui::CollapsingHeader::new("composites")
+        .default_open(true)
+        .show(ui, |ui| {
+            let composites = &mut record.composites;
+            changed |= explored(
+                ui,
+                "femininity",
+                &mut composites.femininity,
+                0.0,
+                (-1.0, 1.0),
+            );
+            changed |= explored(ui, "mass", &mut composites.mass, 0.0, (-1.0, 1.0));
+            changed |= axis(
+                ui,
+                "body fat",
+                &mut composites.body_fat,
+                BODY_FAT_RANGE.0..=BODY_FAT_RANGE.1,
+            );
+            // Whole years, so a slider that steps in thousandths would be
+            // showing a record no reader can hold — the same argument the hair
+            // lock count is on a plain integer slider for.
+            changed |= ui
+                .add(
+                    egui::Slider::new(&mut composites.age, AGE_RANGE.0..=AGE_RANGE.1)
+                        .text("age")
+                        .suffix(" yr"),
+                )
+                .changed();
+        });
+    changed
 }
 
 /// The archetype's own axes, whichever archetype it is.
@@ -519,10 +625,57 @@ fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
     changed
 }
 
+/// One complexion swatch's colour, as egui wants it.
+///
+/// `#[allow]`ed rather than worked around: the input is clamped to `0..=1` and
+/// multiplied by 255 before rounding, so there is no truncation to lose and no
+/// sign to lose either. Written once, here, so the exception is one line rather
+/// than three at each channel.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a clamped unit float scaled to 0..=255 fits a byte by construction"
+)]
+fn swatch(tone: symbios_avatar::Vec3) -> egui::Color32 {
+    let byte = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+    egui::Color32::from_rgb(byte(tone.x), byte(tone.y), byte(tone.z))
+}
+
 /// Complexion.
 fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("skin").show(ui, |ui| {
+        // **The ramp the engine already has, drawn** (#122). A melanin slider
+        // is a number between two ends nobody can see, and a complexion is the
+        // one axis on this record somebody arrives with an opinion about
+        // already. The stops are sampled from `SkinParams::base_tone`, so these
+        // are the engine's own curve rather than a palette invented here — a
+        // swatch cannot drift from the tone it paints.
+        //
+        // They follow `undertone` too, which is the point of sampling rather
+        // than hard-coding: the row restates itself as that slider moves, so
+        // the interaction between the two axes is visible instead of guessed.
+        ui.horizontal_wrapped(|ui| {
+            for stop in 0..=10u32 {
+                let melanin = f32::from(u16::try_from(stop).unwrap_or(0)) / 10.0;
+                let probe = symbios_avatar::SkinParams {
+                    melanin,
+                    ..record.skin
+                };
+                let picked = (record.skin.melanin - melanin).abs() < 0.05;
+                let button = egui::Button::new(if picked { "•" } else { " " })
+                    .fill(swatch(probe.base_tone()))
+                    .min_size(egui::vec2(20.0, 20.0));
+                if ui
+                    .add(button)
+                    .on_hover_text(format!("{melanin:.1}"))
+                    .clicked()
+                {
+                    record.skin.melanin = melanin;
+                    changed = true;
+                }
+            }
+        });
         changed |= axis(ui, "melanin", &mut record.skin.melanin, 0.0..=1.0);
         changed |= signed(ui, "undertone", &mut record.skin.undertone);
         changed |= axis(ui, "blush", &mut record.skin.blush, 0.0..=1.0);
@@ -575,8 +728,13 @@ fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("hair").show(ui, |ui| {
         changed |= axis(ui, "length", &mut record.hair.length, 0.0..=1.0);
-        changed |= axis(ui, "volume", &mut record.hair.volume, 0.0..=1.0);
-        changed |= axis(ui, "coverage", &mut record.hair.coverage, 0.0..=1.0);
+        // Signed, not unit. Both of these clamp to `-1..=1` in the engine and
+        // shipped here on a `0..=1` slider, so the whole negative half of each
+        // — thin hair and a receding hairline — was unreachable from the panel
+        // for as long as it existed (#9). Nothing failed: the values were legal
+        // and the body built, the axis simply had no way to be asked for.
+        changed |= signed(ui, "volume", &mut record.hair.volume);
+        changed |= signed(ui, "coverage", &mut record.hair.coverage);
         changed |= signed(ui, "part", &mut record.hair.part);
         changed |= axis(ui, "wave", &mut record.hair.wave, 0.0..=1.0);
         changed |= axis(ui, "shade", &mut record.hair.shade, 0.0..=1.0);
@@ -692,6 +850,82 @@ fn explored(
     axis(ui, name, value, low..=high)
 }
 
+/// What the plan actually produced, so the low tier is not edited blind.
+///
+/// An offset is a correction to a number somebody cannot see, which is a hard
+/// thing to aim: "shoulder width +0.3" says nothing about how wide the
+/// shoulders ended up. This prints the quantities the derivation hands the
+/// cage, refreshed from the record on every draw.
+///
+/// **Two labels here are doing real work, and both name traps this crate has
+/// fallen into more than once.** The radii are the CAGE's, and subdivision
+/// pulls the rendered surface inside them — comparing one of these to a
+/// measured body is the error #106 spent a session on, where a shoulder was
+/// pushed out to clear a ribcage half again wider than the visible one. And the
+/// fractions are of NOMINAL stature, not of the built body's height, because
+/// a fraction of rendered height silently changes whenever anything moves the
+/// head — which is how every band figure on #106 went stale without a
+/// coefficient being touched.
+///
+/// Costs nothing while the header is shut: egui only runs the body of an open
+/// one, and the skeleton is rebuilt inside it rather than cached, so what is
+/// shown cannot lag what is set.
+fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
+    egui::CollapsingHeader::new("derived").show(ui, |ui| {
+        let stature = match &record.archetype {
+            Archetype::Humanoid(params) => params.height,
+            Archetype::Quadruped(params) => params.height,
+            Archetype::Unknown { .. } => {
+                ui.small("nothing to derive from a body this build cannot read");
+                return;
+            }
+        };
+        let skeleton = record.skeleton();
+
+        ui.small(format!("stature      {stature:.3} m nominal"));
+        for (name, zone) in [
+            ("pelvis", Zone::Pelvis),
+            ("waist", Zone::Abdomen),
+            ("chest", Zone::Chest),
+            ("neck", Zone::Neck),
+            ("head", Zone::Head),
+        ] {
+            // The first node of a zone, which is the same rule the engine's own
+            // tests select by — a zone can hold several and picking a different
+            // one would make this readout disagree with them.
+            let Some(node) = skeleton.nodes.iter().find(|node| node.zone == zone) else {
+                continue;
+            };
+            ui.small(format!(
+                "{name:<8} r   {:5.1} cm   {:.4} of stature",
+                node.radius * 100.0,
+                node.radius / stature
+            ));
+        }
+
+        // Spans off the root of each limb chain, never the widest joint of a
+        // zone: on an A-posed arm the widest joint is the ELBOW, which is the
+        // measurement error `the_default_body_stands_near_the_proportion_canon`
+        // carries a paragraph about.
+        if let Ok(rig) = Rig::from_skeleton(&skeleton) {
+            for (name, limb) in [("shoulder", Limb::ForeLeft), ("hip", Limb::HindLeft)] {
+                let Some(chain) = rig.limb_chain(limb) else {
+                    continue;
+                };
+                let span = rig.joints[chain[0]].position.x.abs() * 2.0;
+                ui.small(format!(
+                    "{name:<8} span{:5.1} cm   {:.4} of stature",
+                    span * 100.0,
+                    span / stature
+                ));
+            }
+        }
+
+        ui.small("cage radii — the rendered surface sits inside these");
+        ui.small("fractions are of nominal stature, not of rendered height");
+    });
+}
+
 /// The record as JSON, out and back in.
 fn wire(ui: &mut egui::Ui, editor: &mut RecordEditor) {
     egui::CollapsingHeader::new("record").show(ui, |ui| {
@@ -732,6 +966,70 @@ fn wire(ui: &mut egui::Ui, editor: &mut RecordEditor) {
             ui.small(editor.status.clone());
         }
     });
+}
+
+/// The look as a share code, out and back in.
+///
+/// A code carries a *look* and not a record — archetype, composites and
+/// complexion, each axis quantised to a byte — so importing one keeps the name,
+/// the seed and the locks of the record it lands in. That is the point of it:
+/// a code is for passing a face between people, not for moving an avatar.
+///
+/// Deliberately **lossy and said so on screen**. Re-encoding a code is not a
+/// round trip through the record, and somebody who imports a code and sees an
+/// axis read 0.247 where their friend's read 0.250 should be able to find out
+/// why without reading the source.
+fn share(ui: &mut egui::Ui, editor: &mut RecordEditor) {
+    egui::CollapsingHeader::new("share code").show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if ui.button("copy").clicked() {
+                ui.ctx().copy_text(editor.code.clone());
+                editor.status = format!("copied {}", editor.code);
+            }
+            if ui.button("import").clicked() {
+                import(editor);
+            }
+            if ui.button("discard edits").clicked() {
+                editor.code = editor.record.share_code();
+                editor.code_state = Json::Following;
+                editor.status.clear();
+            }
+        });
+        let box_changed = ui
+            .add(
+                egui::TextEdit::singleline(&mut editor.code)
+                    .code_editor()
+                    .desired_width(f32::INFINITY),
+            )
+            .changed();
+        if box_changed {
+            // Once somebody has pasted here it is theirs, exactly as the JSON
+            // box works — refreshing it from the record on the next edit is
+            // indistinguishable from an import that silently does nothing.
+            editor.code_state = Json::Edited;
+        }
+        ui.small("a look, not a record: the name, seed and locks stay");
+        ui.small("one byte an axis, so a code is lossy by design");
+    });
+}
+
+/// Parses the share-code box into the record's look.
+///
+/// Applied to a copy and swapped in only once it has parsed, so a mistyped code
+/// cannot leave a body half-replaced — `apply_share_code` writes the archetype
+/// before it can discover the complexion is short.
+fn import(editor: &mut RecordEditor) {
+    let mut candidate = editor.record.clone();
+    match candidate.apply_share_code(&editor.code) {
+        Ok(()) => {
+            editor.record = candidate;
+            editor.code = editor.record.share_code();
+            editor.code_state = Json::Following;
+            editor.status = String::from("imported");
+            editor.touched();
+        }
+        Err(error) => editor.status = format!("not a share code: {error}"),
+    }
 }
 
 /// Parses the JSON box into the record.
@@ -853,6 +1151,11 @@ mod tests {
                 ("limb_length", p.limb_length),
                 ("neck_length", p.neck_length),
                 ("head_size", p.head_size),
+                // These two were edited by the panel and covered by nothing for
+                // as long as they existed (#9): a slider bound to the wrong
+                // field of the pair would have passed this suite.
+                ("head_breadth", p.head_breadth),
+                ("face_length", p.face_length),
                 ("extremity_size", p.extremity_size),
             ],
             Archetype::Quadruped(p) => vec![
@@ -868,6 +1171,11 @@ mod tests {
             Archetype::Unknown { .. } => Vec::new(),
         };
         out.extend([
+            // The high tier (symbios-avatar #162). `age` is not here: it is a
+            // count of years, and `counts` covers it.
+            ("femininity", record.composites.femininity),
+            ("mass", record.composites.mass),
+            ("body_fat", record.composites.body_fat),
             ("melanin", record.skin.melanin),
             ("undertone", record.skin.undertone),
             ("blush", record.skin.blush),
@@ -878,8 +1186,10 @@ mod tests {
             ("eye depth", record.eyes.depth),
             ("eye aperture", record.eyes.aperture),
             ("nose", record.face.nose),
+            ("nose width", record.face.nose_width),
             ("brow", record.face.brow),
             ("mouth", record.face.mouth),
+            ("mouth width", record.face.mouth_width),
             ("ears", record.face.ears),
             ("hair length", record.hair.length),
             ("hair volume", record.hair.volume),
@@ -896,6 +1206,21 @@ mod tests {
         out
     }
 
+    /// Every whole-number control the panel writes.
+    ///
+    /// Kept apart from [`axes`] rather than cast into it, because a count is a
+    /// different kind of thing: it has no thousandth to land on, and the
+    /// question asked of it is whether it survives the wire as the integer it
+    /// is. Casting them to `f32` to share one list is what the panel is for
+    /// NOT doing — a slider showing 11.5 locks or 40.5 years shows a record
+    /// nobody can hold.
+    fn counts(record: &AvatarRecord) -> Vec<(&'static str, u32)> {
+        vec![
+            ("age", record.composites.age),
+            ("hair locks", record.hair.locks),
+        ]
+    }
+
     /// A record with every axis dragged somewhere a slider can put it and
     /// nowhere a thousandth lands.
     fn fiddled() -> AvatarRecord {
@@ -909,8 +1234,14 @@ mod tests {
             params.limb_length = 0.345_67;
             params.neck_length = -0.765_43;
             params.head_size = 0.111_11;
+            params.head_breadth = 0.654_32;
+            params.face_length = -0.543_21;
             params.extremity_size = -0.999_99;
         }
+        record.composites.femininity = 0.371_53;
+        record.composites.mass = -0.628_47;
+        record.composites.body_fat = 0.317_29;
+        record.composites.age = 53;
         record.skin.melanin = 0.456_78;
         record.skin.undertone = -0.333_33;
         record.skin.blush = 0.777_77;
@@ -921,12 +1252,16 @@ mod tests {
         record.eyes.depth = 0.135_79;
         record.eyes.aperture = 0.864_20;
         record.face.nose = 0.192_83;
+        record.face.nose_width = 0.418_27;
         record.face.brow = 0.746_51;
         record.face.mouth = 0.303_03;
+        record.face.mouth_width = 0.572_91;
         record.face.ears = 0.606_06;
         record.hair.length = 0.717_17;
-        record.hair.volume = 0.282_82;
-        record.hair.coverage = 0.454_54;
+        // Negative, because the half of these two axes the panel could not
+        // reach is exactly the half a test that never set them could not catch.
+        record.hair.volume = -0.282_82;
+        record.hair.coverage = -0.454_54;
         record.hair.part = -0.616_16;
         record.hair.wave = 0.838_38;
         record.hair.shade = 0.070_70;
@@ -963,10 +1298,40 @@ mod tests {
                 "{name} went out as {before} and came back as {after}"
             );
         }
+        for ((name, before), (_, after)) in counts(&editor.record).iter().zip(counts(&back)) {
+            assert_eq!(
+                *before, after,
+                "{name} went out as {before} and came back as {after}"
+            );
+        }
         assert_eq!(
             editor.record, back,
             "the record did not survive its own JSON"
         );
+    }
+
+    #[test]
+    fn the_coverage_list_names_every_axis_a_record_carries() {
+        // A ratchet on the list above, not on the panel. What these tests can
+        // check is that every axis survives the wire and lands on a thousandth;
+        // what they cannot check is that a slider is bound to the field its
+        // label names, because nothing here drives the UI. So the failure mode
+        // they DO have is an axis quietly missing from the list — which is how
+        // `head_breadth`, `face_length`, `nose_width` and `mouth_width` went
+        // four axes uncovered from the day they were added (#9).
+        //
+        // Counting is the cheapest guard that survives the next addition: add a
+        // field to the record, and this fails until somebody has decided
+        // whether the panel writes it.
+        let record = fiddled();
+        let listed = axes(&record).len();
+        assert_eq!(
+            listed, 40,
+            "the panel's coverage list names {listed} axes; if a record field \
+             was added or removed, add it to `axes` and `fiddled` and correct \
+             this count"
+        );
+        assert_eq!(counts(&record).len(), 2, "and the same for whole numbers");
     }
 
     #[test]
@@ -984,6 +1349,75 @@ mod tests {
                 "{name} shows {value}, which is not a thousandth"
             );
         }
+    }
+
+    #[test]
+    fn a_share_code_moves_a_look_and_leaves_the_identity_alone() {
+        // What a code is for: passing a face between people. The name, the seed
+        // and the locks belong to the record it lands in, not to the code.
+        let source = RecordEditor::new(fiddled());
+        let code = source.code.clone();
+
+        let mut target = RecordEditor::new(AvatarRecord::new("Mine", Archetype::default()));
+        target.record.seed = 4321;
+        target.record.locks = LockSet::NONE.with(Category::Hair);
+        target.code = code;
+        import(&mut target);
+
+        assert_eq!(target.status, "imported");
+        assert_eq!(target.record.name, "Mine", "the name stayed");
+        assert_eq!(target.record.seed, 4321, "and the seed");
+        assert_eq!(target.record.locks, LockSet::NONE.with(Category::Hair));
+
+        // The look travelled. Codes are one byte an axis, so this is a
+        // tolerance and the engine's own tests say the same.
+        let (Archetype::Humanoid(from), Archetype::Humanoid(to)) =
+            (&source.record.archetype, &target.record.archetype)
+        else {
+            panic!("archetype changed");
+        };
+        assert!((from.height - to.height).abs() < 0.002);
+        assert!(
+            (source.record.composites.femininity - target.record.composites.femininity).abs()
+                < 0.03
+        );
+        assert!((source.record.skin.melanin - target.record.skin.melanin).abs() < 0.01);
+
+        // And the box went back to following, so it now shows the code for the
+        // body actually on screen rather than the one that was pasted.
+        assert_eq!(target.code_state, Json::Following);
+        assert_eq!(target.code, target.record.share_code());
+    }
+
+    #[test]
+    fn a_mistyped_share_code_changes_nothing_at_all() {
+        // `apply_share_code` writes the archetype before it can discover the
+        // payload is short, so importing in place would leave a body half
+        // replaced. This is why `import` works on a copy.
+        let mut editor = RecordEditor::new(fiddled());
+        let before = editor.record.clone();
+        editor.code = String::from("PPPPP-PPPPP-PPPPP");
+        import(&mut editor);
+
+        assert!(
+            editor.status.starts_with("not a share code"),
+            "status was {}",
+            editor.status
+        );
+        assert_eq!(editor.record, before, "a refused code moved something");
+    }
+
+    #[test]
+    fn the_share_code_box_stops_following_once_it_is_typed_in() {
+        let mut editor = RecordEditor::new(fiddled());
+        editor.code_state = Json::Edited;
+        editor.code = String::from("someone else's code");
+        editor.record.name = String::from("Renamed");
+        editor.restate();
+        assert_eq!(
+            editor.code, "someone else's code",
+            "restating ate a pasted code"
+        );
     }
 
     #[test]
