@@ -437,13 +437,22 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
 }
 
 /// The name to show a category by.
+///
+/// Eight since symbios-avatar #53 split the old `features` bit, which had come
+/// to mean head shape, complexion, hair and hand size all at once. The three
+/// that came out of it are the ones a creator most often wants to hold apart —
+/// a face kept while its colouring is rolled — so they read as their own
+/// toggles here rather than as one.
 fn category_name(category: Category) -> &'static str {
     match category {
         Category::Stature => "stature",
         Category::Build => "build",
         Category::Frame => "frame",
         Category::Proportions => "proportions",
-        Category::Features => "features",
+        Category::Head => "head",
+        Category::Colouring => "colouring",
+        Category::Hair => "hair",
+        Category::Age => "age",
     }
 }
 
