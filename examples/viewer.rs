@@ -13,6 +13,7 @@
 //! cargo run --release --example viewer -- --seed 7
 //! cargo run --release --example viewer -- --quadruped
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
+//! cargo run --release --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release --example viewer -- --walk --shot walking.png
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
 //! cargo run --release --example viewer -- --talk             # the jaw speaks
@@ -63,6 +64,21 @@ use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
 
 /// How far the camera starts from the body, as a multiple of its longest side.
 const START_BACK: f32 = 1.9;
+
+/// The same, for `--face`, as a multiple of the head's own radius.
+///
+/// Larger than it looks because the face camera is a 24-degree portrait lens
+/// rather than the default 45: the head fills the frame at this distance and
+/// the perspective is a portrait's rather than a fisheye's.
+///
+/// **A face is judged at conversational range and this instrument could only
+/// stand across the room** (#13). `--shot` takes one frame at whatever the
+/// automatic framing chose, which is the whole body — so every in-app
+/// judgement of a FACE ever made through this viewer was made at about eight
+/// pixels to the centimetre, and symbios-avatar#6's criterion 5 is entirely
+/// about faces. Interactively the answer was always "scroll the wheel"; there
+/// was no answer at all for a captured frame.
+const FACE_BACK: f32 = 6.5;
 /// Pitch the camera starts at, in radians.
 const START_PITCH: f32 = 0.12;
 /// How many frames to let a body appear in before photographing it.
@@ -188,6 +204,22 @@ fn stage(
     ));
     commands.spawn((
         Camera3d::default(),
+        // **A portrait lens under `--face`, and it is not a nicety** (#13). A
+        // face judged through the default 45-degree camera at three head radii
+        // is a face photographed with a wide-angle lens from a foot away: the
+        // nose is thrown forward, the ears fall away, and the judgement that
+        // comes back is about the lens. Portraiture uses 85 mm on full frame
+        // for exactly this reason, which is about 24 degrees vertical — so that
+        // is what the face framing gets, and the distance in `FACE_BACK` is
+        // set against it.
+        Projection::from(PerspectiveProjection {
+            fov: if flag("--face") {
+                24.0f32.to_radians()
+            } else {
+                PerspectiveProjection::default().fov
+            },
+            ..default()
+        }),
         Framed::default(),
         PanOrbitCamera {
             // The sibling application's bindings, and the reason for them is
@@ -348,6 +380,18 @@ fn frame_on_body(
         return;
     };
     let (lo, hi) = body.avatar.parts.body.bounds();
+    // The head's own joint, when `--face` asked for it: its position is the
+    // focus and its radius sets the distance, so the framing follows a head
+    // that `head_size` or a composite has resized rather than a constant
+    // somebody would have to re-tune (#13).
+    let face = flag("--face")
+        .then(|| {
+            let rig = &body.avatar.rig;
+            rig.in_zone(symbios_avatar::Zone::Head)
+                .first()
+                .map(|&head| (rig.joints[head].position, rig.joints[head].radius))
+        })
+        .flatten();
     for (mut camera, mut framed) in &mut cameras {
         if framed.done && !framed.asked {
             continue;
@@ -359,9 +403,15 @@ fn frame_on_body(
         // from having already arrived — the transform stays wherever
         // initialisation left it, and the first version of this fix put the
         // camera on the floor between the body's feet.
-        camera.target_focus = (lo + hi) * 0.5;
+        camera.target_focus = match face {
+            Some((at, _)) => at,
+            None => (lo + hi) * 0.5,
+        };
         camera.focus = camera.target_focus;
-        camera.target_radius = (hi - lo).max_element().max(0.2) * START_BACK;
+        camera.target_radius = match face {
+            Some((_, radius)) => radius * FACE_BACK,
+            None => (hi - lo).max_element().max(0.2) * START_BACK,
+        };
         camera.radius = Some(camera.target_radius);
         camera.force_update = true;
         framed.done = true;
