@@ -10,12 +10,28 @@
 //! parallel attribute arrays. The conversion is therefore mechanical except for
 //! two decisions.
 //!
-//! **Colour space.** The engine's vertex colours are linear and the atlas it
-//! paints is sRGB-encoded. Bevy's `ATTRIBUTE_COLOR` is linear and
-//! `Rgba8UnormSrgb` decodes on sample, so each is handed over in the space it
-//! is already in. Getting this wrong does not produce an obvious error; it
-//! produces a body that is slightly the wrong colour in one renderer, which is
-//! exactly the kind of difference that gets blamed on lighting.
+//! **Colour space.** The engine authors colour in **sRGB** — every one of them,
+//! the atlas and the vertex colours alike. `symbios_avatar::texture::skin` says
+//! so in as many words for the melanin ramp, the hair ramp and `dress::dye` are
+//! picked by eye in the same space, and the engine's own software renderer
+//! decodes vertex colours with `to_linear` before it lights them.
+//!
+//! Bevy wants linear on both channels, and gets there two different ways:
+//! `Rgba8UnormSrgb` decodes the atlas on sample, and `ATTRIBUTE_COLOR` is taken
+//! as linear already — so the atlas is handed over raw and the vertex colours
+//! have to be decoded here, by `linear_of`.
+//!
+//! **This paragraph used to say the vertex colours were linear**, on the word of
+//! `PolyMesh::colours`'s own doc comment, which was wrong and has since been
+//! corrected upstream. What that cost is #14: every
+//! vertex-coloured thing on the body — the iris, the hair, the garment — drew
+//! two to four times too bright in the midtones here and correctly in the
+//! software renderer, and it was the eyes that showed it, because a mid-blue
+//! iris undecoded is a pale grey-blue bead. Skin never showed it at all, because
+//! skin comes through the atlas, which both instruments always decoded. Getting
+//! this wrong does not produce an obvious error; it produces a body that is
+//! slightly the wrong colour in one renderer, which is exactly the kind of
+//! difference that gets blamed on lighting — and was.
 //!
 //! **Normals.** A mesh that carries explicit normals gets them, and one that
 //! does not has them derived. The engine is deliberate about which is which:
@@ -25,6 +41,7 @@
 //! exists to prevent, so it is not a detail to get casually right.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::color::{LinearRgba, Srgba};
 use bevy::image::Image;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -87,14 +104,15 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
     }
 
     if source.colours.len() == vertices {
-        // Already linear on both sides. Alpha is 1: nothing on a body is
-        // transparent, and hair is a swept solid precisely so it need not be.
+        // Decoded, not copied: see the module note on colour space. Alpha is 1:
+        // nothing on a body is transparent, and hair is a swept solid precisely
+        // so it need not be.
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_COLOR,
             source
                 .colours
                 .iter()
-                .map(|c| [c.x, c.y, c.z, 1.0])
+                .map(|c| linear_of(*c))
                 .collect::<Vec<_>>(),
         );
     }
@@ -127,6 +145,19 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
         mesh.compute_normals();
     }
     mesh
+}
+
+/// One of the engine's sRGB colours, as the linear RGBA Bevy's vertex colours
+/// want.
+///
+/// Through Bevy's own `Srgba`-to-`LinearRgba` conversion rather than a transfer
+/// function written out here: the curve has a linear toe below 0.04045 that a bare
+/// `powf(2.2)` misses, and the one place it could disagree with the GPU's
+/// decode of the atlas beside it is a hand-rolled copy of it.
+#[must_use]
+fn linear_of(colour: symbios_avatar::Vec3) -> [f32; 4] {
+    let linear = LinearRgba::from(Srgba::new(colour.x, colour.y, colour.z, 1.0));
+    [linear.red, linear.green, linear.blue, linear.alpha]
 }
 
 /// Uploads a painted skin atlas as a texture.
@@ -267,6 +298,58 @@ mod tests {
             distinct.len() > 8,
             "every lock came out the same colour ({} distinct)",
             distinct.len()
+        );
+    }
+
+    #[test]
+    fn vertex_colours_are_decoded_from_srgb_rather_than_copied() {
+        // #14. The engine authors colour in sRGB and Bevy
+        // wants ATTRIBUTE_COLOR linear, so a copy is 2-4x too bright in the
+        // midtones — which is what made a mid-blue iris read as a pale bead
+        // here and as a dark eye in the software renderer.
+        //
+        // Asserted against the transfer function's own arithmetic rather than
+        // against a remembered pixel: the toe below 0.04045 is linear and the
+        // shoulder is a 2.4 power, and a hand-rolled 2.2 gamma passes a test
+        // written from a screenshot while still disagreeing with the GPU's
+        // decode of the atlas beside it.
+        let avatar = avatar();
+        let hair = avatar
+            .drawn(0.0)
+            .into_iter()
+            .find(|mesh| mesh.kind == MeshKind::Hair)
+            .expect("a biped has hair");
+        let mesh = mesh_of(&hair);
+        let Some(VertexAttributeValues::Float32x4(converted)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("hair converted without its colours");
+        };
+        assert_eq!(converted.len(), hair.mesh.colours.len());
+
+        let expected = |channel: f32| {
+            if channel <= 0.040_45 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let mut darkened = 0;
+        for (source, drawn) in hair.mesh.colours.iter().zip(converted) {
+            for (authored, linear) in [source.x, source.y, source.z].into_iter().zip(drawn) {
+                assert!(
+                    (linear - expected(authored)).abs() < 1e-5,
+                    "{authored} decoded to {linear}, not {}",
+                    expected(authored)
+                );
+                if authored > 0.05 && *linear < authored * 0.9 {
+                    darkened += 1;
+                }
+            }
+        }
+        assert!(
+            darkened > 0,
+            "nothing was decoded at all: every channel came through unchanged"
         );
     }
 
