@@ -56,8 +56,8 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, Category, HumanoidParams, Leg, Limb,
-    QuadrupedParams, Rig, Sleeve, Zone,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, Category, GENERATOR_VERSION, HumanoidParams,
+    Leg, Limb, QuadrupedParams, Rig, Sleeve, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -461,6 +461,24 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
             changed = true;
         }
     });
+
+    // **What generation drew this body, and whether this build agrees**
+    // (symbios-avatar #103, #169). A seed is stored so a look can be
+    // reproduced, and that promise holds only against the generator that drew
+    // it — the engine says so on `GENERATOR_VERSION` and then has no way to
+    // tell anybody. This is the reader that should: a record rolled by an
+    // older generation still LOADS, and every axis it stores is honoured
+    // exactly, but pressing either seed arrow redraws it under today's rules
+    // and it will not come back the same person.
+    if editor.record.generator != GENERATOR_VERSION {
+        ui.horizontal_wrapped(|ui| {
+            ui.small(format!(
+                "⚠ rolled by generator {}, this build draws {} — the stored axes are \
+                 exact, but re-rolling this seed will not reproduce it",
+                editor.record.generator, GENERATOR_VERSION
+            ));
+        });
+    }
 
     ui.horizontal_wrapped(|ui| {
         ui.label("locked");
@@ -887,7 +905,24 @@ fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
         };
         let skeleton = record.skeleton();
 
+        // **Nominal against built, because age put a wedge between them**
+        // (symbios-avatar #167, #103). The settle takes its length out of the
+        // trunk, so an old body stands shorter than the stature axis says
+        // while every other readout here stays a fraction of the nominal
+        // figure. One line said "nominal" and left the difference for somebody
+        // to discover; now the panel shows both whenever they disagree.
+        let built = skeleton
+            .nodes
+            .iter()
+            .map(|node| node.position.y + node.radius)
+            .fold(f32::MIN, f32::max);
         ui.small(format!("stature      {stature:.3} m nominal"));
+        if (built - stature).abs() > 0.002 {
+            ui.small(format!(
+                "             {built:.3} m to the crown of the cage, {:+.1} cm",
+                (built - stature) * 100.0
+            ));
+        }
         for (name, zone) in [
             ("pelvis", Zone::Pelvis),
             ("waist", Zone::Abdomen),
