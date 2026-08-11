@@ -21,8 +21,9 @@
 //! a flag.
 //!
 //! Unlike a rebuild, none of this costs anything: a pose is a few dozen
-//! quaternions. The one exception is a blink, which is geometry until the face
-//! has a rig of its own — see [`crate::spawn::AvatarClosure`].
+//! quaternions — a blink included, since symbios-avatar#118 gave the four lids
+//! joints of their own. It used to be the one exception, and cost a rebuild of
+//! two meshes every time it moved.
 
 use bevy::prelude::*;
 use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};
@@ -486,13 +487,23 @@ pub fn drive_avatar_animation(
             });
             pose
         };
+        // **The blink, AFTER the blend, and that is deliberate.** A closure is
+        // a pose now (symbios-avatar#118) rather than a rebuild of two meshes,
+        // so it could ride through the inertializer with everything else — and
+        // it should not. A blink is about a tenth of a second from open to shut
+        // and back; smoothed by a gait blend it arrives as a slow heavy-lidded
+        // droop, which reads as a body falling asleep rather than as one
+        // blinking. The jaw goes in before the blend because speech shares the
+        // head's own timing; a lid does not.
+        let mut posed = posed;
+        if let Some(eyes) = body.avatar.parts.eyes.as_ref() {
+            eyes.blink(&mut posed, closure);
+        }
         commands.entity(entity).insert(AvatarPose(posed));
-        // A closure is geometry, not a transform: writing one rebuilds two
-        // meshes. That is the honest cost of a blink and nothing else should
-        // pay it, so a held closure is written when it is asked for and when a
-        // freshly built body has not been told about it yet — a rebuild spawns
-        // with the lids open, and a body that silently reopened its eyes on
-        // every re-roll reads exactly like a closure that does not stick.
+        // Kept as the record of what the lids are holding, for anything that
+        // wants to ask. It no longer drives geometry: writing one used to
+        // rebuild the eye meshes, which is what a blink cost before the lids
+        // had joints.
         if animator.blinking || asked || body.is_added() {
             commands.entity(entity).insert(AvatarClosure(closure));
         }
