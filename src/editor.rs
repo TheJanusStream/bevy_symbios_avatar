@@ -575,8 +575,13 @@ fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
                 // skull has.
                 let stature = symbios_avatar::HumanoidParams::height_envelope();
                 changed |= axis(ui, "height", &mut params.height, stature.0..=stature.1);
-                changed |= explored(ui, "build", &mut params.build, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "muscle", &mut params.muscle, 0.0, (0.0, 1.0));
+                // `build` and `muscle` used to sit here and are gone
+                // (symbios-avatar #164): they retired into the `mass` and
+                // `bodyFat` composites above, which reach the same radii
+                // allometrically rather than by one factor on all of them. The
+                // panel keeps them in the composites section and not here,
+                // which is the whole point of the two tiers — this block is the
+                // per-region OFFSETS, and how heavy a body is was never one.
                 changed |= explored(
                     ui,
                     "shoulder width",
@@ -1144,8 +1149,6 @@ mod tests {
         let mut out = match &record.archetype {
             Archetype::Humanoid(p) => vec![
                 ("height", p.height),
-                ("build", p.build),
-                ("muscle", p.muscle),
                 ("shoulder_width", p.shoulder_width),
                 ("hip_width", p.hip_width),
                 ("limb_length", p.limb_length),
@@ -1227,8 +1230,6 @@ mod tests {
         let mut record = AvatarRecord::new("Fiddled", Archetype::default());
         if let Archetype::Humanoid(params) = &mut record.archetype {
             params.height = 1.812_34;
-            params.build = -0.456_78;
-            params.muscle = 0.234_56;
             params.shoulder_width = 0.876_54;
             params.hip_width = -0.098_76;
             params.limb_length = 0.345_67;
@@ -1323,10 +1324,16 @@ mod tests {
         // Counting is the cheapest guard that survives the next addition: add a
         // field to the record, and this fails until somebody has decided
         // whether the panel writes it.
+        //
+        // **40 → 38** (symbios-avatar #164): `build` and `muscle` retired into
+        // the `mass` and `bodyFat` composites, which the panel already carries.
+        // This is the guard doing its job in the removal direction — the count
+        // fell and somebody had to decide the two sliders were gone rather than
+        // missing.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 40,
+            listed, 38,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"
