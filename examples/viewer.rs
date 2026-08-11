@@ -15,6 +15,9 @@
 //! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release --example viewer -- --walk --shot walking.png
+//! cargo run --release --example viewer -- --gait wave --pace 1.4 --shot wave.png
+//! cargo run --release --example viewer -- --walk --phase 0.35 --cadence 1.6
+//! cargo run --release --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
 //! cargo run --release --example viewer -- --talk             # the jaw speaks
 //! cargo run --release --example viewer -- --open 0.2         # hold the jaw open, radians
@@ -44,6 +47,18 @@
 //!   software renderer is this crate's fault, and one that reads wrong in both
 //!   is the engine's. `scrub` holds the gait at one phase, which is the only
 //!   way to look at a foot plant.
+//! - **Everything the motion window steers about a gait has a flag now** (#15).
+//!   It had `--walk` and nothing else, so a captured frame could show one of
+//!   the four patterns, at one cadence, at one pace — and the window that
+//!   reaches the rest is the one `--shot` deliberately never opens. `--gait`,
+//!   `--cadence` and `--pace` close that, and `--phase` already held both a
+//!   gait and a clip at a chosen point in the cycle.
+//! - **A humanoid's RUN is `--clip Jog` or `--clip Sprint`**, not a gait.
+//!   symbios-avatar#141 settled locomotion on imported clips for humanoids and
+//!   kept the procedural gait for the bodies the correspondence refuses, and
+//!   the procedural gait cannot run in any case: every `Gait` constructor
+//!   floors a two-legged body's duty at a half, which is the definition of a
+//!   walk. `no_procedural_gait_this_viewer_can_select_is_a_run` asserts it.
 //! - `H` hides both windows, and `--shot` never shows them.
 //! - `F` frames the camera on the body again. Editing a record never moves the
 //!   camera — a view that shifts while you are changing something else is a view
@@ -57,7 +72,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_egui::EguiPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
-use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin};
+use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind};
 use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
 use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, Clips};
 use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
@@ -294,7 +309,25 @@ fn starting_animator() -> Animator {
     let live = !flag("--still");
     let mut animator = Animator::default();
     animator.open = windows_wanted();
-    animator.walking = flag("--walk");
+    // Asking for a pattern is asking for it to be walked: a gait named and not
+    // running is the rest pose, which is what `--gait standing` gives anyway.
+    animator.walking = flag("--walk") || word("--gait").is_some();
+    if let Some(name) = word("--gait") {
+        let Some(kind) = GaitKind::named(&name) else {
+            eprintln!("no gait called {name}. The patterns are:");
+            for kind in GaitKind::ALL {
+                eprintln!("  {}", kind.label());
+            }
+            eprintln!("a humanoid's run is a clip: --clip Jog, --clip Sprint");
+            std::process::exit(1);
+        };
+        animator.gait = kind;
+    }
+    // Both from the same place the window's sliders write, and both left at the
+    // resource's own default when they are not given: a flag that silently
+    // re-tuned a gait would make every capture incomparable with every other.
+    animator.cadence = value("--cadence").unwrap_or(animator.cadence);
+    animator.pace = value("--pace").unwrap_or(animator.pace);
     // So a captured frame can be placed in the cycle rather than wherever the
     // twelfth frame happened to land. Judging a gait from one arbitrary phase
     // is how a walk gets called stiff when it has only ever been seen at

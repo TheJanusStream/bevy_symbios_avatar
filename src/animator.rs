@@ -76,6 +76,17 @@ impl GaitKind {
         }
     }
 
+    /// The kind that goes by this name, if any.
+    ///
+    /// The inverse of [`Self::label`], so a command line can reach the picker's
+    /// own set. Until #15 the pattern was selectable **only** through the motion
+    /// window, and `--shot` never opens a window — so of the four gaits below,
+    /// a captured frame could show one.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.label() == name)
+    }
+
     /// The gait itself, for a body.
     #[must_use]
     pub fn of(self, rig: &symbios_avatar::Rig) -> Gait {
@@ -1146,6 +1157,46 @@ mod tests {
             assert!(
                 !gait.is_empty(),
                 "{} drove no contacts on a two-legged body",
+                kind.label()
+            );
+            assert_eq!(
+                GaitKind::named(kind.label()),
+                Some(kind),
+                "{} does not answer to its own name",
+                kind.label()
+            );
+        }
+    }
+
+    #[test]
+    fn no_procedural_gait_this_viewer_can_select_is_a_run() {
+        // **Written down because #15 assumed the opposite and it cost a
+        // session's premise.** `Gait::duty`'s own docstring says a duty above a
+        // half is what makes a gait a walk and below it the body has airborne
+        // moments and is running — but no constructor reaches below a half on
+        // two legs: `wave` floors at `0.5 + DOUBLE_SUPPORT`, `trot` falls back
+        // to `wave` on anything that is not four-legged, and `standing` is 1.0.
+        // So there is no `--gait run` to add and never was.
+        //
+        // A humanoid's run is a BAKED CLIP — `Jog` and `Sprint`, which is what
+        // symbios-avatar#141 settled locomotion on — and it is captured with
+        // `--clip Sprint --phase 0.35`. This asserts the gap rather than
+        // describing it: if a running gait is ever built for the procedural
+        // path, this fails and says so.
+        let mut app = app();
+        let mut bodies = app.world_mut().query::<&AvatarBody>();
+        let rig = bodies
+            .iter(app.world())
+            .next()
+            .expect("a body")
+            .avatar
+            .rig
+            .clone();
+        assert_eq!(rig.ground_contacts().len(), 2, "the fixture is a biped");
+        for kind in GaitKind::ALL {
+            assert!(
+                kind.of(&rig).duty >= 0.5,
+                "{} runs on two legs now — give the viewer a flag for it",
                 kind.label()
             );
         }
