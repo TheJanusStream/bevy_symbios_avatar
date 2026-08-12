@@ -18,6 +18,7 @@
 //! cargo run --release --example viewer -- --gait wave --pace 1.4 --shot wave.png
 //! cargo run --release --example viewer -- --walk --phase 0.35 --cadence 1.6
 //! cargo run --release --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
+//! cargo run --release --example viewer -- --mane 0.0        # bald, for judging a jaw
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
 //! cargo run --release --example viewer -- --talk             # the jaw speaks
 //! cargo run --release --example viewer -- --open 0.2         # hold the jaw open, radians
@@ -295,6 +296,13 @@ fn starting_editor() -> RecordEditor {
         .and_then(|seed| seed.parse::<i64>().ok())
     {
         record.reroll(seed);
+    }
+    // `--mane 0.0` for a bald judgement shot: hair is the loudest thing on a
+    // head and the first thing in the way of judging a jaw, and the panel's
+    // hair-length axis cannot be dragged by a script. Applied after the
+    // reroll so a seeded body keeps everything else it rolled.
+    if let Some(length) = value("--mane") {
+        record.hair.length = length.clamp(0.0, 1.0);
     }
     let mut editor = RecordEditor::new(record);
     editor.open = windows_wanted();
