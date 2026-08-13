@@ -626,7 +626,16 @@ fn solve_footing(
     stance: &[symbios_avatar::Limb],
     grade: f32,
 ) -> (f32, usize) {
-    let ground = |foot: Vec3| Some(Ground::level(Vec3::new(foot.x, foot.x * grade, foot.z)));
+    // The surface `y = x * grade` — position AND normal. `Ground::level` here
+    // handed the solve a flat `+y` normal on a sloping surface, so the ankles
+    // held their soles level across the very slope this control exists to ask
+    // them about (#21).
+    let ground = |foot: Vec3| {
+        Some(Ground {
+            position: Vec3::new(foot.x, foot.x * grade, foot.z),
+            normal: Vec3::new(-grade, 1.0, 0.0).normalize(),
+        })
+    };
     let before = pose.forward(rig).positions;
     let footing = plant_feet_of(rig, pose, stance, ground, &FootingConfig::default());
     let after = pose.forward(rig).positions;

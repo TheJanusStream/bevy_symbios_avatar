@@ -188,9 +188,12 @@ fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Flo
         return;
     }
     // The plane is the world's `xz`, and `slope` is a rise over run toward `+x`,
-    // so the tilt is a rotation about `z` of `atan(slope)` — negative because a
-    // positive rotation about `z` carries `+x` downward.
-    let tilt = Quat::from_rotation_z(-animator.slope.atan());
+    // so the tilt is a rotation about `z` of `atan(slope)` — POSITIVE, because a
+    // positive rotation about `z` carries `+x` toward `+y`, up. This sign was
+    // negative once, justified by the opposite claim, and the floor tilted
+    // against the very ground the footing solve was planting feet on: the
+    // downhill foot rode visibly higher (#21).
+    let tilt = Quat::from_rotation_z(animator.slope.atan());
     for mut transform in &mut floor {
         transform.rotation = tilt;
     }
