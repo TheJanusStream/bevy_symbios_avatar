@@ -742,6 +742,7 @@ fn face_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
         });
 }
 
+#[cfg(feature = "editor")]
 fn clip_controls(ui: &mut bevy_egui::egui::Ui, clips: &Clips, animator: &mut Animator) {
     ui.horizontal_wrapped(|ui| {
         for (which, clip) in clips.0.clips.iter().enumerate() {

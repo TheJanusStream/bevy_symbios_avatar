@@ -48,6 +48,45 @@
 //! not by arithmetic repeated here — because the wire format is scaled integers
 //! in thousandths and has no floats at all, so a slider reading 0.4567 would be
 //! showing a number no record can hold.
+//!
+//! ## Hosting the sections in another app (#231)
+//!
+//! The panel is composed from public per-section functions, and those — not
+//! the panel — are the reuse surface. A host with its own window, theme, undo
+//! and rebuild pipeline calls the sections against its own record and owes
+//! this module nothing else: no [`RecordEditor`] resource, no
+//! [`RecordEditorPlugin`], no [`EditedAvatar`] entity. Every section takes
+//! `&mut egui::Ui` and writes one [`AvatarRecord`] (or its archetype), and
+//! returns whether it changed something that changes the *body* — the host's
+//! cue to sanitise and rebuild on whatever schedule it owns. That split is the
+//! contract: **the sections write the record and say so; what a change costs
+//! is the host's business.** This keeps one source of truth for axis widgets
+//! across every host, which is the standing rule that each engine schema
+//! change carries an editor slice — there is exactly one place a new axis has
+//! to learn to draw itself.
+//!
+//! ```no_run
+//! use bevy_egui::egui;
+//! use bevy_symbios_avatar::editor;
+//! use symbios_avatar::AvatarRecord;
+//!
+//! /// A host's own panel: same sections, its own chrome and rebuild.
+//! fn body_sections(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+//!     let mut changed = editor::composite_axes(ui, record);
+//!     changed |= editor::body_axes(ui, &mut record.archetype);
+//!     changed |= editor::skin_axes(ui, record);
+//!     changed |= editor::eye_axes(ui, record);
+//!     changed |= editor::face_axes(ui, record);
+//!     changed |= editor::hair_axes(ui, record);
+//!     changed |= editor::outfit_axes(ui, record);
+//!     if changed {
+//!         // Snaps every axis to the thousandth the wire format stores; the
+//!         // host decides when the 68–277 ms rebuild is paid for.
+//!         record.sanitize();
+//!     }
+//!     changed
+//! }
+//! ```
 
 use std::time::Duration;
 
@@ -401,7 +440,7 @@ pub fn record_editor_panel(
         .default_width(320.0)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let (built, noted) = identity(ui, &mut editor);
+                let (built, noted) = identity(ui, &mut editor.record);
                 rebuild |= built;
                 restate |= noted;
                 ui.separator();
@@ -442,27 +481,29 @@ pub fn record_editor_panel(
 /// Name, seed, archetype and the locks a re-roll honours.
 ///
 /// Returns whether the body changed, and whether the record changed without
-/// the body changing.
-fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
+/// the body changing — two answers because they cost three orders of
+/// magnitude apart, and a host that rebuilt for a keystroke in the name box
+/// would pay a draft build per letter.
+pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
     let mut changed = false;
     let mut noted = false;
     ui.horizontal(|ui| {
         ui.label("name");
         noted |= ui
-            .add(egui::TextEdit::singleline(&mut editor.record.name).desired_width(200.0))
+            .add(egui::TextEdit::singleline(&mut record.name).desired_width(200.0))
             .changed();
     });
 
     ui.horizontal(|ui| {
         ui.label("body");
-        let humanoid = matches!(editor.record.archetype, Archetype::Humanoid(_));
+        let humanoid = matches!(record.archetype, Archetype::Humanoid(_));
         if ui.selectable_label(humanoid, "humanoid").clicked() && !humanoid {
-            editor.record.archetype = Archetype::Humanoid(HumanoidParams::default());
+            record.archetype = Archetype::Humanoid(HumanoidParams::default());
             changed = true;
         }
-        let quadruped = matches!(editor.record.archetype, Archetype::Quadruped(_));
+        let quadruped = matches!(record.archetype, Archetype::Quadruped(_));
         if ui.selectable_label(quadruped, "quadruped").clicked() && !quadruped {
-            editor.record.archetype = Archetype::Quadruped(QuadrupedParams::default());
+            record.archetype = Archetype::Quadruped(QuadrupedParams::default());
             changed = true;
         }
     });
@@ -472,7 +513,7 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
         // Typing a seed records which draw a body came from; it does not
         // re-draw one. That is the button beside it.
         noted |= ui
-            .add(egui::DragValue::new(&mut editor.record.seed).speed(1.0))
+            .add(egui::DragValue::new(&mut record.seed).speed(1.0))
             .changed();
         // **A hunt, not a shuffle** (#122). Deliberately the neighbouring seed
         // rather than one off the clock: this is an instrument, and a seed you
@@ -489,7 +530,7 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
             .on_hover_text("the seed before this")
             .clicked()
         {
-            editor.record.reroll(editor.record.seed.wrapping_sub(1));
+            record.reroll(record.seed.wrapping_sub(1));
             changed = true;
         }
         if ui
@@ -497,7 +538,7 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
             .on_hover_text("the seed after this")
             .clicked()
         {
-            editor.record.reroll(editor.record.seed.wrapping_add(1));
+            record.reroll(record.seed.wrapping_add(1));
             changed = true;
         }
     });
@@ -510,12 +551,12 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
     // older generation still LOADS, and every axis it stores is honoured
     // exactly, but pressing either seed arrow redraws it under today's rules
     // and it will not come back the same person.
-    if editor.record.generator != GENERATOR_VERSION {
+    if record.generator != GENERATOR_VERSION {
         ui.horizontal_wrapped(|ui| {
             ui.small(format!(
                 "⚠ rolled by generator {}, this build draws {} — the stored axes are \
                  exact, but re-rolling this seed will not reproduce it",
-                editor.record.generator, GENERATOR_VERSION
+                record.generator, GENERATOR_VERSION
             ));
         });
     }
@@ -523,26 +564,26 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
     ui.horizontal_wrapped(|ui| {
         ui.label("locked");
         for category in Category::ALL {
-            let mut locked = editor.record.locks.is_locked(category);
+            let mut locked = record.locks.is_locked(category);
             if ui
                 .toggle_value(&mut locked, category_name(category))
                 .changed()
             {
                 // A lock changes nothing about the body until the next
                 // re-roll, so it is not a reason to rebuild one.
-                editor.record.locks.toggle(category);
+                record.locks.toggle(category);
                 noted = true;
             }
         }
     });
-    if editor.record.locks.is_everything() {
+    if record.locks.is_everything() {
         ui.small("every category locked: a re-roll would do nothing");
     } else {
         // What the hunt is actually searching, said plainly. Locking IS the
         // technique — keep what you have found, step the seed, judge only what
         // is still moving — and it stays invisible unless the panel says which
         // part of the body the next step is allowed to touch.
-        let held = editor.record.locks.locked();
+        let held = record.locks.locked();
         if !held.is_empty() {
             let names: Vec<&str> = held.into_iter().map(category_name).collect();
             ui.small(format!("hunting, holding {}", names.join(", ")));
@@ -558,7 +599,8 @@ fn identity(ui: &mut egui::Ui, editor: &mut RecordEditor) -> (bool, bool) {
 /// that came out of it are the ones a creator most often wants to hold apart —
 /// a face kept while its colouring is rolled — so they read as their own
 /// toggles here rather than as one.
-fn category_name(category: Category) -> &'static str {
+#[must_use]
+pub fn category_name(category: Category) -> &'static str {
     match category {
         Category::Stature => "stature",
         Category::Build => "build",
@@ -584,7 +626,7 @@ fn category_name(category: Category) -> &'static str {
 /// `age` is a count of whole years. Handing either the ±3 treatment would offer
 /// a negative body-fat fraction and a two-hundred-year-old, which is why the
 /// engine does not stretch them (symbios-avatar #162).
-fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     use symbios_avatar::plan::{AGE_RANGE, BODY_FAT_RANGE};
 
     let mut changed = false;
@@ -621,7 +663,7 @@ fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 }
 
 /// The archetype's own axes, whichever archetype it is.
-fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
+pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("body")
         .default_open(true)
@@ -705,7 +747,7 @@ fn swatch(tone: symbios_avatar::Vec3) -> egui::Color32 {
 }
 
 /// Complexion.
-fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("skin").show(ui, |ui| {
         // **The ramp the engine already has, drawn** (#122). A melanin slider
@@ -754,7 +796,7 @@ fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 }
 
 /// How the eyes are shaped and set.
-fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("eyes").show(ui, |ui| {
         changed |= explored(ui, "size", &mut record.eyes.size, 0.5, (0.0, 1.0));
@@ -771,7 +813,7 @@ fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 }
 
 /// Nose, brow, mouth and ears.
-fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("face").show(ui, |ui| {
         changed |= explored(ui, "nose", &mut record.face.nose, 0.5, (0.0, 1.0));
@@ -809,7 +851,7 @@ fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// controls in one open header is a wall, and a person editing a beard is not
 /// editing a hairline. egui only runs the body of an OPEN header, so the four
 /// nobody has opened cost nothing to draw.
-fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("hair").show(ui, |ui| {
         changed |= zone(ui, "scalp", |ui| {
@@ -1115,7 +1157,7 @@ fn flank_style(ui: &mut egui::Ui, style: &mut symbios_avatar::FlankStyle) -> boo
 }
 
 /// What the body is wearing.
-fn outfit_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+pub fn outfit_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("outfit").show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -1171,7 +1213,7 @@ fn leg_name(cut: &Leg) -> String {
 /// A thousandth is exactly what the wire format carries, so the slider cannot
 /// land between two values a record can hold. What it shows is what would be
 /// written.
-fn axis(
+pub fn axis(
     ui: &mut egui::Ui,
     name: &str,
     value: &mut f32,
@@ -1187,7 +1229,7 @@ fn axis(
 }
 
 /// A `-1..=1` axis.
-fn signed(ui: &mut egui::Ui, name: &str, value: &mut f32) -> bool {
+pub fn signed(ui: &mut egui::Ui, name: &str, value: &mut f32) -> bool {
     axis(ui, name, value, -1.0..=1.0)
 }
 
@@ -1199,7 +1241,7 @@ fn signed(ui: &mut egui::Ui, name: &str, value: &mut f32) -> bool {
 /// deliberately keep their classic sliders; the envelope is a shape idea.
 ///
 /// [`explore_range`]: symbios_avatar::plan::explore_range
-fn explored(
+pub fn explored(
     ui: &mut egui::Ui,
     name: &str,
     value: &mut f32,
@@ -1230,7 +1272,7 @@ fn explored(
 /// Costs nothing while the header is shut: egui only runs the body of an open
 /// one, and the skeleton is rebuilt inside it rather than cached, so what is
 /// shown cannot lag what is set.
-fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
+pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
     egui::CollapsingHeader::new("derived").show(ui, |ui| {
         let stature = match &record.archetype {
             Archetype::Humanoid(params) => params.height,
