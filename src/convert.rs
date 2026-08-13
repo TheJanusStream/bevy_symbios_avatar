@@ -149,12 +149,51 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
     // atlas-covered skin, the one mesh whose material carries a normal map.
     // A mesh whose UVs defeat mikktspace keeps its smooth normals and says so,
     // rather than shipping a broken frame.
-    if source.uvs.len() == vertices
-        && let Err(error) = mesh.generate_tangents()
-    {
-        bevy::log::warn!("skin tangents could not be generated: {error}");
+    if source.uvs.len() == vertices {
+        match mesh.generate_tangents() {
+            Ok(()) => repair_tangents(&mut mesh),
+            Err(error) => bevy::log::warn!("skin tangents could not be generated: {error}"),
+        }
     }
     mesh
+}
+
+/// Replaces tangents that cannot carry a normal map.
+///
+/// The lids are built after the atlas is packed and sample a single texel, so
+/// their triangles span no UV area — and mikktspace, unlike the engine
+/// renderer's `tangent_frame`, has no fallback for a frame divided by nothing:
+/// the shipped body came back with four tangents the shader could not light,
+/// and each drew as a flat grey shard on a cheek (#23).
+///
+/// Any unit vector perpendicular to the vertex normal is a correct repair,
+/// not merely a safe one: a triangle with no UV area samples one texel
+/// forever, the engine's normal map is flat wherever nothing was painted, and
+/// a flat sample leaves the smooth normal untouched whatever frame carries it.
+fn repair_tangents(mesh: &mut Mesh) {
+    let normals: Vec<bevy::math::Vec3> = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+        Some(VertexAttributeValues::Float32x3(normals)) => normals
+            .iter()
+            .map(|normal| bevy::math::Vec3::from_array(*normal).normalize_or_zero())
+            .collect(),
+        _ => return,
+    };
+    let Some(VertexAttributeValues::Float32x4(tangents)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_TANGENT)
+    else {
+        return;
+    };
+    for (slot, tangent) in tangents.iter_mut().enumerate() {
+        let along = bevy::math::Vec3::new(tangent[0], tangent[1], tangent[2]);
+        let normal = normals.get(slot).copied().unwrap_or(bevy::math::Vec3::Y);
+        let broken = !along.is_finite()
+            || along.length_squared() < 0.25
+            || along.normalize_or_zero().dot(normal).abs() > 0.99;
+        if broken {
+            let fixed = normal.any_orthonormal_vector();
+            *tangent = [fixed.x, fixed.y, fixed.z, 1.0];
+        }
+    }
 }
 
 /// One of the engine's sRGB colours, as the linear RGBA Bevy's vertex colours
@@ -227,6 +266,7 @@ fn image_of(pixels: &[u8], map: &symbios_avatar::TextureMap, format: TextureForm
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::Vec3;
     use bevy::mesh::MeshVertexAttribute;
     use symbios_avatar::{Archetype, Avatar, AvatarRecord, MeshKind};
 
@@ -326,6 +366,51 @@ mod tests {
                 "{name} carries exactly the base level"
             );
         }
+    }
+
+    #[test]
+    fn every_tangent_can_carry_a_normal_map() {
+        // The lids are built after the atlas is packed and sample one texel,
+        // so their triangles span no UV area — and mikktspace, unlike the
+        // engine renderer's tangent_frame, has no honest fallback for that:
+        // it hands the shader a frame that collapses fragment lighting into
+        // flat grey shards at the lids (#23). Every tangent must be finite,
+        // unit-ish, and off the normal's own axis.
+        let avatar = avatar();
+        let body = avatar
+            .drawn(0.0)
+            .into_iter()
+            .find(|mesh| mesh.kind == MeshKind::Skin)
+            .expect("a body has skin");
+        let mesh = mesh_of(&body);
+        let Some(VertexAttributeValues::Float32x3(normals)) =
+            mesh.attribute(Mesh::ATTRIBUTE_NORMAL)
+        else {
+            panic!("skin carries normals");
+        };
+        let Some(VertexAttributeValues::Float32x4(tangents)) =
+            mesh.attribute(Mesh::ATTRIBUTE_TANGENT)
+        else {
+            panic!("skin carries tangents");
+        };
+
+        let mut broken = 0;
+        for (tangent, normal) in tangents.iter().zip(normals) {
+            let t = Vec3::new(tangent[0], tangent[1], tangent[2]);
+            let n = Vec3::from_array(*normal).normalize_or_zero();
+            if !t.is_finite()
+                || t.length_squared() < 0.25
+                || t.normalize_or_zero().dot(n).abs() > 0.99
+            {
+                broken += 1;
+            }
+        }
+        assert_eq!(
+            broken,
+            0,
+            "{broken} of {} tangents cannot carry a normal map",
+            tangents.len()
+        );
     }
 
     #[test]
