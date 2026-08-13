@@ -27,7 +27,8 @@
 use bevy::prelude::*;
 use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};
 use symbios_avatar::{
-    Blink, ClipLibrary, FootingConfig, Gait, Ground, Inertializer, Pose, Rig, Stride, Talk, Zone,
+    Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Pose, Rig, Stride,
+    Talk, Viseme, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
@@ -242,6 +243,25 @@ pub struct Animator {
     pub lift: f32,
     /// How many contacts the solve could not reach on the last frame.
     pub straining: usize,
+    /// The face the body rests in, as picked in the panel.
+    ///
+    /// The target. What is actually showing eases toward it in EXPRESSION
+    /// space through [`Expression::toward`] — the engine's own contract for
+    /// why pose-space blending is wrong lives on that method — over
+    /// [`Animator::blend`] seconds, the same knob every other transition here
+    /// uses.
+    pub expression: Expression,
+    /// A lipsync mouth shape held over the expression, if any.
+    ///
+    /// Speech owns the mouth (symbios-avatar#218): when this is set it writes
+    /// the jaw and the corners over whatever `talk` and the expression put
+    /// there, which is exactly what a viseme stream arriving from an audio
+    /// pipeline would do. The panel exposes it so each shape can be judged
+    /// held still.
+    pub viseme: Option<Viseme>,
+    /// The expression currently showing — the cursor easing toward
+    /// [`Animator::expression`]. Bypass-written each frame, like `lift`.
+    showing: Expression,
     /// The engine's blink timer.
     blink: Blink,
     /// The engine's speech driver.
@@ -283,6 +303,9 @@ impl Default for Animator {
             blend: 0.15,
             lift: 0.0,
             straining: 0,
+            expression: Expression::NEUTRAL,
+            viseme: None,
+            showing: Expression::NEUTRAL,
             blink: Blink::seeded(7),
             talk: Talk::seeded(7),
             elapsed: 0.0,
@@ -298,7 +321,14 @@ impl Animator {
     /// the viewer stays honest about what a body that is doing nothing costs.
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        !self.walking && !self.blinking && !self.tracking && !self.talking && self.clip.is_none()
+        !self.walking
+            && !self.blinking
+            && !self.tracking
+            && !self.talking
+            && self.clip.is_none()
+            // An expression still easing toward its target is motion: the
+            // still-body rule may only re-engage once the face has arrived.
+            && self.showing == self.expression
     }
 
     /// What is driving the body, as a value that changes when the source does.
@@ -383,14 +413,21 @@ pub fn drive_avatar_animation(
     if animator.tracking {
         animator.elapsed += delta;
     }
+    // The cursor is bypass-written for the same reason `lift` is — it is
+    // this frame's readout, not an instruction.
+    let showing = ease_expression(animator.showing, animator.expression, delta, animator.blend);
+    animator.bypass_change_detection().showing = showing;
     // A blink is stochastic, so a single captured frame almost never catches
     // one. Holding the lids at a chosen point is what makes the geometry path
-    // checkable from a still.
-    let closure = if animator.blinking {
+    // checkable from a still. Either way the phase runs THROUGH the
+    // expression's `closure_at` — rest + (1 − rest) · phase — because adding
+    // a widened rest to a full blink leaves an eye that never shuts, which is
+    // the hole the engine's guard found (symbios-avatar#217).
+    let closure = showing.closure_at(if animator.blinking {
         animator.blink.advance(delta)
     } else {
         animator.closure
-    };
+    });
     // Speech is a pose, not geometry: the mandible region (#152) hangs off the
     // jaw pivot, so talking costs a rotation where a blink costs a rebuild.
     let jaw_angle = if animator.talking {
@@ -477,11 +514,9 @@ pub fn drive_avatar_animation(
                 ..GazeConfig::default()
             },
         );
-        // The jaw, after the gaze for the same reason the gaze comes after the
-        // gait: speech is a rotation added to wherever the head already is.
-        if let Some(pivot) = jaw_pivot(rig) {
-            pose.rotations[pivot] = Quat::from_rotation_x(jaw_angle);
-        }
+        // The face, after the gaze for the same reason the gaze comes after
+        // the gait: everything here is added to wherever the head already is.
+        pose_face(rig, &mut pose, jaw_angle, showing, animator.viseme);
         // The blend, last, so it corrects whatever the sources produced rather
         // than being overwritten by them.
         let posed = if let Some(mut blending) = blending {
@@ -526,6 +561,48 @@ pub fn drive_avatar_animation(
 /// only joints in a rig that carry the flag — so the joint the animator turns
 /// is by construction the joint the mandible region is bound to. A quadruped
 /// has no markers and gets `None`, which leaves its pose untouched.
+/// Writes the face's pose layers in their contract order.
+///
+/// Speech's jaw first; then the resting expression, which COMPOSES its jaw
+/// bias over speech (a happy body keeps its parted rest while talking) and
+/// owns the brows and corners outright; then a held viseme over the mouth,
+/// because speech owns it (symbios-avatar#218) — a viseme writes the jaw and
+/// corners over both layers above, which is what a lipsync stream would do.
+/// The lids are written by nothing here: they arrive through the closure,
+/// after the blend, like every blink.
+fn pose_face(
+    rig: &Rig,
+    pose: &mut Pose,
+    jaw_angle: f32,
+    showing: Expression,
+    viseme: Option<Viseme>,
+) {
+    if let Some(pivot) = jaw_pivot(rig) {
+        pose.rotations[pivot] = Quat::from_rotation_x(jaw_angle);
+    }
+    showing.apply(rig, pose);
+    if let Some(viseme) = viseme {
+        viseme.apply(rig, pose);
+    }
+}
+
+/// One frame of the resting face's approach to its target, in EXPRESSION
+/// space, SETTLED when close: an exponential approach never lands, and a face
+/// a whisker from happy would hold the still-body rule off forever.
+fn ease_expression(showing: Expression, target: Expression, delta: f32, blend: f32) -> Expression {
+    let step = if blend <= 0.0 {
+        1.0
+    } else {
+        (delta / blend).min(1.0)
+    };
+    let eased = showing.toward(target, step);
+    let settled = (eased.brows - target.brows).abs() < 5e-3
+        && (eased.corners - target.corners).abs() < 5e-3
+        && (eased.jaw - target.jaw).abs() < 5e-3
+        && (eased.lids - target.lids).abs() < 5e-3;
+    if settled { target } else { eased }
+}
+
 fn jaw_pivot(rig: &Rig) -> Option<usize> {
     (0..rig.len()).find_map(|tip| {
         let pivot = rig.joints[tip].parent?;
@@ -600,6 +677,40 @@ fn blend_into(
 /// checkbox somewhere else because it is one of the things being chosen between
 /// and not the absence of a choice.
 #[cfg(feature = "editor")]
+/// The face's resting layer and, held over it, a lipsync shape.
+///
+/// The expression combo shows "custom" when the target matches no preset —
+/// nothing in the panel writes one today, but a caller may.
+#[cfg(feature = "editor")]
+fn face_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    let expression = Expression::PRESETS
+        .iter()
+        .find(|(_, preset)| *preset == animator.expression)
+        .map_or("custom", |(name, _)| *name);
+    egui::ComboBox::from_label("expression")
+        .selected_text(expression)
+        .show_ui(ui, |ui| {
+            for (name, preset) in Expression::PRESETS {
+                ui.selectable_value(&mut animator.expression, preset, name);
+            }
+        });
+    let viseme = animator.viseme.map_or("none", |held| {
+        Viseme::NAMES
+            .iter()
+            .find(|(_, candidate)| *candidate == held)
+            .map_or("none", |(name, _)| *name)
+    });
+    egui::ComboBox::from_label("viseme")
+        .selected_text(viseme)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut animator.viseme, None, "none");
+            for (name, candidate) in Viseme::NAMES {
+                ui.selectable_value(&mut animator.viseme, Some(candidate), name);
+            }
+        });
+}
+
 fn clip_controls(ui: &mut bevy_egui::egui::Ui, clips: &Clips, animator: &mut Animator) {
     if clips.0.is_empty() {
         ui.label("no baked clips in this build");
@@ -728,6 +839,9 @@ pub fn animator_panel(
             );
 
             ui.separator();
+            face_controls(ui, &mut animator);
+
+            ui.separator();
             ui.toggle_value(&mut animator.tracking, "track");
             ui.add_enabled(
                 !animator.tracking,
@@ -827,6 +941,122 @@ mod tests {
         assert!(
             pose.0.rotations[head].to_axis_angle().1.abs() < 0.35,
             "the held opening leaked a whole-head rotation"
+        );
+    }
+
+    #[test]
+    fn an_expression_eases_in_its_own_space_and_settles() {
+        // The picker writes a TARGET; what shows eases toward it through
+        // `Expression::toward` and must SETTLE — an exponential approach that
+        // never lands would hold the still-body rule off forever, which is
+        // the idle contract this window is built on.
+        let mut app = app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.expression = Expression::HAPPY;
+            animator.blend = 0.05;
+        }
+        for _ in 0..120 {
+            app.update();
+        }
+        let animator = app.world().resource::<Animator>();
+        assert_eq!(
+            animator.showing,
+            Expression::HAPPY,
+            "the face never settled on its target"
+        );
+        assert!(animator.is_idle(), "a settled face has to re-idle the body");
+
+        // And the settled face is IN the written pose: the corners carry the
+        // smile as local z-rotations of opposite sign.
+        let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarPose)>();
+        let (body, pose) = bodies.single(app.world()).expect("a driven body");
+        let rig = &body.avatar.rig;
+        let corners: Vec<usize> = (0..rig.len())
+            .filter(|&joint| {
+                rig.joints[joint].marker
+                    && rig.joints[joint].node.is_some()
+                    && rig.joints[joint].position.x != 0.0
+                    && rig.joints[joint].parent.is_some_and(|parent| {
+                        !rig.joints[parent].marker
+                            && rig.joints[joint].position.y < rig.joints[parent].position.y
+                    })
+            })
+            .collect();
+        assert_eq!(corners.len(), 2, "a humanoid carries two mouth corners");
+        for &corner in &corners {
+            let (axis, angle) = pose.0.rotations[corner].to_axis_angle();
+            assert!(
+                angle > 0.2 && axis.z.abs() > 0.99,
+                "a settled HAPPY left a corner at {angle:.3} rad about {axis:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lids_rest_where_the_expression_says_and_a_blink_still_shuts() {
+        // The closure path composes through `closure_at`, never by addition
+        // (symbios-avatar#217's hole): at rest the lids sit at the
+        // expression's own bias — negative for SURPRISED's widened eyes — and
+        // a full manual closure still reads 1.0 through the same path.
+        let mut app = app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.closure = 0.0;
+            animator.expression = Expression::SURPRISED;
+            animator.blend = 0.0;
+        }
+        app.update();
+        app.update();
+        let mut closures = app.world_mut().query::<&AvatarClosure>();
+        let held = closures.single(app.world()).expect("a driven body").0;
+        assert!(
+            (held - Expression::SURPRISED.closure()).abs() < 1e-3,
+            "surprised rests its lids at {held:.3} against the expression's own bias"
+        );
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.closure = 1.0;
+        }
+        app.update();
+        let held = closures.single(app.world()).expect("a driven body").0;
+        assert!(
+            (held - 1.0).abs() < 1e-4,
+            "a full closure reads {held:.3} through the widened rest — the compositor is adding"
+        );
+    }
+
+    #[test]
+    fn a_held_viseme_owns_the_mouth_over_talk_and_expression() {
+        // Speech owns the mouth (symbios-avatar#218): a held `aa` writes the
+        // jaw over both the manual opening and the expression's parted rest,
+        // at the engine's own full conversational open.
+        let mut app = app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+            animator.talking = false;
+            animator.opening = 0.02;
+            animator.expression = Expression::HAPPY;
+            animator.viseme = Some(Viseme::Aa);
+            animator.blend = 0.0;
+        }
+        app.update();
+        app.update();
+        let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarPose)>();
+        let (body, pose) = bodies.single(app.world()).expect("a driven body");
+        let rig = &body.avatar.rig;
+        let pivot = jaw_pivot(rig).expect("a humanoid has a jaw");
+        let (axis, angle) = pose.0.rotations[pivot].to_axis_angle();
+        let open = symbios_avatar::TalkConfig::default().open;
+        assert!(
+            (angle - open).abs() < 1e-3 && axis.x > 0.99,
+            "a held aa turned the pivot {angle:.3} rad against talk's own {open:.3}"
         );
     }
 
