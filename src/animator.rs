@@ -293,7 +293,11 @@ impl Default for Animator {
             // snapping, which is the thing being judged.
             gaze_speed: 0.6,
             gaze_angle: 0.0,
-            gaze_limit: GazeConfig::default().limit,
+            // 0.6 by owner's call (2026-08-13): the engine default reaches
+            // wide enough that the scan spends most of its arc with the head
+            // pinned at its own mechanical limit, which reads as searching
+            // rather than glancing.
+            gaze_limit: 0.6,
             clip: None,
             layered: false,
             in_place: true,
@@ -496,7 +500,7 @@ pub fn drive_avatar_animation(
         // A target at head height, applied after the gait, because looking
         // somewhere is a turn added to whatever the spine is already doing.
         let angle = if animator.tracking {
-            animator.elapsed * animator.gaze_speed
+            scanned_angle(animator.elapsed, animator.gaze_speed, animator.gaze_limit)
         } else {
             animator.gaze_angle
         };
@@ -610,6 +614,24 @@ fn jaw_pivot(rig: &Rig) -> Option<usize> {
     })
 }
 
+/// Where a tracked gaze points, `elapsed` seconds into its scan.
+///
+/// A continuous scan, not a lap (#26): the target used to circle one way
+/// forever, so the head swept to its limit, snapped across as the target
+/// passed behind it, and swept again. A triangle wave runs the same arc at the
+/// same `speed` in both directions and reverses at the ends — the scanning
+/// loop the control was always meant to be. Phase-offset by one span so it
+/// starts at zero moving positive; speed 0 holds it there.
+fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
+    let span = limit.clamp(0.01, std::f32::consts::PI);
+    let along = (span + elapsed * speed).rem_euclid(4.0 * span);
+    if along < 2.0 * span {
+        along - span
+    } else {
+        3.0 * span - along
+    }
+}
+
 /// Puts the pose's feet on the ground and reports what that took.
 ///
 /// The lift is measured **per joint, each against itself**, before and after —
@@ -721,17 +743,7 @@ fn face_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
 }
 
 fn clip_controls(ui: &mut bevy_egui::egui::Ui, clips: &Clips, animator: &mut Animator) {
-    if clips.0.is_empty() {
-        ui.label("no baked clips in this build");
-        return;
-    }
     ui.horizontal_wrapped(|ui| {
-        if ui
-            .selectable_label(animator.clip.is_none(), "none")
-            .clicked()
-        {
-            animator.clip = None;
-        }
         for (which, clip) in clips.0.clips.iter().enumerate() {
             let picked = animator.clip == Some(which);
             if ui.selectable_label(picked, &clip.name).clicked() {
@@ -739,11 +751,30 @@ fn clip_controls(ui: &mut bevy_egui::egui::Ui, clips: &Clips, animator: &mut Ani
             }
         }
     });
-    ui.add_enabled_ui(animator.clip.is_some(), |ui| {
-        ui.horizontal(|ui| {
-            ui.toggle_value(&mut animator.layered, "over the gait");
-            ui.toggle_value(&mut animator.in_place, "in place");
-        });
+    ui.horizontal(|ui| {
+        // Layering is what makes the clip a gesture on a walking body rather
+        // than the walk's replacement, so the toggle drives the gait flag too.
+        let mut layered = animator.layered;
+        if ui
+            .toggle_value(&mut layered, "over walk")
+            .on_hover_text(
+                "layer the clip over the procedural walk: the clip writes only \
+                 the joints its own tracks name, and the gait keeps the legs",
+            )
+            .changed()
+        {
+            animator.layered = layered;
+            animator.walking = layered;
+            if layered && animator.gait == GaitKind::Standing {
+                animator.gait = GaitKind::Natural;
+            }
+        }
+        ui.toggle_value(&mut animator.in_place, "in place")
+            .on_hover_text(
+                "remove the clip's own root travel so the body stays put — \
+                 played as baked, a looping walk strides off and snaps back \
+                 once a cycle",
+            );
     });
 }
 
@@ -757,12 +788,22 @@ pub fn animator_panel(
     mut contexts: bevy_egui::EguiContexts,
     clips: Res<Clips>,
     mut animator: ResMut<Animator>,
+    bodies: Query<&crate::spawn::AvatarBody>,
 ) {
     use bevy_egui::egui;
 
     if !animator.open {
         return;
     }
+    // How many legs the subject stands on decides which gaits exist to offer:
+    // `natural` IS wave on two legs and IS trot on four, and trot falls back
+    // to wave off four corners — so a picker listing all of them offers four
+    // labels for two behaviours, and the owner rightly could not tell them
+    // apart (#27). Read before the window so the closure borrows nothing.
+    let legs = bodies
+        .iter()
+        .next()
+        .map_or(2, |body| body.avatar.rig.ground_contacts().len());
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -779,100 +820,210 @@ pub fn animator_panel(
         .default_pos(opens_at)
         .default_width(WINDOW_WIDTH)
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut animator.walking, "walk");
-                ui.toggle_value(&mut animator.scrub, "scrub");
-            });
-            ui.horizontal_wrapped(|ui| {
-                for kind in GaitKind::ALL {
-                    let picked = animator.gait == kind;
-                    if ui.selectable_label(picked, kind.label()).clicked() {
-                        animator.gait = kind;
-                    }
-                }
-            });
-
+            locomotion_section(ui, &clips, &mut animator, legs);
             ui.separator();
-            clip_controls(ui, &clips, &mut animator);
+            ground_section(ui, &mut animator);
+            ui.separator();
+            face_section(ui, &mut animator);
+            ui.separator();
+            gaze_section(ui, &mut animator);
+        });
+}
+
+/// What the body is doing: one choice, not a matrix of toggles.
+///
+/// Standing, walking, or playing a clip — the clip section offering the layer
+/// over the walk. Everything below the source row appears only when it acts on
+/// the chosen source, so a control that does nothing is a control not shown.
+#[cfg(feature = "editor")]
+fn locomotion_section(
+    ui: &mut bevy_egui::egui::Ui,
+    clips: &Clips,
+    animator: &mut Animator,
+    legs: usize,
+) {
+    use bevy_egui::egui;
+    let clipping = animator.clip.is_some();
+    let walking = animator.walking && animator.gait != GaitKind::Standing;
+    let standing = !clipping && !walking;
+
+    ui.label(egui::RichText::new("locomotion").strong());
+    ui.horizontal(|ui| {
+        if ui.selectable_label(standing, "stand").clicked() {
+            // A PLANTED stand — the standing gait names every foot a stance,
+            // so the footing solve can hold them to a slope; engine #230
+            // keeps the stride from hopping them.
+            animator.walking = true;
+            animator.gait = GaitKind::Standing;
+            animator.clip = None;
+            animator.layered = false;
+        }
+        if ui.selectable_label(walking && !clipping, "walk").clicked() {
+            animator.walking = true;
+            if animator.gait == GaitKind::Standing {
+                animator.gait = GaitKind::Natural;
+            }
+            animator.clip = None;
+            animator.layered = false;
+        }
+        ui.add_enabled_ui(!clips.0.is_empty(), |ui| {
+            let label = ui
+                .selectable_label(clipping, "clip")
+                .on_disabled_hover_text("no baked clips in this build");
+            if label.clicked() && animator.clip.is_none() {
+                animator.clip = Some(0);
+                animator.walking = animator.layered;
+            }
+        });
+    });
+    if clipping {
+        clip_controls(ui, clips, animator);
+    }
+    // Two legs walk one way; only four corners have a choice to make.
+    if walking && legs == 4 {
+        ui.horizontal(|ui| {
+            for kind in [GaitKind::Wave, GaitKind::Trot] {
+                let picked = animator.gait == kind;
+                if ui.selectable_label(picked, kind.label()).clicked() {
+                    animator.gait = kind;
+                }
+            }
+        });
+    }
+    if !standing {
+        ui.add(egui::Slider::new(&mut animator.cadence, 0.05..=3.0).text("cadence /s"));
+        ui.horizontal(|ui| {
             ui.add(
                 egui::Slider::new(&mut animator.cycle, 0.0..=1.0)
                     .text("phase")
                     .fixed_decimals(3),
             );
-            ui.add(egui::Slider::new(&mut animator.cadence, 0.05..=3.0).text("cadence /s"));
-            ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
-            ui.horizontal(|ui| {
-                ui.toggle_value(&mut animator.swing_arms, "arms");
-                ui.toggle_value(&mut animator.footing, "footing");
-            });
-            ui.add(
-                egui::Slider::new(&mut animator.slope, -0.4..=0.4)
-                    .text("slope")
-                    .fixed_decimals(2),
-            );
-            ui.add(
-                egui::Slider::new(&mut animator.blend, 0.0..=0.6)
-                    .text("blend s")
-                    .fixed_decimals(2),
-            );
-            // The readout the locomotion question should be settled on. A pose
-            // whose feet already land where the ground is needs no correction;
-            // one whose do not is being held together by the solve, and the
-            // difference between an imported clip and a procedural gait shows
-            // here before it shows in anybody's opinion.
-            ui.label(format!(
-                "footing lifts {:.0} mm{}",
-                animator.lift * 1000.0,
-                match animator.straining {
-                    0 => String::new(),
-                    n => format!(", {n} straining"),
-                }
-            ));
-
-            ui.separator();
-            ui.toggle_value(&mut animator.blinking, "blink");
-            ui.add_enabled(
-                !animator.blinking,
-                egui::Slider::new(&mut animator.closure, 0.0..=1.0)
-                    .text("closure")
-                    .fixed_decimals(3),
-            );
-
-            ui.separator();
-            ui.toggle_value(&mut animator.talking, "talk");
-            ui.add_enabled(
-                !animator.talking,
-                egui::Slider::new(&mut animator.opening, 0.0..=0.35)
-                    .text("open rad")
-                    .fixed_decimals(2),
-            );
-
-            ui.separator();
-            face_controls(ui, &mut animator);
-
-            ui.separator();
-            ui.toggle_value(&mut animator.tracking, "track");
-            ui.add_enabled(
-                !animator.tracking,
-                egui::Slider::new(
-                    &mut animator.gaze_angle,
-                    -std::f32::consts::PI..=std::f32::consts::PI,
-                )
-                .text("gaze")
-                .fixed_decimals(2),
-            );
-            ui.add_enabled(
-                animator.tracking,
-                egui::Slider::new(&mut animator.gaze_speed, 0.0..=2.0).text("gaze /s"),
-            );
-            ui.add(egui::Slider::new(&mut animator.gaze_limit, 0.0..=2.5).text("gaze limit"));
+            ui.toggle_value(&mut animator.scrub, "hold");
         });
+    }
+    if walking {
+        ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
+        ui.toggle_value(&mut animator.swing_arms, "arm swing");
+    }
+}
+
+/// The ground the body meets: the footing solve, its slope, and the readout.
+#[cfg(feature = "editor")]
+fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    ui.label(egui::RichText::new("ground").strong());
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut animator.footing, "footing");
+        // The readout the locomotion question should be settled on. A pose
+        // whose feet already land where the ground is needs no correction; one
+        // whose do not is being held together by the solve, and the difference
+        // between an imported clip and a procedural gait shows here before it
+        // shows in anybody's opinion.
+        ui.label(format!(
+            "lifts {:.0} mm{}",
+            animator.lift * 1000.0,
+            match animator.straining {
+                0 => String::new(),
+                n => format!(", {n} straining"),
+            }
+        ));
+    });
+    ui.add(
+        egui::Slider::new(&mut animator.slope, -0.4..=0.4)
+            .text("slope")
+            .fixed_decimals(2),
+    );
+    ui.add(
+        egui::Slider::new(&mut animator.blend, 0.0..=0.6)
+            .text("blend s")
+            .fixed_decimals(2),
+    );
+}
+
+/// Lids, speech and expression.
+#[cfg(feature = "editor")]
+fn face_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    ui.label(egui::RichText::new("face").strong());
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut animator.blinking, "blink");
+        ui.toggle_value(&mut animator.talking, "talk");
+    });
+    ui.add_enabled(
+        !animator.blinking,
+        egui::Slider::new(&mut animator.closure, 0.0..=1.0)
+            .text("closure")
+            .fixed_decimals(3),
+    );
+    ui.add_enabled(
+        !animator.talking,
+        egui::Slider::new(&mut animator.opening, 0.0..=0.35)
+            .text("open rad")
+            .fixed_decimals(2),
+    );
+    face_controls(ui, animator);
+}
+
+/// Where the head looks: the scanning loop, or an angle held by hand.
+#[cfg(feature = "editor")]
+fn gaze_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    ui.label(egui::RichText::new("gaze").strong());
+    ui.toggle_value(&mut animator.tracking, "scan");
+    ui.add_enabled(
+        !animator.tracking,
+        egui::Slider::new(
+            &mut animator.gaze_angle,
+            -std::f32::consts::PI..=std::f32::consts::PI,
+        )
+        .text("gaze")
+        .fixed_decimals(2),
+    );
+    ui.add_enabled(
+        animator.tracking,
+        egui::Slider::new(&mut animator.gaze_speed, 0.0..=2.0).text("gaze /s"),
+    );
+    ui.add(egui::Slider::new(&mut animator.gaze_limit, 0.0..=2.5).text("gaze limit"));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::spawn::{SpawnAvatar, build_requested_avatars};
+
+    #[test]
+    fn the_scan_walks_the_same_arc_at_the_same_speed_both_ways() {
+        // The owner's ask verbatim: same path, same speed, both directions, a
+        // continuous loop (#26). Sampled densely over two full periods: the
+        // angle never leaves ±span, starts at zero, and away from the two
+        // turnarounds its rate is exactly the speed asked for — in BOTH signs.
+        // Two full periods at these numbers: 4·span/speed ≈ 5.7 s a period,
+        // 0.005 s a sample.
+        const SAMPLES: u16 = 2400;
+        let (span, speed, step) = (1.0f32, 0.7f32, 0.005f32);
+        let mut last = scanned_angle(0.0, speed, span);
+        assert!(last.abs() < 1e-5, "the scan starts at zero, not at an edge");
+        let (mut fastest, mut slowest) = (0.0f32, f32::MAX);
+        let (mut leftward, mut rightward) = (false, false);
+        for tick in 1..SAMPLES {
+            let now = scanned_angle(f32::from(tick) * step, speed, span);
+            assert!(now.abs() <= span + 1e-4, "the scan left its span: {now}");
+            let rate = (now - last) / step;
+            // Away from the turnarounds, where one sample straddles the fold.
+            if now.abs() < span - speed * step * 2.0 {
+                fastest = fastest.max(rate.abs());
+                slowest = slowest.min(rate.abs());
+                leftward |= rate < 0.0;
+                rightward |= rate > 0.0;
+            }
+            last = now;
+        }
+        assert!(leftward && rightward, "the scan must sweep both ways");
+        assert!(
+            (fastest - speed).abs() < 0.02 && (slowest - speed).abs() < 0.02,
+            "the sweep rate wandered: {slowest}..{fastest} against {speed}"
+        );
+    }
     use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
     use symbios_avatar::{Archetype, AvatarRecord};
 

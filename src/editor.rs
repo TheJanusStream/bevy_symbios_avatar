@@ -244,19 +244,37 @@ impl Plugin for RecordEditorPlugin {
     }
 }
 
+/// A build in flight on the compute pool (#28).
+///
+/// At most one exists at a time: a second build of a record that is still
+/// moving would only be stale sooner. Edits made while it runs mark the editor
+/// dirty again, and the *next* spawn takes the record as it is then — the
+/// latest description always wins.
+pub struct BuildJob {
+    task: bevy::tasks::Task<Option<(Avatar, Duration)>>,
+    atlas: u32,
+    full: bool,
+}
+
 /// Rebuilds the edited body when the record has changed.
 ///
-/// Two rebuilds, not one. A draft goes up as fast as frames allow so an axis
-/// can be watched across its range; the full one lands once the axis has been
-/// still for [`SETTLE`], because the complexion at [`DRAFT_ATLAS`] is not the
-/// complexion that ships and a judgement made on it would be a judgement about
-/// a texture nobody will see.
+/// Two rebuilds, not one. A draft goes up as fast as builds complete so an
+/// axis can be watched across its range; the full one lands once the axis has
+/// been still for [`SETTLE`], because the complexion at [`DRAFT_ATLAS`] is not
+/// the complexion that ships and a judgement made on it would be a judgement
+/// about a texture nobody will see.
+///
+/// **The build itself runs on the compute pool, and the frame never waits for
+/// it** (#28 — the deferred-rebuild idiom the overlands editors settled on:
+/// the panel writes the record, and the expensive consequence lands when it
+/// lands). A draft was 68 ms and the settle build 277 ms of main-thread stall
+/// per edit before this; now the system spawns the build, polls, and swaps the
+/// body in on the frame the task finishes. Timing is measured *inside* the
+/// task so the readout reports the build, not the queue.
 ///
 /// It builds and draws the body itself rather than asking [`SpawnAvatar`] for
-/// one. Two reasons, and the second is the important one: a request would be
-/// built on the *next* frame, so the timing here would either miss the build
-/// entirely or have to be inferred from a frame delta — the exact instrument
-/// failure this issue set out to avoid.
+/// one, so the timing instrument stays honest for the same reason it always
+/// did.
 ///
 /// [`SpawnAvatar`]: crate::spawn::SpawnAvatar
 #[expect(
@@ -272,17 +290,66 @@ pub fn rebuild_edited_avatar(
     mut images: ResMut<Assets<Image>>,
     mut bindposes: ResMut<Assets<SkinnedMeshInverseBindposes>>,
     edited: Query<Entity, With<EditedAvatar>>,
+    mut building: Local<Option<BuildJob>>,
 ) {
-    if !editor.dirty {
-        editor.still += time.delta();
-        // A draft is a stand-in, so the full build is owed even though nothing
-        // has been touched since it went up.
-        if !editor.draft || editor.still < SETTLE {
-            return;
+    use bevy::tasks::{AsyncComputeTaskPool, block_on, futures_lite::future};
+
+    // Land a finished build first, so the swap happens the frame it is ready.
+    let finished = building.as_mut().and_then(|job| {
+        block_on(future::poll_once(&mut job.task)).map(|built| (built, job.atlas, job.full))
+    });
+    if let Some((built, atlas, full)) = finished {
+        *building = None;
+        if let Some((avatar, took)) = built {
+            for entity in &edited {
+                // Despawned and rebuilt rather than patched, exactly as a
+                // re-roll is: every mesh, chart and weight belongs to the
+                // body that changed.
+                commands.entity(entity).despawn();
+            }
+            let root = commands.spawn((EditedAvatar, Transform::default())).id();
+            spawn_avatar(
+                &mut commands,
+                root,
+                avatar,
+                0.0,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut bindposes,
+            );
+            editor.draft = !full;
+            editor.last_build = Some((took, atlas));
+        } else {
+            // A record that describes no body is a record, not a crash — and
+            // a panel is exactly where one gets made, by driving two limbs
+            // into each other. Say so, keep the body that is up, and owe
+            // nothing until the record changes again — a draft flag left
+            // standing here would respawn the same doomed build every settle.
+            editor.draft = false;
+            editor.status =
+                String::from("that record describes no body; showing the last one that did");
         }
     }
 
-    let full = !editor.dirty;
+    // The settle clock runs whenever nothing is dirty, in-flight build or not:
+    // stillness is a fact about the user's hands, not about the pool.
+    if !editor.dirty {
+        editor.still += time.delta();
+    }
+    if building.is_some() {
+        return;
+    }
+    let full = if editor.dirty {
+        false
+    } else if editor.draft && editor.still >= SETTLE {
+        // A draft is a stand-in, so the full build is owed even though nothing
+        // has been touched since it went up.
+        true
+    } else {
+        return;
+    };
+
     let config = AvatarConfig {
         atlas: if full {
             AvatarConfig::default().atlas
@@ -291,42 +358,15 @@ pub fn rebuild_edited_avatar(
         },
         ..AvatarConfig::default()
     };
-
-    let at = Instant::now();
-    let built = Avatar::build_with(&editor.record, &config);
-    let took = at.elapsed();
-
-    let Some(avatar) = built else {
-        // A record that describes no body is a record, not a crash — and a
-        // panel is exactly where one gets made, by driving two limbs into each
-        // other. Say so and keep the body that is up.
-        editor.dirty = false;
-        editor.status =
-            String::from("that record describes no body; showing the last one that did");
-        return;
-    };
-
-    for entity in &edited {
-        // Despawned and rebuilt rather than patched, exactly as a re-roll is:
-        // every mesh, chart and weight belongs to the body that changed.
-        commands.entity(entity).despawn();
-    }
-    let root = commands.spawn((EditedAvatar, Transform::default())).id();
-    spawn_avatar(
-        &mut commands,
-        root,
-        avatar,
-        0.0,
-        &mut meshes,
-        &mut materials,
-        &mut images,
-        &mut bindposes,
-    );
-
+    let atlas = config.atlas;
+    let record = editor.record.clone();
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let at = Instant::now();
+        Avatar::build_with(&record, &config).map(|avatar| (avatar, at.elapsed()))
+    });
+    *building = Some(BuildJob { task, atlas, full });
     editor.dirty = false;
-    editor.draft = !full;
     editor.still = Duration::ZERO;
-    editor.last_build = Some((took, config.atlas));
 }
 
 /// Draws the panel.
