@@ -8,24 +8,30 @@
 //! is the thing four fixed angles cannot give — an axis you can watch move, and
 //! a gait you can hold still at one point in its cycle.
 //!
+//! Every invocation needs `-F builtin-clips`: the example requires the feature
+//! — its clip picker is not a picker with nothing to pick — and cargo does not
+//! turn required features on by itself.
+//!
 //! ```text
-//! cargo run --release --example viewer
-//! cargo run --release --example viewer -- --seed 7
-//! cargo run --release --example viewer -- --quadruped
-//! cargo run --release --example viewer -- --shot body.png   # one frame, then quit
-//! cargo run --release --example viewer -- --face --shot face.png  # framed on the head
-//! cargo run --release --example viewer -- --walk --shot walking.png
-//! cargo run --release --example viewer -- --gait wave --pace 1.4 --shot wave.png
-//! cargo run --release --example viewer -- --walk --phase 0.35 --cadence 1.6
-//! cargo run --release --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
-//! cargo run --release --example viewer -- --mane 0          # bald, for judging a jaw
-//! cargo run --release --example viewer -- --still           # no blink, no tracking
-//! cargo run --release --example viewer -- --talk             # the jaw speaks
-//! cargo run --release --example viewer -- --open 0.2         # hold the jaw open, radians
-//! cargo run --release --example viewer -- --clip Walk       # a baked CC0 clip instead
-//! cargo run --release --example viewer -- --clip Greeting --layer --walk  # over the gait
-//! cargo run --release --example viewer -- --slope 0.2       # tilt the ground
-//! cargo run --release --example viewer -- --bare            # no windows at all
+//! cargo run --release -F builtin-clips --example viewer
+//! cargo run --release -F builtin-clips --example viewer -- --seed 7
+//! cargo run --release -F builtin-clips --example viewer -- --quadruped
+//! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
+//! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
+//! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
+//! cargo run --release -F builtin-clips --example viewer -- --gait wave --pace 1.4 --shot wave.png
+//! cargo run --release -F builtin-clips --example viewer -- --walk --phase 0.35 --cadence 1.6
+//! cargo run --release -F builtin-clips --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
+//! cargo run --release -F builtin-clips --example viewer -- --mane 0     # bald, for judging a jaw
+//! cargo run --release -F builtin-clips --example viewer -- --still      # no blink, no tracking
+//! cargo run --release -F builtin-clips --example viewer -- --talk       # the jaw speaks
+//! cargo run --release -F builtin-clips --example viewer -- --open 0.2   # hold the jaw open, radians
+//! cargo run --release -F builtin-clips --example viewer -- --closure 1  # hold the lids shut
+//! cargo run --release -F builtin-clips --example viewer -- --gaze 0.8   # hold the gaze, radians
+//! cargo run --release -F builtin-clips --example viewer -- --clip Walk  # a baked CC0 clip instead
+//! cargo run --release -F builtin-clips --example viewer -- --clip Greeting --layer --walk  # over the gait
+//! cargo run --release -F builtin-clips --example viewer -- --slope 0.2  # tilt the ground
+//! cargo run --release -F builtin-clips --example viewer -- --bare       # no windows at all
 //! ```
 //!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints

@@ -50,17 +50,23 @@ follow.
 ## The viewer
 
 ```text
-cargo run --release --example viewer
-cargo run --release --example viewer -- --seed 7
-cargo run --release --example viewer -- --quadruped
-cargo run --release --example viewer -- --shot body.png
+cargo run --release --features builtin-clips --example viewer
+cargo run --release --features builtin-clips --example viewer -- --seed 7
+cargo run --release --features builtin-clips --example viewer -- --quadruped
+cargo run --release --features builtin-clips --example viewer -- --shot body.png
 ```
+
+The example requires `builtin-clips` — its clip picker is not a picker with
+nothing to pick — and the flag is spelled out because the feature is off by
+default. The full flag set — gaits, clips, face framing, held closures, captures
+— is documented at the top of [`examples/viewer.rs`](examples/viewer.rs).
 
 Right-drag orbits, middle-drag pans, the wheel zooms — the same bindings as the
 sibling application, so the hands that use one do not have to relearn the other.
 `W` walks, `Space` re-rolls, `H` hides the windows, `F` frames the camera on the
-body again, `B` prints what the body costs. Run it in release: building a body
-subdivides, binds, unwraps and paints a megapixel atlas.
+body again, `P` saves a picture, `B` prints what the body costs. Run it in
+release: building a body subdivides, binds, unwraps and paints a megapixel
+atlas.
 
 Editing a record never moves the camera. A body is destroyed and rebuilt on
 every step of a slider, so anything that re-framed on a new body would be
@@ -78,9 +84,11 @@ purpose — its gate is all-or-nothing and kills exactly that case.)
 
 ## The record editor
 
-A panel holding every axis an `AvatarRecord` can carry — about forty of them,
-across archetype, skin, eyes, face, hair, outfit, name, seed and the per-category
-locks a re-roll honours. Drag one and the body follows.
+A panel holding every axis an `AvatarRecord` can carry — over a hundred of
+them, across archetype, composites, skin, eyes, face, five hair regions,
+outfit, name, seed and the per-category locks a re-roll honours. Drag one and
+the body follows. A test pins the exact count, so an axis added to the record
+cannot quietly miss the panel.
 
 It is not a debug panel, and two rules are what keep it from becoming one.
 
@@ -89,8 +97,10 @@ body tuned against something a record cannot hold could not be saved, shared or
 rebuilt by anyone else, and an afternoon spent perfecting one would produce
 nothing anybody could keep. `copy` puts the record on the clipboard as JSON and
 `load` reads one back, so a body somebody was fiddling with becomes a body
-anybody can rebuild. Every value is quantised the way the wire format is —
-scaled integers in thousandths, no floats — so what a slider shows is what a
+anybody can rebuild. A share code does the same for a *look* alone — archetype,
+composites and complexion at a byte an axis, keeping the name, seed and locks
+of the record it lands in. Every value is quantised the way the wire format is
+— scaled integers in thousandths, no floats — so what a slider shows is what a
 record would hold.
 
 **A judgement image is never a screenshot of a UI.** `H` hides the panel, `P`
@@ -101,17 +111,27 @@ being dragged rebuilds at the draft size — about fourteen frames a second — 
 the full-size build lands a quarter of a second after it stops. With the panel
 open and nothing moving it costs 0.1 ms a frame.
 
-`default-features = false` removes it, and with it the only dependency this
-crate has beyond Bevy and the engine.
+`default-features = false` removes it, and with it the only dependencies this
+crate has beyond Bevy and the engine — `bevy_egui` and `serde_json`.
 
 ## The motion window
 
 The second window, for what a body is *doing* rather than what it is: walk on
-or off, which gait pattern, cadence, pace, arm swing, foot planting, blinking,
-a held lid closure, and where the gaze is aimed. All of it comes from the
-engine's own `anim` module — this crate ticks a cycle and writes the result onto
-components — so a walk that reads wrong here and right in the software renderer
-is this crate's fault, and one that reads wrong in both is the engine's.
+or off, which gait pattern, cadence, pace, arm swing, foot planting, a ground
+slope, blinking, a held lid closure, speech, a held jaw angle, and where the
+gaze is aimed. All of it comes from the engine's own `anim` module — this crate
+ticks a cycle and writes the result onto components — so a walk that reads
+wrong here and right in the software renderer is this crate's fault, and one
+that reads wrong in both is the engine's.
+
+It also plays the engine's baked clips: pick one and it replaces the gait, or
+rides over it so a baked gesture can top a procedural walk, with a blend
+between sources and the clip's root travel taken out so the two stay
+comparable. The window reports how far the footing solve had to move the feet,
+which is the number a locomotion comparison should be settled on. The clip set
+is behind the `builtin-clips` feature — 200 KiB a wasm build should fetch
+rather than carry — and a consumer that fetches `clips.bin` at run time inserts
+its own `Clips` resource instead.
 
 `scrub` is the control that earns the window: it holds the gait at one point in
 its cycle, which is the only way to actually look at a foot plant. A gait judged

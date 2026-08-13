@@ -59,7 +59,11 @@
 //! [`animator`] is the second window, and holds to the same line: every number
 //! that decides how a body *moves* comes from [`symbios_avatar::anim`], and
 //! this crate ticks a cycle and writes the result onto components. Its driving
-//! half needs no GUI and is always compiled.
+//! half needs no GUI and is always compiled. The `builtin-clips` feature
+//! embeds the engine's baked CC0 clip set so the window has clips to pick —
+//! off by default, because the artifact is 200 KiB a consumer that never plays
+//! it should not carry, and one that fetches `clips.bin` at run time inserts
+//! its own [`Clips`] resource instead.
 
 pub mod animator;
 pub mod convert;

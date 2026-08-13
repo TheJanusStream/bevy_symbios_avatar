@@ -39,11 +39,12 @@ pub struct SpawnAvatar {
     pub record: AvatarRecord,
     /// How to build it. The defaults are what the engine's own tools use.
     pub config: AvatarConfig,
-    /// How shut the eyes are, `0` open and `1` closed.
+    /// How shut the eyes start, `0` open and `1` closed.
     ///
-    /// A blink is geometry rather than a pose — nothing rigs a lid yet — so it
-    /// is fixed at spawn. Changing it means respawning, which is a fair
-    /// reflection of what it costs.
+    /// Recorded onto the root as [`AvatarClosure`]. It does not move geometry:
+    /// a blink is a pose (symbios-avatar#118), the four lids are joints, so
+    /// shutting the eyes means writing an [`AvatarPose`] — which is what
+    /// [`crate::AnimatorPlugin`] does with its own closure control.
     pub closure: f32,
 }
 
@@ -87,16 +88,13 @@ pub struct AvatarPose(pub Pose);
 
 /// How shut a body's eyes are, `0` open and `1` shut.
 ///
-/// Write a new one and the eyes follow, which is what makes a blink something
-/// this crate can show rather than only describe. A blink is geometry — a lid
-/// swung about the eye's pivot with no joint to drive it, so following one meant
-/// rebuilding two small meshes rather than writing a transform.
-///
-/// **It is a pose now** (symbios-avatar#118): the four lids have joints, their
-/// shells are part of the skin's own draw, and `Eyes::blink` writes the four
-/// rotations onto whatever pose the body is already holding. This component
-/// survives as the RECORD of what the lids are holding — the animator writes it
-/// so anything that wants to ask can — and drives no geometry at all.
+/// The record of what the lids are holding, and nothing more: the animator
+/// writes it beside every pose it applies, so anything that wants to ask can.
+/// It drives no geometry. A blink is a pose (symbios-avatar#118) — the four
+/// lids have joints, their shells are part of the skin's own draw, and
+/// `Eyes::blink` writes the four rotations onto whatever pose the body is
+/// already holding — so shutting the eyes means writing an [`AvatarPose`],
+/// not this.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct AvatarClosure(pub f32);
 

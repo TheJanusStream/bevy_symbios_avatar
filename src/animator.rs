@@ -22,8 +22,7 @@
 //!
 //! Unlike a rebuild, none of this costs anything: a pose is a few dozen
 //! quaternions — a blink included, since symbios-avatar#118 gave the four lids
-//! joints of their own. It used to be the one exception, and cost a rebuild of
-//! two meshes every time it moved.
+//! joints of their own.
 
 use bevy::prelude::*;
 use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};

@@ -21,17 +21,16 @@
 //! as linear already — so the atlas is handed over raw and the vertex colours
 //! have to be decoded here, by `linear_of`.
 //!
-//! **This paragraph used to say the vertex colours were linear**, on the word of
-//! `PolyMesh::colours`'s own doc comment, which was wrong and has since been
-//! corrected upstream. What that cost is #14: every
-//! vertex-coloured thing on the body — the iris, the hair, the garment — drew
-//! two to four times too bright in the midtones here and correctly in the
-//! software renderer, and it was the eyes that showed it, because a mid-blue
-//! iris undecoded is a pale grey-blue bead. Skin never showed it at all, because
-//! skin comes through the atlas, which both instruments always decoded. Getting
-//! this wrong does not produce an obvious error; it produces a body that is
-//! slightly the wrong colour in one renderer, which is exactly the kind of
-//! difference that gets blamed on lighting — and was.
+//! Getting this wrong does not produce an obvious error, and this crate has
+//! paid for it once already (#14, on the word of an upstream doc comment that
+//! called the vertex colours linear): every vertex-coloured thing on the body
+//! — the iris, the hair, the garment — drew two to four times too bright in
+//! the midtones here and correctly in the software renderer. It was the eyes
+//! that showed it, because a mid-blue iris undecoded is a pale grey-blue bead;
+//! skin never showed it at all, because skin comes through the atlas, which
+//! both instruments always decoded. A body that is slightly the wrong colour
+//! in one renderer is exactly the kind of difference that gets blamed on
+//! lighting — and was.
 //!
 //! **Normals.** A mesh that carries explicit normals gets them, and one that
 //! does not has them derived. The engine is deliberate about which is which:
