@@ -721,6 +721,11 @@ fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         changed |= explored(ui, "spacing", &mut record.eyes.spacing, 0.0, (-1.0, 1.0));
         changed |= explored(ui, "depth", &mut record.eyes.depth, 0.0, (-1.0, 1.0));
         changed |= explored(ui, "aperture", &mut record.eyes.aperture, 0.8, (0.0, 1.0));
+        // The iris fades inner to outer across the disc; the ring is the
+        // circle around it (symbios-avatar #229).
+        changed |= eye_colour(ui, "iris inner", &mut record.eyes.inner);
+        changed |= eye_colour(ui, "iris outer", &mut record.eyes.outer);
+        changed |= eye_colour(ui, "limbal ring", &mut record.eyes.ring);
     });
     changed
 }
@@ -872,12 +877,46 @@ fn tress<S: symbios_avatar::hair::Style>(
 /// only written back when the picker actually changed, so a colour nobody
 /// touches keeps the value the record was loaded with.
 fn hair_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
+    ramped_colour(
+        ui,
+        name,
+        colour,
+        symbios_avatar::hair::style::melanin,
+        "melanin",
+    )
+}
+
+/// One iris colour: the engine's pigment ramp, and a free picker beside it.
+///
+/// The same pair [`hair_colour`] offers, for the same two reasons
+/// (symbios-avatar #229): the ramp is drawn from the engine's own
+/// `iris_pigment` so a swatch cannot drift from the iris a roll paints, and the
+/// free picker reaches the fantasy colours the record's channels deliberately
+/// leave open.
+fn eye_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
+    ramped_colour(
+        ui,
+        name,
+        colour,
+        symbios_avatar::face::eye::iris_pigment,
+        "pigment",
+    )
+}
+
+/// The widget both of the above are: engine ramp swatches, then a free picker.
+fn ramped_colour(
+    ui: &mut egui::Ui,
+    name: &str,
+    colour: &mut [f32; 3],
+    ramp: impl Fn(f32) -> [f32; 3],
+    hover: &str,
+) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.label(name);
         for stop in 0..=8u32 {
             let shade = f32::from(u16::try_from(stop).unwrap_or(0)) / 8.0;
-            let tone = symbios_avatar::hair::style::melanin(shade);
+            let tone = ramp(shade);
             let picked = tone
                 .iter()
                 .zip(colour.iter())
@@ -887,7 +926,7 @@ fn hair_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
                 .min_size(egui::vec2(18.0, 18.0));
             if ui
                 .add(button)
-                .on_hover_text(format!("melanin {shade:.2}"))
+                .on_hover_text(format!("{hover} {shade:.2}"))
                 .clicked()
             {
                 *colour = tone;
