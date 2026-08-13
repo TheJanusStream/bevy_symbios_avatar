@@ -25,7 +25,7 @@ use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
 use symbios_avatar::{Avatar, AvatarConfig, AvatarRecord, MeshKind, Pose};
 
-use crate::convert::{atlas_image, mesh_of};
+use crate::convert::{atlas_image, mesh_of, normal_image, orm_image};
 
 /// A request to build and draw a body.
 ///
@@ -173,7 +173,11 @@ pub fn spawn_avatar(
             .collect::<Vec<_>>(),
     ));
 
-    let atlas = images.add(atlas_image(&avatar.skin));
+    let atlas = SkinMaps {
+        albedo: images.add(atlas_image(&avatar.skin)),
+        normal: images.add(normal_image(&avatar.skin)),
+        orm: images.add(orm_image(&avatar.skin)),
+    };
     // The body's own meshes, then the eyes, rather than the one list
     // `Avatar::drawn` hands over. Kept as two lists because the globes are
     // built per call rather than merged, not because either half is going to be
@@ -260,18 +264,34 @@ pub fn apply_avatar_poses(
 /// comparison. Skin takes the painted atlas; everything else carries its colour
 /// on its vertices, which is what lets a head of hair be one draw and still
 /// have a shade per lock.
-fn material_for(kind: MeshKind, atlas: &Handle<Image>) -> StandardMaterial {
+/// The three textures one painted skin uploads as.
+struct SkinMaps {
+    albedo: Handle<Image>,
+    normal: Handle<Image>,
+    orm: Handle<Image>,
+}
+
+fn material_for(kind: MeshKind, atlas: &SkinMaps) -> StandardMaterial {
     let (roughness, metallic) = match kind {
-        MeshKind::Skin => (0.72, 0.0),
+        // 1.0, not a taste: Bevy MULTIPLIES the factor into the roughness
+        // texture, so anything less darkens every texel of the finish the
+        // engine painted. The per-texel values live in the ORM map (#22).
+        MeshKind::Skin => (1.0, 0.0),
         MeshKind::Hair => (0.35, 0.0),
         MeshKind::Cloth => (0.92, 0.0),
         // A globe is the one wet thing on a body, and a matte eye is the
         // single fastest way to make a face look dead.
         MeshKind::Eye => (0.08, 0.0),
     };
+    let skin = matches!(kind, MeshKind::Skin);
     StandardMaterial {
         base_color: Color::WHITE,
-        base_color_texture: matches!(kind, MeshKind::Skin).then(|| atlas.clone()),
+        base_color_texture: skin.then(|| atlas.albedo.clone()),
+        normal_map_texture: skin.then(|| atlas.normal.clone()),
+        // One image, two slots: G/B feed metallic-roughness, R feeds
+        // occlusion — which is exactly the ORM layout the engine bakes.
+        metallic_roughness_texture: skin.then(|| atlas.orm.clone()),
+        occlusion_texture: skin.then(|| atlas.orm.clone()),
         perceptual_roughness: roughness,
         metallic,
         ..default()
@@ -567,7 +587,11 @@ mod tests {
             .map(|mesh| mesh.kind)
             .collect();
         assert!(kinds.contains(&MeshKind::Hair) && kinds.contains(&MeshKind::Skin));
-        let atlas = Handle::default();
+        let atlas = SkinMaps {
+            albedo: Handle::default(),
+            normal: Handle::default(),
+            orm: Handle::default(),
+        };
         let apart = material_for(MeshKind::Hair, &atlas).perceptual_roughness
             - material_for(MeshKind::Skin, &atlas).perceptual_roughness;
         assert!(

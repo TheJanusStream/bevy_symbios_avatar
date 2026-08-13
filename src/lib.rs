@@ -72,7 +72,7 @@ pub mod editor;
 pub mod spawn;
 
 pub use animator::{Animator, AnimatorPlugin, Blending, Clips, GaitKind};
-pub use convert::{atlas_image, mesh_of, polymesh_to_bevy};
+pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bevy};
 #[cfg(feature = "editor")]
 pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
 pub use spawn::{AvatarBody, AvatarClosure, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar};

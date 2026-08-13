@@ -143,6 +143,17 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
     if source.normals.len() != vertices {
         mesh.compute_normals();
     }
+
+    // A normal-mapped material needs tangents, and Bevy will not invent them
+    // at draw time. Generated wherever the mesh carries UVs — which is the
+    // atlas-covered skin, the one mesh whose material carries a normal map.
+    // A mesh whose UVs defeat mikktspace keeps its smooth normals and says so,
+    // rather than shipping a broken frame.
+    if source.uvs.len() == vertices
+        && let Err(error) = mesh.generate_tangents()
+    {
+        bevy::log::warn!("skin tangents could not be generated: {error}");
+    }
     mesh
 }
 
@@ -159,22 +170,47 @@ fn linear_of(colour: symbios_avatar::Vec3) -> [f32; 4] {
     [linear.red, linear.green, linear.blue, linear.alpha]
 }
 
-/// Uploads a painted skin atlas as a texture.
+/// Uploads a painted skin atlas's albedo as a texture.
 ///
-/// The albedo channel only. The engine paints a normal and a roughness map
-/// beside it, and a viewer that wants physically-lit skin should take those
-/// too; this takes what the software renderer takes, so the two instruments are
-/// looking at the same picture.
+/// One of three: [`normal_image`] and [`orm_image`] carry the maps the engine
+/// paints beside it, and since engine #45 both renderers consume all three —
+/// the two instruments are looking at the same picture.
 ///
 /// `Rgba8UnormSrgb`, because the engine's albedo is sRGB-encoded and a texture
 /// declared linear renders a body noticeably pale.
 #[must_use]
 pub fn atlas_image(map: &symbios_avatar::TextureMap) -> Image {
+    image_of(&map.albedo, map, TextureFormat::Rgba8UnormSrgb)
+}
+
+/// Uploads the painted skin's tangent-space normal map as a texture.
+///
+/// `Rgba8Unorm`, never sRGB: a normal map is data, and running its bytes
+/// through a colour transfer curve skews every slope toward the surface —
+/// relief that quietly weakens is far harder to notice than relief that is
+/// missing (#22).
+#[must_use]
+pub fn normal_image(map: &symbios_avatar::TextureMap) -> Image {
+    image_of(&map.normal, map, TextureFormat::Rgba8Unorm)
+}
+
+/// Uploads the painted skin's ORM map as a texture.
+///
+/// One image serves two material slots: Bevy reads G and B for
+/// `metallic_roughness_texture` and R for `occlusion_texture`, which is
+/// exactly the layout the engine bakes. Linear, like every data map.
+#[must_use]
+pub fn orm_image(map: &symbios_avatar::TextureMap) -> Image {
+    image_of(&map.roughness, map, TextureFormat::Rgba8Unorm)
+}
+
+/// One of the map's pixel buffers, as a single-level texture.
+fn image_of(pixels: &[u8], map: &symbios_avatar::TextureMap, format: TextureFormat) -> Image {
     let level = (map.width * map.height * 4) as usize;
     // Only the base level: the map may carry mips laid out contiguously after
     // it, and handing the whole buffer to a single-level texture is a size
     // mismatch rather than a free upgrade.
-    let base = map.albedo.get(..level).unwrap_or(&map.albedo).to_vec();
+    let base = pixels.get(..level).unwrap_or(pixels).to_vec();
     Image::new(
         Extent3d {
             width: map.width,
@@ -183,7 +219,7 @@ pub fn atlas_image(map: &symbios_avatar::TextureMap) -> Image {
         },
         TextureDimension::D2,
         base,
-        TextureFormat::Rgba8UnormSrgb,
+        format,
         RenderAssetUsages::default(),
     )
 }
@@ -248,6 +284,48 @@ mod tests {
         let vertices = body.mesh.vertex_count();
         assert_eq!(count(&mesh, Mesh::ATTRIBUTE_JOINT_INDEX), Some(vertices));
         assert_eq!(count(&mesh, Mesh::ATTRIBUTE_JOINT_WEIGHT), Some(vertices));
+    }
+
+    #[test]
+    fn the_skin_carries_tangents_and_all_three_maps_upload() {
+        // A normal-mapped material without ATTRIBUTE_TANGENT fails at draw
+        // time, a long way from the conversion that forgot it; and a data map
+        // uploaded sRGB skews every slope toward the surface — relief that
+        // quietly weakens, which no test of "is the texture there" can see.
+        let avatar = avatar();
+        let body = avatar
+            .drawn(0.0)
+            .into_iter()
+            .find(|mesh| mesh.kind == MeshKind::Skin)
+            .expect("a body has skin");
+        let mesh = mesh_of(&body);
+        assert_eq!(
+            count(&mesh, Mesh::ATTRIBUTE_TANGENT),
+            Some(body.mesh.vertex_count()),
+            "the skin mesh must carry tangents for its normal map"
+        );
+
+        let level = (avatar.skin.width * avatar.skin.height * 4) as usize;
+        for (name, image, format) in [
+            (
+                "albedo",
+                atlas_image(&avatar.skin),
+                TextureFormat::Rgba8UnormSrgb,
+            ),
+            (
+                "normal",
+                normal_image(&avatar.skin),
+                TextureFormat::Rgba8Unorm,
+            ),
+            ("orm", orm_image(&avatar.skin), TextureFormat::Rgba8Unorm),
+        ] {
+            assert_eq!(image.texture_descriptor.format, format, "{name} format");
+            assert_eq!(
+                image.data.as_ref().map(Vec::len),
+                Some(level),
+                "{name} carries exactly the base level"
+            );
+        }
     }
 
     #[test]
