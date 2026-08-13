@@ -703,7 +703,12 @@ fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         changed |= signed(ui, "undertone", &mut record.skin.undertone);
         changed |= axis(ui, "blush", &mut record.skin.blush, 0.0..=1.0);
         changed |= axis(ui, "freckles", &mut record.skin.freckles, 0.0..=1.0);
-        changed |= axis(ui, "stubble", &mut record.skin.stubble, 0.0..=1.0);
+        // **Stubble was the fifth slider here and is not a complexion axis any
+        // more** (symbios-avatar #212). The painted hair layer replaced what it
+        // drew, and it is asked for per region now — the `painted` slider and
+        // its colour inside each of the five hair zones. The axis it moved had
+        // been read by nothing since that landed, so this slider did nothing and
+        // there was no way to tell from the panel that it would not.
     });
     changed
 }
@@ -1471,7 +1476,6 @@ mod tests {
             ("undertone", record.skin.undertone),
             ("blush", record.skin.blush),
             ("freckles", record.skin.freckles),
-            ("stubble", record.skin.stubble),
             ("eye size", record.eyes.size),
             ("eye spacing", record.eyes.spacing),
             ("eye depth", record.eyes.depth),
@@ -1718,7 +1722,6 @@ mod tests {
         record.skin.undertone = -0.333_33;
         record.skin.blush = 0.777_77;
         record.skin.freckles = 0.123_45;
-        record.skin.stubble = 0.987_65;
         record.eyes.size = 0.543_21;
         record.eyes.spacing = -0.246_81;
         record.eyes.depth = 0.135_79;
@@ -1800,10 +1803,16 @@ mod tests {
         // Seven axes left and seventy-eight arrived. The whole-number count fell
         // with `hair.locks`, which cut the rim of the shell into wedges and has
         // nothing to cut any more.
+        //
+        // **116 -> 115** (symbios-avatar #212): `skin.stubble` came off the
+        // record. It is the removal direction again, and the third time this
+        // guard has caught one — the axis had been dead since the painted hair
+        // layer replaced what it drew, and the slider that wrote it went on
+        // being drawn.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 116,
+            listed, 115,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"
