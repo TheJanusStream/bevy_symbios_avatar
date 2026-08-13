@@ -746,34 +746,287 @@ fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     changed
 }
 
-/// Hair.
+/// Hair, which is five regions rather than one head (symbios-avatar #202).
+///
+/// **One section per follicle region, each carrying both layers**, because that
+/// is what the record now says: a region has a base style out of its own
+/// catalogue, a cut, two colours to fade between, the hair painted into the skin
+/// under it, and the shape parameters that say where on the head it grows at
+/// all. The eight scalars this replaced described one sculpted shell and could
+/// not say that a face has eyebrows.
+///
+/// The five are nested one level down rather than laid out flat: fifty-odd
+/// controls in one open header is a wall, and a person editing a beard is not
+/// editing a hairline. egui only runs the body of an OPEN header, so the four
+/// nobody has opened cost nothing to draw.
 fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("hair").show(ui, |ui| {
-        changed |= axis(ui, "length", &mut record.hair.length, 0.0..=1.0);
-        // Signed, not unit. Both of these clamp to `-1..=1` in the engine and
-        // shipped here on a `0..=1` slider, so the whole negative half of each
-        // — thin hair and a receding hairline — was unreachable from the panel
-        // for as long as it existed (#9). Nothing failed: the values were legal
-        // and the body built, the axis simply had no way to be asked for.
-        changed |= signed(ui, "volume", &mut record.hair.volume);
-        changed |= signed(ui, "coverage", &mut record.hair.coverage);
-        changed |= signed(ui, "part", &mut record.hair.part);
-        changed |= axis(ui, "wave", &mut record.hair.wave, 0.0..=1.0);
-        changed |= axis(ui, "shade", &mut record.hair.shade, 0.0..=1.0);
-        changed |= axis(ui, "curl", &mut record.hair.curl, 0.0..=1.0);
-        // A count, not an axis: the record stores it as a whole number and a
-        // slider showing 11.5 locks would be showing a body nobody can have.
-        changed |= ui
-            .add(
-                egui::Slider::new(
-                    &mut record.hair.locks,
-                    symbios_avatar::hair::MIN_LOCKS..=symbios_avatar::hair::MAX_LOCKS,
-                )
-                .text("locks"),
-            )
-            .changed();
+        changed |= zone(ui, "scalp", |ui| {
+            let mut changed = scalp_style(ui, &mut record.hair.scalp.style);
+            changed |= tress(ui, &mut record.hair.scalp);
+            ui.separator();
+            changed |= signed(ui, "hairline", &mut record.hair.regions.scalp.line);
+            changed |= axis(
+                ui,
+                "temples",
+                &mut record.hair.regions.scalp.temples,
+                0.0..=1.0,
+            );
+            changed |= signed(ui, "nape", &mut record.hair.regions.scalp.nape);
+            changed
+        });
+        changed |= zone(ui, "brows", |ui| {
+            let mut changed = brow_style(ui, &mut record.hair.brows.style);
+            changed |= tress(ui, &mut record.hair.brows);
+            ui.separator();
+            changed |= signed(ui, "rise", &mut record.hair.regions.brows.rise);
+            changed |= signed(ui, "apart", &mut record.hair.regions.brows.apart);
+            changed |= signed(ui, "reach", &mut record.hair.regions.brows.reach);
+            changed |= signed(ui, "arch", &mut record.hair.regions.brows.arch);
+            changed
+        });
+        changed |= zone(ui, "moustache", |ui| {
+            let mut changed = moustache_style(ui, &mut record.hair.moustache.style);
+            changed |= tress(ui, &mut record.hair.moustache);
+            ui.separator();
+            changed |= signed(ui, "width", &mut record.hair.regions.moustache.width);
+            changed |= signed(ui, "drop", &mut record.hair.regions.moustache.drop);
+            changed
+        });
+        changed |= zone(ui, "chin", |ui| {
+            let mut changed = chin_style(ui, &mut record.hair.chin.style);
+            changed |= tress(ui, &mut record.hair.chin);
+            ui.separator();
+            changed |= signed(ui, "width", &mut record.hair.regions.chin.width);
+            changed |= signed(ui, "under", &mut record.hair.regions.chin.under);
+            changed |= signed(ui, "rise", &mut record.hair.regions.chin.rise);
+            changed
+        });
+        changed |= zone(ui, "flanks", |ui| {
+            let mut changed = flank_style(ui, &mut record.hair.flanks.style);
+            changed |= tress(ui, &mut record.hair.flanks);
+            ui.separator();
+            changed |= signed(ui, "cheek", &mut record.hair.regions.flanks.cheek);
+            changed |= signed(ui, "under", &mut record.hair.regions.flanks.under);
+            changed |= signed(ui, "sideburn", &mut record.hair.regions.flanks.sideburn);
+            changed
+        });
     });
+    changed
+}
+
+/// One region's header, whose body only runs when it is open.
+fn zone(ui: &mut egui::Ui, name: &str, body: impl FnOnce(&mut egui::Ui) -> bool) -> bool {
+    egui::CollapsingHeader::new(name)
+        .show(ui, body)
+        .body_returned
+        .unwrap_or(false)
+}
+
+/// The half of a region that is the same whatever grows there: how it is cut,
+/// the two colours it fades between, and the hair painted into the skin.
+///
+/// Generic over the region's style for the same reason `Tress` is: a bob is not
+/// a thing a chin can have, so the styles are five types — but everything else
+/// about a region is one type with five parameters, and writing this out five
+/// times is five chances for one of them to drift.
+fn tress<S: symbios_avatar::hair::Style>(
+    ui: &mut egui::Ui,
+    tress: &mut symbios_avatar::hair::Tress<S>,
+) -> bool {
+    let mut changed = axis(ui, "length", &mut tress.cut.length, 0.0..=1.0);
+    changed |= axis(ui, "thickness", &mut tress.cut.thickness, 0.0..=1.0);
+    changed |= axis(ui, "density", &mut tress.cut.density, 0.0..=1.0);
+    changed |= axis(ui, "droop", &mut tress.cut.droop, 0.0..=1.0);
+    changed |= hair_colour(ui, "roots", &mut tress.roots);
+    changed |= hair_colour(ui, "tips", &mut tress.tips);
+    changed |= axis(ui, "painted", &mut tress.skin.density, 0.0..=1.0);
+    changed |= hair_colour(ui, "paint", &mut tress.skin.colour);
+    changed
+}
+
+/// One hair colour: the engine's own natural ramp, and a free picker beside it.
+///
+/// **Both, and the pair is the point** (symbios-avatar #202). The melanin ramp
+/// is what a natural head of hair sits on and it is drawn here from the engine's
+/// own function rather than from a palette invented in this crate, so a swatch
+/// cannot drift from the hair it paints — the same argument the complexion row
+/// makes. But the ramp's light end is a warm blonde, so it cannot say grey, and
+/// it cannot say green either; the record stores free sRGB precisely so that it
+/// can, and a panel offering only the ramp would put half the record out of
+/// reach the way the `0..=1` sliders once put half the hair axes out of reach
+/// (#9).
+///
+/// **The picker is sRGB on both sides.** `Color32` is sRGB bytes and the record
+/// is sRGB thousandths, so nothing here converts — which is the whole trap this
+/// crate has already paid for once in the other direction (#14, where copying
+/// the engine's sRGB vertex colours into a linear channel drew dark hair as milk
+/// chocolate). The one loss is precision: a byte is coarser than a thousandth,
+/// so a colour that has been through the picker lands on a 1/255 step. It is
+/// only written back when the picker actually changed, so a colour nobody
+/// touches keeps the value the record was loaded with.
+fn hair_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(name);
+        for stop in 0..=8u32 {
+            let shade = f32::from(u16::try_from(stop).unwrap_or(0)) / 8.0;
+            let tone = symbios_avatar::hair::style::melanin(shade);
+            let picked = tone
+                .iter()
+                .zip(colour.iter())
+                .all(|(a, b)| (a - b).abs() < 0.004);
+            let button = egui::Button::new(if picked { "•" } else { " " })
+                .fill(swatch(symbios_avatar::Vec3::from_array(tone)))
+                .min_size(egui::vec2(18.0, 18.0));
+            if ui
+                .add(button)
+                .on_hover_text(format!("melanin {shade:.2}"))
+                .clicked()
+            {
+                *colour = tone;
+                changed = true;
+            }
+        }
+        let mut free = swatch(symbios_avatar::Vec3::from_array(*colour));
+        if ui
+            .color_edit_button_srgba(&mut free)
+            .on_hover_text("any colour, sRGB")
+            .changed()
+        {
+            *colour = [
+                f32::from(free.r()) / 255.0,
+                f32::from(free.g()) / 255.0,
+                f32::from(free.b()) / 255.0,
+            ];
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// A row of base styles, one selectable label each.
+///
+/// Picking a style hands back a fresh instance of it rather than trying to carry
+/// an axis across: a bob's fringe and a tail's height are different quantities
+/// that happen to be spelled the same way, and carrying one into the other is
+/// how a panel writes a haircut nobody asked for.
+fn styles<S: Copy + PartialEq>(ui: &mut egui::Ui, current: &mut S, choices: &[(&str, S)]) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for (name, style) in choices {
+            let picked = current == style;
+            if ui.selectable_label(picked, *name).clicked() && !picked {
+                *current = *style;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// The scalp's catalogue, and whichever axis the picked style carries.
+fn scalp_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ScalpStyle) -> bool {
+    use symbios_avatar::ScalpStyle as S;
+    let mut changed = styles(
+        ui,
+        style,
+        &[
+            ("none", S::None),
+            ("crop", S::Crop),
+            ("bob", S::Bob { fringe: 0.5 }),
+            ("long", S::Long { weight: 0.5 }),
+            ("tied", S::TiedBack { tail: 0.5 }),
+            ("curly", S::Curly { curl: 0.5 }),
+        ],
+    );
+    // Matched rather than looked up, because the axis's NAME is part of the
+    // style: "fringe" and "tail" mean different things and a panel that called
+    // both of them "axis" would be a panel nobody can use.
+    changed |= match style {
+        S::None | S::Crop => false,
+        S::Bob { fringe } => axis(ui, "fringe", fringe, 0.0..=1.0),
+        S::Long { weight } => axis(ui, "back weight", weight, 0.0..=1.0),
+        S::TiedBack { tail } => axis(ui, "tail height", tail, 0.0..=1.0),
+        S::Curly { curl } => axis(ui, "curl", curl, 0.0..=1.0),
+    };
+    changed
+}
+
+/// The brows' catalogue, which carries no axis of its own.
+fn brow_style(ui: &mut egui::Ui, style: &mut symbios_avatar::BrowStyle) -> bool {
+    use symbios_avatar::BrowStyle as S;
+    styles(
+        ui,
+        style,
+        &[
+            ("none", S::None),
+            ("natural", S::Natural),
+            ("thick", S::Thick),
+        ],
+    )
+}
+
+/// The upper lip's catalogue.
+fn moustache_style(ui: &mut egui::Ui, style: &mut symbios_avatar::MoustacheStyle) -> bool {
+    use symbios_avatar::MoustacheStyle as S;
+    let mut changed = styles(
+        ui,
+        style,
+        &[
+            ("none", S::None),
+            ("chevron", S::Chevron),
+            ("handlebar", S::Handlebar { sweep: 0.5 }),
+            ("pencil", S::Pencil { ride: 0.5 }),
+        ],
+    );
+    changed |= match style {
+        S::None | S::Chevron => false,
+        S::Handlebar { sweep } => axis(ui, "sweep", sweep, 0.0..=1.0),
+        S::Pencil { ride } => axis(ui, "ride", ride, 0.0..=1.0),
+    };
+    changed
+}
+
+/// The chin's catalogue.
+fn chin_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ChinStyle) -> bool {
+    use symbios_avatar::ChinStyle as S;
+    let mut changed = styles(
+        ui,
+        style,
+        &[
+            ("none", S::None),
+            ("goatee", S::Goatee { point: 0.5 }),
+            ("full", S::Full),
+            ("braided", S::Braided { twist: 0.5 }),
+        ],
+    );
+    changed |= match style {
+        S::None | S::Full => false,
+        S::Goatee { point } => axis(ui, "point", point, 0.0..=1.0),
+        S::Braided { twist } => axis(ui, "twist", twist, 0.0..=1.0),
+    };
+    changed
+}
+
+/// The jaw flanks' catalogue.
+fn flank_style(ui: &mut egui::Ui, style: &mut symbios_avatar::FlankStyle) -> bool {
+    use symbios_avatar::FlankStyle as S;
+    let mut changed = styles(
+        ui,
+        style,
+        &[
+            ("none", S::None),
+            ("sideburns", S::Sideburns { drop: 0.5 }),
+            ("full connect", S::FullConnect { reach: 0.5 }),
+        ],
+    );
+    changed |= match style {
+        S::None => false,
+        S::Sideburns { drop } => axis(ui, "drop", drop, 0.0..=1.0),
+        S::FullConnect { reach } => axis(ui, "reach", reach, 0.0..=1.0),
+    };
     changed
 }
 
@@ -1229,18 +1482,117 @@ mod tests {
             ("mouth", record.face.mouth),
             ("mouth width", record.face.mouth_width),
             ("ears", record.face.ears),
-            ("hair length", record.hair.length),
-            ("hair volume", record.hair.volume),
-            ("hair coverage", record.hair.coverage),
-            ("hair part", record.hair.part),
-            ("hair wave", record.hair.wave),
-            ("hair shade", record.hair.shade),
-            ("hair curl", record.hair.curl),
             ("top hue", record.outfit.top_hue),
             ("top shade", record.outfit.top_shade),
             ("leg hue", record.outfit.leg_hue),
             ("leg shade", record.outfit.leg_shade),
         ]);
+        // **Five regions of the same shape, pushed rather than listed**
+        // (symbios-avatar #202/#209). Hair used to be eight scalars on one
+        // struct and they were written out one per line here; it is now five
+        // tresses of four cut axes, three colours of three channels and a paint
+        // density, plus the region's own shape axes — a hundred and ten numbers,
+        // and a hand-written list of a hundred and ten is a list with something
+        // missing from it. The list this replaced was already one short: the
+        // panel wrote `hair.locks` through `counts` and every colour the record
+        // carried was invisible to this test.
+        for (name, tress) in hair_axes_of(record) {
+            out.push((name, tress));
+        }
+        out
+    }
+
+    /// Every hair number the panel writes, region by region.
+    ///
+    /// The names are leaked deliberately: this is a test helper building a list
+    /// of `&'static str` for a suite that runs once, and threading a lifetime
+    /// through it to save a few dozen bytes would be the tail wagging the dog.
+    fn hair_axes_of(record: &AvatarRecord) -> Vec<(&'static str, f32)> {
+        let mut out = Vec::new();
+        let hair = &record.hair;
+        {
+            let mut region = |name: &str,
+                              cut: symbios_avatar::Cut,
+                              roots: [f32; 3],
+                              tips: [f32; 3],
+                              paint: symbios_avatar::Paint| {
+                let at = |what: &str| -> &'static str {
+                    Box::leak(format!("hair {name} {what}").into_boxed_str())
+                };
+                out.push((at("length"), cut.length));
+                out.push((at("thickness"), cut.thickness));
+                out.push((at("density"), cut.density));
+                out.push((at("droop"), cut.droop));
+                for (channel, at) in ["r", "g", "b"].into_iter().enumerate() {
+                    out.push((
+                        Box::leak(format!("hair {name} roots {at}").into_boxed_str()),
+                        roots[channel],
+                    ));
+                    out.push((
+                        Box::leak(format!("hair {name} tips {at}").into_boxed_str()),
+                        tips[channel],
+                    ));
+                    out.push((
+                        Box::leak(format!("hair {name} paint {at}").into_boxed_str()),
+                        paint.colour[channel],
+                    ));
+                }
+                out.push((at("painted"), paint.density));
+            };
+            region(
+                "scalp",
+                hair.scalp.cut,
+                hair.scalp.roots,
+                hair.scalp.tips,
+                hair.scalp.skin,
+            );
+            region(
+                "brows",
+                hair.brows.cut,
+                hair.brows.roots,
+                hair.brows.tips,
+                hair.brows.skin,
+            );
+            region(
+                "moustache",
+                hair.moustache.cut,
+                hair.moustache.roots,
+                hair.moustache.tips,
+                hair.moustache.skin,
+            );
+            region(
+                "chin",
+                hair.chin.cut,
+                hair.chin.roots,
+                hair.chin.tips,
+                hair.chin.skin,
+            );
+            region(
+                "flanks",
+                hair.flanks.cut,
+                hair.flanks.roots,
+                hair.flanks.tips,
+                hair.flanks.skin,
+            );
+            // The closure borrowed `out`; the block it lives in ends here so the
+            // pushes below can have it back.
+        }
+        // Where each region grows, which the panel edits beside what grows there.
+        out.push(("hair scalp line", hair.regions.scalp.line));
+        out.push(("hair scalp temples", hair.regions.scalp.temples));
+        out.push(("hair scalp nape", hair.regions.scalp.nape));
+        out.push(("hair brows rise", hair.regions.brows.rise));
+        out.push(("hair brows apart", hair.regions.brows.apart));
+        out.push(("hair brows reach", hair.regions.brows.reach));
+        out.push(("hair brows arch", hair.regions.brows.arch));
+        out.push(("hair moustache width", hair.regions.moustache.width));
+        out.push(("hair moustache drop", hair.regions.moustache.drop));
+        out.push(("hair chin width", hair.regions.chin.width));
+        out.push(("hair chin under", hair.regions.chin.under));
+        out.push(("hair chin rise", hair.regions.chin.rise));
+        out.push(("hair flanks cheek", hair.regions.flanks.cheek));
+        out.push(("hair flanks under", hair.regions.flanks.under));
+        out.push(("hair flanks sideburn", hair.regions.flanks.sideburn));
         out
     }
 
@@ -1253,10 +1605,94 @@ mod tests {
     /// NOT doing — a slider showing 11.5 locks or 40.5 years shows a record
     /// nobody can hold.
     fn counts(record: &AvatarRecord) -> Vec<(&'static str, u32)> {
-        vec![
-            ("age", record.composites.age),
-            ("hair locks", record.hair.locks),
-        ]
+        // **One entry, and it used to be two.** `hair.locks` was the other, and
+        // it went with the sculpted shell whose rim it cut into (symbios-avatar
+        // #202): a head of hair is five regions of cards now and nothing about
+        // it is a whole number a person sets.
+        vec![("age", record.composites.age)]
+    }
+
+    /// The hair half of [`fiddled`], which is two thirds of the record's axes.
+    ///
+    /// Its own function because five regions of fourteen numbers plus fifteen
+    /// region shapes is longer than the whole of the rest of the record put
+    /// together — and because a list this long is the one most worth reading on
+    /// its own when the coverage count moves.
+    fn fiddle_hair(record: &mut AvatarRecord) {
+        // Every region, every axis, and nowhere a thousandth lands. The five
+        // are given DIFFERENT numbers rather than one value each, because a
+        // panel that wrote a scalp's cut into a chin's would pass a test that
+        // fiddled them all the same way.
+        //
+        // Negative on the signed ones, because the half of an axis the panel
+        // could not reach is exactly the half a test that never set them could
+        // not catch (#9) — and the region shapes below are all signed.
+        for (at, tress) in [0.717_17_f32, 0.282_82, 0.454_54, 0.616_16, 0.838_38]
+            .into_iter()
+            .zip([
+                &mut record.hair.scalp.cut,
+                &mut record.hair.brows.cut,
+                &mut record.hair.moustache.cut,
+                &mut record.hair.chin.cut,
+                &mut record.hair.flanks.cut,
+            ])
+        {
+            tress.length = at;
+            tress.thickness = at * 0.7 + 0.070_70;
+            tress.density = at * 0.5 + 0.131_31;
+            tress.droop = at * 0.3 + 0.212_12;
+        }
+        for (at, tress) in [0.070_70_f32, 0.191_91, 0.313_13, 0.434_34, 0.555_55]
+            .into_iter()
+            .zip([
+                (
+                    &mut record.hair.scalp.roots,
+                    &mut record.hair.scalp.tips,
+                    &mut record.hair.scalp.skin,
+                ),
+                (
+                    &mut record.hair.brows.roots,
+                    &mut record.hair.brows.tips,
+                    &mut record.hair.brows.skin,
+                ),
+                (
+                    &mut record.hair.moustache.roots,
+                    &mut record.hair.moustache.tips,
+                    &mut record.hair.moustache.skin,
+                ),
+                (
+                    &mut record.hair.chin.roots,
+                    &mut record.hair.chin.tips,
+                    &mut record.hair.chin.skin,
+                ),
+                (
+                    &mut record.hair.flanks.roots,
+                    &mut record.hair.flanks.tips,
+                    &mut record.hair.flanks.skin,
+                ),
+            ])
+        {
+            let (roots, tips, paint) = tress;
+            *roots = [at, at + 0.010_10, at + 0.020_20];
+            *tips = [at + 0.030_30, at + 0.040_40, at + 0.050_50];
+            paint.density = at + 0.060_60;
+            paint.colour = [at + 0.070_70, at + 0.080_80, at + 0.090_90];
+        }
+        record.hair.regions.scalp.line = -0.282_82;
+        record.hair.regions.scalp.temples = 0.454_54;
+        record.hair.regions.scalp.nape = -0.616_16;
+        record.hair.regions.brows.rise = -0.121_21;
+        record.hair.regions.brows.apart = 0.232_32;
+        record.hair.regions.brows.reach = -0.343_43;
+        record.hair.regions.brows.arch = 0.454_54;
+        record.hair.regions.moustache.width = -0.565_65;
+        record.hair.regions.moustache.drop = 0.676_76;
+        record.hair.regions.chin.width = -0.787_87;
+        record.hair.regions.chin.under = 0.898_98;
+        record.hair.regions.chin.rise = -0.909_09;
+        record.hair.regions.flanks.cheek = 0.101_01;
+        record.hair.regions.flanks.under = -0.212_12;
+        record.hair.regions.flanks.sideburn = 0.323_23;
     }
 
     /// A record with every axis dragged somewhere a slider can put it and
@@ -1293,16 +1729,7 @@ mod tests {
         record.face.mouth = 0.303_03;
         record.face.mouth_width = 0.572_91;
         record.face.ears = 0.606_06;
-        record.hair.length = 0.717_17;
-        // Negative, because the half of these two axes the panel could not
-        // reach is exactly the half a test that never set them could not catch.
-        record.hair.volume = -0.282_82;
-        record.hair.coverage = -0.454_54;
-        record.hair.part = -0.616_16;
-        record.hair.wave = 0.838_38;
-        record.hair.shade = 0.070_70;
-        record.hair.curl = 0.929_29;
-        record.hair.locks = 17;
+        fiddle_hair(&mut record);
         record.outfit.top_hue = 0.151_51;
         record.outfit.top_shade = 0.626_26;
         record.outfit.leg_hue = 0.373_73;
@@ -1365,15 +1792,23 @@ mod tests {
         // This is the guard doing its job in the removal direction — the count
         // fell and somebody had to decide the two sliders were gone rather than
         // missing.
+        //
+        // **38 → 116, and 2 → 1** (symbios-avatar #202/#209). Hair stopped being
+        // eight scalars describing one sculpted shell and became five follicle
+        // regions of two layers each: four cut axes, three colours of three
+        // channels, a paint density and the region's own shape axes, times five.
+        // Seven axes left and seventy-eight arrived. The whole-number count fell
+        // with `hair.locks`, which cut the rim of the shell into wedges and has
+        // nothing to cut any more.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 38,
+            listed, 116,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"
         );
-        assert_eq!(counts(&record).len(), 2, "and the same for whole numbers");
+        assert_eq!(counts(&record).len(), 1, "and the same for whole numbers");
     }
 
     #[test]

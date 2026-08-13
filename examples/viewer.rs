@@ -18,7 +18,7 @@
 //! cargo run --release --example viewer -- --gait wave --pace 1.4 --shot wave.png
 //! cargo run --release --example viewer -- --walk --phase 0.35 --cadence 1.6
 //! cargo run --release --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
-//! cargo run --release --example viewer -- --mane 0.0        # bald, for judging a jaw
+//! cargo run --release --example viewer -- --mane 0          # bald, for judging a jaw
 //! cargo run --release --example viewer -- --still           # no blink, no tracking
 //! cargo run --release --example viewer -- --talk             # the jaw speaks
 //! cargo run --release --example viewer -- --open 0.2         # hold the jaw open, radians
@@ -297,12 +297,39 @@ fn starting_editor() -> RecordEditor {
     {
         record.reroll(seed);
     }
-    // `--mane 0.0` for a bald judgement shot: hair is the loudest thing on a
-    // head and the first thing in the way of judging a jaw, and the panel's
-    // hair-length axis cannot be dragged by a script. Applied after the
-    // reroll so a seeded body keeps everything else it rolled.
-    if let Some(length) = value("--mane") {
-        record.hair.length = length.clamp(0.0, 1.0);
+    // `--mane 0` for a bald judgement shot: hair is the loudest thing on a head
+    // and the first thing in the way of judging a jaw, and the panel's controls
+    // cannot be dragged by a script. Applied after the reroll so a seeded body
+    // keeps everything else it rolled.
+    //
+    // **It silences all five regions now, not one length** (symbios-avatar
+    // #209). It used to set the single `length` axis of a sculpted shell to
+    // zero, which was the whole of the hair there was. A head grows hair in five
+    // places now, and a flag that only shaved the scalp would leave a beard and
+    // a pair of brows over exactly the jaw the flag exists to look at. Its job
+    // is unchanged; what "all the hair" means is not.
+    //
+    // Both layers, because a painted region is hair too: a shaved chin still
+    // has stubble drawn into its albedo, and stubble over a jawline is the same
+    // obstruction at the same framing.
+    if let Some(mane) = value("--mane") {
+        if mane <= 0.0 {
+            record.hair = symbios_avatar::HairRecord::bald();
+        } else {
+            // Anything above zero scales what the record already asked for,
+            // rather than replacing it: a body keeps its own haircut and wears
+            // less of it.
+            for cut in [
+                &mut record.hair.scalp.cut,
+                &mut record.hair.brows.cut,
+                &mut record.hair.moustache.cut,
+                &mut record.hair.chin.cut,
+                &mut record.hair.flanks.cut,
+            ] {
+                cut.length = (cut.length * mane).clamp(0.0, 1.0);
+            }
+        }
+        record.sanitize();
     }
     let mut editor = RecordEditor::new(record);
     editor.open = windows_wanted();

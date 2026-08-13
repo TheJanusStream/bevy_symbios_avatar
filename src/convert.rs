@@ -277,7 +277,20 @@ mod tests {
         // the vertices. Dropping the colours would cost nothing measurable and
         // turn the hair into a helmet — a defect this crate would then be
         // blamed for.
-        let avatar = avatar();
+        //
+        // **The gradient has to be ASKED FOR now, and the test failing is what
+        // said so** (symbios-avatar #202/#209). A record carries a root colour
+        // and a tip colour per region, and the default record sets both to the
+        // same melanin stop — so a default head of hair really is one colour,
+        // and this test was passing on a distinctness the shell era got from a
+        // per-lock shade that no longer exists. Asserting a gradient survives
+        // conversion means writing one into the record first; asserting it on
+        // whatever the default happens to carry is asserting the default.
+        let mut record = AvatarRecord::new("Converted", Archetype::default());
+        record.hair.scalp.roots = [0.05, 0.03, 0.02];
+        record.hair.scalp.tips = [0.72, 0.55, 0.28];
+        record.sanitize();
+        let avatar = Avatar::build(&record).expect("a biped builds");
         let hair = avatar
             .drawn(0.0)
             .into_iter()
