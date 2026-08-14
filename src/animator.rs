@@ -455,15 +455,10 @@ pub fn drive_avatar_animation(
         let rig = &body.avatar.rig;
         let mut pose = Pose::rest(rig);
         let mut stance = Vec::new();
-        if gaiting {
-            let gait = animator.gait.of(rig);
-            let stride = Stride::for_body(rig, animator.pace);
-            let steps = gait::step(rig, &mut pose, &gait, &stride, animator.cycle);
-            if animator.swing_arms {
-                gait::swing_arms(rig, &mut pose, &gait, animator.cycle);
-            }
-            stance = steps.stance;
-        }
+        // Returned rather than kept local so the ankles can roll AFTER the
+        // plant: the plant lays every sole flat and a roll applied before it is
+        // simply levelled away.
+        let walking = gaiting.then(|| walk(rig, &animator, &mut pose, &mut stance));
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
             // its own tracks name — which is what lets an imported gesture ride
@@ -496,6 +491,18 @@ pub fn drive_avatar_animation(
             // this whole system is built on.
             animator.bypass_change_detection().lift = lift;
             animator.bypass_change_detection().straining = straining;
+        }
+        // **The ankles** (#251). `step` places the feet and `swing_arms` the
+        // arms; this third stage was missing, so the viewer's procedural walk
+        // had no heel-strike and no toe-off and its foot tilted bodily with the
+        // shin. That matters most here of anywhere: this is the second
+        // instrument, the place a walk is judged by eye, and a stage it never
+        // drew is a defect nobody would find.
+        //
+        // After the plant, which lays every sole flat — a roll run before it is
+        // levelled away. Gait only: a clip carries its own ankle motion.
+        if let Some(gait) = &walking {
+            gait::roll_feet(rig, &mut pose, gait, animator.cycle);
         }
         // A target at head height, applied after the gait, because looking
         // somewhere is a turn added to whatever the spine is already doing.
@@ -648,16 +655,7 @@ fn solve_footing(
     stance: &[symbios_avatar::Limb],
     grade: f32,
 ) -> (f32, usize) {
-    // The surface `y = x * grade` — position AND normal. `Ground::level` here
-    // handed the solve a flat `+y` normal on a sloping surface, so the ankles
-    // held their soles level across the very slope this control exists to ask
-    // them about (#21).
-    let ground = |foot: Vec3| {
-        Some(Ground {
-            position: Vec3::new(foot.x, foot.x * grade, foot.z),
-            normal: Vec3::new(-grade, 1.0, 0.0).normalize(),
-        })
-    };
+    let ground = sloping(grade);
     let before = pose.forward(rig).positions;
     let footing = plant_feet_of(rig, pose, stance, ground, &FootingConfig::default());
     let after = pose.forward(rig).positions;
@@ -668,6 +666,59 @@ fn solve_footing(
             worst.max(before[joint].distance(after[joint]))
         });
     (lift, footing.straining.len())
+}
+
+/// Poses the legs for this frame and reports the gait that did it.
+///
+/// Split out of [`drive_avatar_animation`] to keep that system inside its line
+/// budget once the ankles joined it (#251); it is one stage of the drive and
+/// reads as one.
+fn walk(
+    rig: &symbios_avatar::Rig,
+    animator: &Animator,
+    pose: &mut Pose,
+    stance: &mut Vec<symbios_avatar::Limb>,
+) -> Gait {
+    let gait = animator.gait.of(rig);
+    let stride = Stride::for_body(rig, animator.pace);
+    // The stride is seated on the same surface the footing solve will settle it
+    // onto (#251) — the two disagreeing about the floor is what leaves a swing
+    // arc at the rest ground height while the plant lands on a hill.
+    let steps = gait::step(
+        rig,
+        pose,
+        &gait,
+        &stride,
+        animator.cycle,
+        sloping(animator.slope),
+    );
+    if animator.swing_arms {
+        gait::swing_arms(rig, pose, &gait, animator.cycle);
+    }
+    *stance = steps.stance;
+    gait
+}
+
+/// The surface the slope control describes — position AND normal.
+///
+/// **Along Z, the way the body walks**, and it was along X until #251. X is the
+/// body's lateral axis: the engine's forward is `+Z` and [`Stride::for_body`]
+/// strides down it, so tilting X asked the slider's question about a CAMBER the
+/// body stood across rather than a hill it climbed. The normal was already
+/// corrected once, under #21, for being flat on a sloping surface — it was
+/// corrected about the wrong axis.
+///
+/// Shared by the footing solve and by [`gait::step`], which since symbios-avatar
+/// #221 seats its stride on whatever ground it is given: handing those two
+/// different floors is exactly what leaves a swing arc at the rest ground height
+/// while the plant settles onto a hill.
+fn sloping(grade: f32) -> impl Fn(Vec3) -> Option<Ground> {
+    move |foot: Vec3| {
+        Some(Ground {
+            position: Vec3::new(foot.x, foot.z * grade, foot.z),
+            normal: Vec3::new(0.0, 1.0, -grade).normalize(),
+        })
+    }
 }
 
 /// Carries one body's transition forward, and remembers this frame.
