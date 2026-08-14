@@ -117,9 +117,16 @@ crate has beyond Bevy and the engine — `bevy_egui` and `serde_json`.
 ## The motion window
 
 The second window, for what a body is *doing* rather than what it is: walk on
-or off, which gait pattern, cadence, pace, arm swing, foot planting, a ground
-slope, blinking, a held lid closure, speech, a held jaw angle, and where the
-gaze is aimed. All of it comes from the engine's own `anim` module — this crate
+or off, which gait pattern, cadence, pace, arm swing, foot planting, the ground's
+grade and camber, blinking, a held lid closure, speech, a held jaw angle, and
+where the gaze is aimed. The two ground sliders are two axes rather than one
+because a plane has two: **grade** is the hill the body walks up or down, along
+`+z` where it faces, and **camber** is the one it stands across, along `+x`.
+Together they reach every plane through the origin, and each asks a gait a
+different question — a grade is answered by stride and crouch, a camber by the
+ankles and the width of the stance. The drawn floor is rotated onto the very
+plane the feet are solved against, from one shared definition, because those two
+have drifted apart twice. All of it comes from the engine's own `anim` module — this crate
 ticks a cycle and writes the result onto components — so a walk that reads
 wrong here and right in the software renderer is this crate's fault, and one
 that reads wrong in both is the engine's.

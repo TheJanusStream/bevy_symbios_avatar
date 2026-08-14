@@ -225,12 +225,25 @@ pub struct Animator {
     /// weight the procedural gait has to be judged against and throwing it away
     /// would rig the comparison.
     pub in_place: bool,
-    /// How steeply the ground rises toward `+x`, as a rise over run.
+    /// How steeply the ground rises toward `+z`, as a rise over run — the hill
+    /// the body walks up or down.
     ///
     /// The viewer's floor tilts with it. A clip's ankle angles are fixed at bake
     /// time and a slope changes what they should be, so this is where an
     /// imported walk is asked the question a procedural one answers by solving.
-    pub slope: f32,
+    ///
+    /// `+z` because that is the way the body faces: the engine's forward is
+    /// `+z` and `Stride::for_body` strides down it (#251).
+    pub grade: f32,
+    /// How steeply the ground rises toward `+x`, as a rise over run — the hill
+    /// the body stands ACROSS rather than climbs.
+    ///
+    /// A separate question from [`Self::grade`] rather than the same one turned
+    /// sideways, which is why it is a second slider and not a heading: a gait
+    /// answers a grade with its stride and its crouch, and a camber with its
+    /// ankles and the width of its stance. Together the two reach every plane
+    /// through the origin, so any slope in 3D can be put under the body (#252).
+    pub camber: f32,
     /// How long a transition between sources takes, in seconds. Zero snaps.
     pub blend: f32,
     /// How far the footing solve had to move the feet on the last frame, in
@@ -301,7 +314,8 @@ impl Default for Animator {
             clip: None,
             layered: false,
             in_place: true,
-            slope: 0.0,
+            grade: 0.0,
+            camber: 0.0,
             // Short enough to be a transition rather than a dissolve, long
             // enough to see. The number worth arguing about is on #141.
             blend: 0.15,
@@ -484,7 +498,8 @@ pub fn drive_avatar_animation(
         }
 
         if animator.footing && !stance.is_empty() {
-            let (lift, straining) = solve_footing(rig, &mut pose, &stance, animator.slope);
+            let (lift, straining) =
+                solve_footing(rig, &mut pose, &stance, animator.grade, animator.camber);
             // Through `bypass_change_detection`, because these are a readout and
             // not an instruction: writing them through the `ResMut` would mark
             // the resource changed every frame and defeat the still-body rule
@@ -654,8 +669,9 @@ fn solve_footing(
     pose: &mut Pose,
     stance: &[symbios_avatar::Limb],
     grade: f32,
+    camber: f32,
 ) -> (f32, usize) {
-    let ground = sloping(grade);
+    let ground = sloping(grade, camber);
     let before = pose.forward(rig).positions;
     let footing = plant_feet_of(rig, pose, stance, ground, &FootingConfig::default());
     let after = pose.forward(rig).positions;
@@ -690,7 +706,7 @@ fn walk(
         &gait,
         &stride,
         animator.cycle,
-        sloping(animator.slope),
+        sloping(animator.grade, animator.camber),
     );
     if animator.swing_arms {
         gait::swing_arms(rig, pose, &gait, animator.cycle);
@@ -699,24 +715,58 @@ fn walk(
     gait
 }
 
-/// The surface the slope control describes — position AND normal.
+/// Which way the sloped ground faces, for a given grade and camber.
 ///
-/// **Along Z, the way the body walks**, and it was along X until #251. X is the
-/// body's lateral axis: the engine's forward is `+Z` and [`Stride::for_body`]
-/// strides down it, so tilting X asked the slider's question about a CAMBER the
-/// body stood across rather than a hill it climbed. The normal was already
-/// corrected once, under #21, for being flat on a sloping surface — it was
-/// corrected about the wrong axis.
+/// **The one place the plane is defined, and that is the point of it.** The
+/// ground the feet are solved against and the floor the viewer draws are two
+/// expressions of a single surface, and they have now disagreed twice: #21
+/// found the drawn tilt rotating the opposite way to the solved one, and #252
+/// found it square to it, because #251 moved the solved surface from `+x` to
+/// `+z` and the drawn one stayed where it was. Both times the two were kept in
+/// agreement by a comment saying they had to be. A comment is not a mechanism.
+///
+/// Now the ground closure builds its surface from this and [`floor_tilt`]
+/// rotates the drawn floor onto it, so a change of axis moves both or neither,
+/// whatever the axes become.
+///
+/// The plane is `y = camber·x + grade·z`, whose upward normal is
+/// `(-camber, 1, -grade)` normalised.
+#[must_use]
+pub fn ground_normal(grade: f32, camber: f32) -> Vec3 {
+    Vec3::new(-camber, 1.0, -grade).normalize()
+}
+
+/// How to rotate a floor mesh lying in the world's `xz` plane so it becomes the
+/// ground the feet are solved against.
+///
+/// Published beside [`ground_normal`] rather than left to the viewer to compose,
+/// because composing it is what went wrong twice. A caller applies this and has
+/// nothing to get out of step; the two expressions of the plane are now one
+/// call apart instead of one convention apart.
+#[must_use]
+pub fn floor_tilt(grade: f32, camber: f32) -> Quat {
+    Quat::from_rotation_arc(Vec3::Y, ground_normal(grade, camber))
+}
+
+/// The surface the slope controls describe — position AND normal.
+///
+/// **Grade runs along Z, the way the body walks**, and it ran along X until
+/// #251: X is the body's lateral axis — the engine's forward is `+Z` and
+/// [`Stride::for_body`] strides down it — so tilting X asked the slider's
+/// question about a camber the body stood across rather than a hill it climbed.
+/// Camber is now that second axis on purpose (#252), so the pair reaches every
+/// plane.
 ///
 /// Shared by the footing solve and by [`gait::step`], which since symbios-avatar
 /// #221 seats its stride on whatever ground it is given: handing those two
 /// different floors is exactly what leaves a swing arc at the rest ground height
 /// while the plant settles onto a hill.
-fn sloping(grade: f32) -> impl Fn(Vec3) -> Option<Ground> {
+fn sloping(grade: f32, camber: f32) -> impl Fn(Vec3) -> Option<Ground> {
+    let normal = ground_normal(grade, camber);
     move |foot: Vec3| {
         Some(Ground {
-            position: Vec3::new(foot.x, foot.z * grade, foot.z),
-            normal: Vec3::new(0.0, 1.0, -grade).normalize(),
+            position: Vec3::new(foot.x, foot.x * camber + foot.z * grade, foot.z),
+            normal,
         })
     }
 }
@@ -980,9 +1030,17 @@ fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
             }
         ));
     });
+    // Two axes, because a plane in 3D has two (#252): the hill the body walks
+    // up and the hill it stands across. Both at once is a diagonal, which is
+    // the case neither slider tests on its own.
     ui.add(
-        egui::Slider::new(&mut animator.slope, -0.4..=0.4)
-            .text("slope")
+        egui::Slider::new(&mut animator.grade, -0.4..=0.4)
+            .text("grade (fore-aft)")
+            .fixed_decimals(2),
+    );
+    ui.add(
+        egui::Slider::new(&mut animator.camber, -0.4..=0.4)
+            .text("camber (lateral)")
             .fixed_decimals(2),
     );
     ui.add(
@@ -1640,6 +1698,139 @@ mod tests {
                 "{} runs on two legs now — give the viewer a flag for it",
                 kind.label()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod slope_tests {
+    use super::*;
+
+    /// Grades and cambers to check, including the diagonals that only exist
+    /// once there are two axes at all.
+    const PLANES: [(f32, f32); 7] = [
+        (0.0, 0.0),
+        (0.3, 0.0),
+        (-0.3, 0.0),
+        (0.0, 0.3),
+        (0.0, -0.3),
+        (0.25, 0.25),
+        (-0.2, 0.35),
+    ];
+
+    #[test]
+    fn the_drawn_floor_stands_on_the_plane_the_feet_are_solved_against() {
+        // **#252, and it is the test that was missing rather than the fix that
+        // was wrong.** The ground the feet meet and the floor the viewer draws
+        // are two expressions of one surface, and they have disagreed twice:
+        // once turning opposite ways (#21) and once square to each other (#252,
+        // after #251 moved the solved surface from +x to +z and the drawn floor
+        // stayed). Both times a comment said they had to match and nothing
+        // checked that they did.
+        //
+        // A floor mesh is a quad in the world's xz plane, so the transform that
+        // tilts it carries `Y` to the plane's normal. Asserting that against
+        // the normal the footing solve is handed is the whole invariant, and it
+        // holds for any axes anyone adds later.
+        //
+        // **Honestly: this is a contract test over ONE source, not a
+        // cross-check of two independent derivations** — `sloping` and
+        // [`floor_tilt`] both read [`ground_normal`], so it cannot fail while
+        // that stays true. That is the fix rather than a weakness in the test:
+        // the protection is that there is one definition and the viewer applies
+        // it instead of composing its own. What this pins is the PAIRING, so a
+        // future axis added to one and forgotten in the other is caught here
+        // rather than in somebody's eyes.
+        for (grade, camber) in PLANES {
+            let ground = sloping(grade, camber);
+            let tilt = floor_tilt(grade, camber);
+
+            let solved = ground(Vec3::ZERO).expect("a surface").normal;
+            let drawn = tilt * Vec3::Y;
+            assert!(
+                drawn.distance(solved) < 1e-5,
+                "grade {grade} camber {camber}: the floor faces {drawn} and the solve {solved}"
+            );
+
+            // **And the floor's own POINTS must land on the solved surface**,
+            // which facing the same way does not imply: a surface whose height
+            // is sampled from the wrong axes can carry a perfectly consistent
+            // normal, and the first version of this test passed with the axes
+            // swapped for exactly that reason. Every vertex of the floor quad
+            // is a point of the world's xz plane carried through the tilt.
+            for corner in [
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(-1.0, 0.0, 1.0),
+                Vec3::new(1.0, 0.0, -1.0),
+                Vec3::new(-3.0, 0.0, 2.0),
+            ] {
+                let placed = tilt * corner;
+                let beneath = ground(placed).expect("a surface").position.y;
+                assert!(
+                    (placed.y - beneath).abs() < 1e-5,
+                    "grade {grade} camber {camber}: the floor's {corner} sits at \
+                     {} where the solve puts the ground at {beneath}",
+                    placed.y
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_axis_tilts_the_ground_the_way_its_name_says() {
+        // The defect #251 and #252 are both instances of: an axis that means
+        // something other than its name. Grade is the hill the body WALKS up,
+        // so it must change the ground's height along `+z`, the way the body
+        // faces; camber is the one it stands across, along `+x`. Asserted on
+        // the surface itself rather than on the normal, because a normal can be
+        // right about the tilt while the height is sampled from the wrong axis.
+        let ahead = Vec3::new(0.0, 0.0, 1.0);
+        let aside = Vec3::new(1.0, 0.0, 0.0);
+
+        let uphill = sloping(0.25, 0.0);
+        assert!(
+            (uphill(ahead).unwrap().position.y - 0.25).abs() < 1e-6,
+            "a grade must raise the ground ahead of the body"
+        );
+        assert!(
+            uphill(aside).unwrap().position.y.abs() < 1e-6,
+            "a grade must leave the ground beside the body level"
+        );
+
+        let across = sloping(0.0, 0.25);
+        assert!(
+            across(ahead).unwrap().position.y.abs() < 1e-6,
+            "a camber must leave the ground ahead of the body level"
+        );
+        assert!(
+            (across(aside).unwrap().position.y - 0.25).abs() < 1e-6,
+            "a camber must raise the ground beside the body"
+        );
+    }
+
+    #[test]
+    fn the_two_axes_compose_into_one_plane() {
+        // What the second axis was added for: a diagonal hill, which neither
+        // slider reaches alone. The surface must be the plain sum of the two,
+        // and the normal must stay a unit vector pointing up rather than
+        // whichever axis was applied last.
+        for (grade, camber) in PLANES {
+            let ground = sloping(grade, camber);
+            for at in [
+                Vec3::new(1.0, 0.0, 1.0),
+                Vec3::new(-2.0, 0.0, 0.5),
+                Vec3::new(0.7, 0.0, -1.3),
+            ] {
+                let surface = ground(at).expect("a surface");
+                let expected = at.x * camber + at.z * grade;
+                assert!(
+                    (surface.position.y - expected).abs() < 1e-5,
+                    "at {at}: {} against {expected}",
+                    surface.position.y
+                );
+                assert!((surface.normal.length() - 1.0).abs() < 1e-5);
+                assert!(surface.normal.y > 0.0, "the ground faced downward");
+            }
         }
     }
 }

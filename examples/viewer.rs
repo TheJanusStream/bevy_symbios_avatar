@@ -30,7 +30,8 @@
 //! cargo run --release -F builtin-clips --example viewer -- --gaze 0.8   # hold the gaze, radians
 //! cargo run --release -F builtin-clips --example viewer -- --clip Walk  # a baked CC0 clip instead
 //! cargo run --release -F builtin-clips --example viewer -- --clip Greeting --layer --walk  # over the gait
-//! cargo run --release -F builtin-clips --example viewer -- --slope 0.2  # tilt the ground
+//! cargo run --release -F builtin-clips --example viewer -- --grade 0.2   # a hill to walk up
+//! cargo run --release -F builtin-clips --example viewer -- --camber 0.2  # a hill to stand across
 //! cargo run --release -F builtin-clips --example viewer -- --bare       # no windows at all
 //! ```
 //!
@@ -79,7 +80,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_egui::EguiPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
-use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind};
+use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind, floor_tilt};
 use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
 use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, Clips};
 use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
@@ -188,24 +189,26 @@ struct Framed {
 #[derive(Component)]
 struct Floor;
 
-/// Tilts the floor to match the slope the footing solve is being given.
+/// Tilts the floor onto the very plane the footing solve is being given.
 ///
-/// **Both, or neither.** The motion window feeds `Ground` a plane rising toward
-/// `+x`; if the visible floor stayed flat the body would appear to walk through
-/// or above it, and a viewer that lies about where the ground is cannot be used
-/// to judge what a walk does on a slope — which is the whole reason the control
-/// exists.
+/// **Both, or neither.** If the visible floor stayed flat the body would appear
+/// to walk through or above it, and a viewer that lies about where the ground is
+/// cannot be used to judge what a walk does on a slope — which is the whole
+/// reason the control exists.
+///
+/// **Derived from the solve's own normal rather than re-expressed**, which is
+/// the fix that outlives this particular pair of axes (#252). Written the other
+/// way, as a rotation composed from the slope values, the two drifted apart
+/// twice: #21 found the drawn tilt turning the opposite way to the solved one,
+/// and #252 found it square to it after the solved surface moved from `+x` to
+/// `+z` and this did not follow. Applying the tilt the library publishes
+/// cannot be out of step with a surface built from the same definition,
+/// whatever the axes become.
 fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Floor>>) {
     if !animator.is_changed() {
         return;
     }
-    // The plane is the world's `xz`, and `slope` is a rise over run toward `+x`,
-    // so the tilt is a rotation about `z` of `atan(slope)` — POSITIVE, because a
-    // positive rotation about `z` carries `+x` toward `+y`, up. This sign was
-    // negative once, justified by the opposite claim, and the floor tilted
-    // against the very ground the footing solve was planting feet on: the
-    // downhill foot rode visibly higher (#21).
-    let tilt = Quat::from_rotation_z(animator.slope.atan());
+    let tilt = floor_tilt(animator.grade, animator.camber);
     for mut transform in &mut floor {
         transform.rotation = tilt;
     }
@@ -405,7 +408,8 @@ fn starting_animator() -> Animator {
     // at the same place, so a still cannot show what the gaze did without one.
     animator.tracking = live && value("--gaze").is_none();
     animator.gaze_angle = value("--gaze").unwrap_or(0.0);
-    animator.slope = value("--slope").unwrap_or(0.0);
+    animator.grade = value("--grade").or_else(|| value("--slope")).unwrap_or(0.0);
+    animator.camber = value("--camber").unwrap_or(0.0);
     animator.layered = flag("--layer");
     animator
 }
