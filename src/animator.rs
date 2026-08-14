@@ -177,8 +177,14 @@ pub struct Animator {
     pub scrub: bool,
     /// How long a step is, as a multiple of what the legs would take.
     pub pace: f32,
-    /// Whether the arms swing against the legs.
-    pub swing_arms: bool,
+    /// Whether the postural layer over the legs runs: the arms swinging against
+    /// them, and the trunk leaning into the walk.
+    ///
+    /// One toggle rather than two because it exists for one purpose — taking
+    /// the posture off to look at what the legs alone are doing — and because
+    /// what it hides is one answer to one question. A body with neither is the
+    /// mannequin #102 described.
+    pub posture: bool,
     /// Whether the feet are solved onto the ground.
     pub footing: bool,
     /// Whether the eyes blink.
@@ -295,7 +301,7 @@ impl Default for Animator {
             cycle: 0.0,
             scrub: false,
             pace: 1.0,
-            swing_arms: true,
+            posture: true,
             footing: true,
             blinking: true,
             closure: 0.0,
@@ -708,8 +714,11 @@ fn walk(
         animator.cycle,
         sloping(animator.grade, animator.camber),
     );
-    if animator.swing_arms {
+    if animator.posture {
         gait::swing_arms(rig, pose, &gait, animator.cycle);
+        // The trunk pitches forward into the walk and the neck holds the head
+        // level over it (#239).
+        gait::lean(rig, pose, &gait, &stride);
     }
     *stance = steps.stance;
     gait
@@ -1005,7 +1014,7 @@ fn locomotion_section(
     }
     if walking {
         ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
-        ui.toggle_value(&mut animator.swing_arms, "arm swing");
+        ui.toggle_value(&mut animator.posture, "posture");
     }
 }
 
