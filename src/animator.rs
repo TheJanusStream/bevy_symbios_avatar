@@ -25,10 +25,10 @@
 //! joints of their own.
 
 use bevy::prelude::*;
-use symbios_avatar::anim::{GazeConfig, contacts_during, gait, gaze, plant_feet_of};
+use symbios_avatar::anim::{GazeConfig, contacts_during, gaze};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Pose, Rig, Stride,
-    Talk, Viseme, Zone,
+    Talk, Viseme, Walk, Walked, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
@@ -503,27 +503,22 @@ pub fn drive_avatar_animation(
             }
         }
 
-        if animator.footing && !stance.is_empty() {
-            let (lift, straining) =
-                solve_footing(rig, &mut pose, &stance, animator.grade, animator.camber);
-            // Through `bypass_change_detection`, because these are a readout and
-            // not an instruction: writing them through the `ResMut` would mark
-            // the resource changed every frame and defeat the still-body rule
-            // this whole system is built on.
-            animator.bypass_change_detection().lift = lift;
-            animator.bypass_change_detection().straining = straining;
-        }
-        // **The ankles** (#251). `step` places the feet and `swing_arms` the
-        // arms; this third stage was missing, so the viewer's procedural walk
-        // had no heel-strike and no toe-off and its foot tilted bodily with the
-        // shin. That matters most here of anywhere: this is the second
-        // instrument, the place a walk is judged by eye, and a stage it never
-        // drew is a defect nobody would find.
+        // The tail of the engine's own sequence: settle the contacts, then roll
+        // the ankles, in that order (engine #253). Both used to be this file's
+        // to remember and the roll was simply missing, so the viewer — the
+        // place a walk is judged BY EYE — drew a gait with no heel-strike and
+        // no toe-off for as long as the stage existed (#251).
         //
-        // After the plant, which lays every sole flat — a roll run before it is
-        // levelled away. Gait only: a clip carries its own ankle motion.
+        // Runs only when a gait is driving: a clip carries its own ankle motion
+        // and rolling on top of authored feet would fight it.
         if let Some(gait) = &walking {
-            gait::roll_feet(rig, &mut pose, gait, animator.cycle);
+            let walked = settle(rig, &animator, &mut pose, gait, &stance);
+            // Through `bypass_change_detection`, because these are a readout
+            // and not an instruction: writing them through the `ResMut` would
+            // mark the resource changed every frame and defeat the still-body
+            // rule this whole system is built on.
+            animator.bypass_change_detection().lift = walked.lift;
+            animator.bypass_change_detection().straining = walked.straining();
         }
         // A target at head height, applied after the gait, because looking
         // somewhere is a turn added to whatever the spine is already doing.
@@ -660,41 +655,18 @@ fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
     }
 }
 
-/// Puts the pose's feet on the ground and reports what that took.
+/// Walks the body one frame and reports what the engine's own drive did.
 ///
-/// The lift is measured **per joint, each against itself**, before and after —
-/// not as the movement of "the lowest joint of each foot", which changes
-/// identity when an ankle turns and would report a heel against a toe.
+/// **Every stage, through [`Walk::drive`]** (engine #253). This crate had the
+/// sequence hand-rolled and was one of the three consumers that had simply
+/// forgotten `roll_feet` — for as long as it existed, so the viewer, which is
+/// the place a walk is judged BY EYE, was drawing a gait missing a stage. The
+/// entry point is the fix for the class rather than for that instance: the
+/// order, the ground given to both the stride and the plant, and the roll
+/// landing after the settle are all its problem now.
 ///
-/// A readout rather than a diagnostic: a pose whose feet already land where the
-/// ground is needs no correction, and one whose do not is being held together by
-/// this. That difference is the locomotion question stated as a number rather
-/// than as a matter of taste.
-fn solve_footing(
-    rig: &symbios_avatar::Rig,
-    pose: &mut Pose,
-    stance: &[symbios_avatar::Limb],
-    grade: f32,
-    camber: f32,
-) -> (f32, usize) {
-    let ground = sloping(grade, camber);
-    let before = pose.forward(rig).positions;
-    let footing = plant_feet_of(rig, pose, stance, ground, &FootingConfig::default());
-    let after = pose.forward(rig).positions;
-    let lift = stance
-        .iter()
-        .flat_map(|&limb| rig.extremity_joints(limb))
-        .fold(0.0f32, |worst, joint| {
-            worst.max(before[joint].distance(after[joint]))
-        });
-    (lift, footing.straining.len())
-}
-
-/// Poses the legs for this frame and reports the gait that did it.
-///
-/// Split out of [`drive_avatar_animation`] to keep that system inside its line
-/// budget once the ankles joined it (#251); it is one stage of the drive and
-/// reads as one.
+/// The toggles map onto its ablation switches, so turning the posture or the
+/// footing off here takes off exactly that and nothing else.
 fn walk(
     rig: &symbios_avatar::Rig,
     animator: &Animator,
@@ -703,25 +675,49 @@ fn walk(
 ) -> Gait {
     let gait = animator.gait.of(rig);
     let stride = Stride::for_body(rig, animator.pace);
-    // The stride is seated on the same surface the footing solve will settle it
-    // onto (#251) — the two disagreeing about the floor is what leaves a swing
-    // arc at the rest ground height while the plant lands on a hill.
-    let steps = gait::step(
+    // Footing OFF here: this crate can layer an imported clip over the
+    // procedural walk, and a clip moves the legs — so the contacts are settled
+    // and the ankles rolled after that, through `Walk::settle`, further down.
+    let walked = Walk {
+        posture: animator.posture,
+        footing: None,
+        ..Walk::at(animator.cycle)
+    }
+    .drive(
         rig,
         pose,
         &gait,
         &stride,
-        animator.cycle,
         sloping(animator.grade, animator.camber),
     );
-    if animator.posture {
-        gait::swing_arms(rig, pose, &gait, animator.cycle);
-        // The trunk pitches forward into the walk and the neck holds the head
-        // level over it (#239).
-        gait::lean(rig, pose, &gait, &stride);
-    }
-    *stance = steps.stance;
+    *stance = walked.steps.stance;
     gait
+}
+
+/// Settles the contacts and rolls the ankles, and records what it cost.
+///
+/// The tail of the engine's own drive sequence (engine #253), kept apart from
+/// [`walk`] because this crate can layer an imported clip between the two — a
+/// clip moves the legs, so the feet are settled and the ankles rolled after it
+/// rather than before.
+fn settle(
+    rig: &symbios_avatar::Rig,
+    animator: &Animator,
+    pose: &mut Pose,
+    gait: &Gait,
+    stance: &[symbios_avatar::Limb],
+) -> Walked {
+    Walk {
+        footing: animator.footing.then(FootingConfig::default),
+        ..Walk::at(animator.cycle)
+    }
+    .settle(
+        rig,
+        pose,
+        gait,
+        stance,
+        sloping(animator.grade, animator.camber),
+    )
 }
 
 /// Which way the sloped ground faces, for a given grade and camber.
@@ -766,7 +762,7 @@ pub fn floor_tilt(grade: f32, camber: f32) -> Quat {
 /// Camber is now that second axis on purpose (#252), so the pair reaches every
 /// plane.
 ///
-/// Shared by the footing solve and by [`gait::step`], which since symbios-avatar
+/// Shared by the footing solve and by the stride, which since symbios-avatar
 /// #221 seats its stride on whatever ground it is given: handing those two
 /// different floors is exactly what leaves a swing arc at the rest ground height
 /// while the plant settles onto a hill.
