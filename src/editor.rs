@@ -142,6 +142,13 @@ enum Measuring {
 
 /// The record being edited, and everything the panel needs to edit it.
 #[derive(Resource)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "three of them are independent facts about one pipeline — an edit \
+              outstanding, a build on the pool, a draft standing in — and all \
+              four combinations of the first two occur; an enum would have to \
+              pretend they exclude each other, and `open` is unrelated chrome"
+)]
 pub struct RecordEditor {
     /// The record. Every control writes here and nowhere else.
     pub record: AvatarRecord,
@@ -151,6 +158,14 @@ pub struct RecordEditor {
     dirty: bool,
     /// Whether the body on screen was built at [`DRAFT_ATLAS`].
     draft: bool,
+    /// Whether a build is on the pool right now.
+    ///
+    /// Mirrors the system's own in-flight job, which lives in a `Local` and so
+    /// cannot be seen from outside. Held here because [`Self::settled`] would
+    /// otherwise lie for the whole length of a build: between the frame an edit
+    /// spawns one and the frame it lands, `dirty` is already false and `draft`
+    /// still describes the *previous* body.
+    building: bool,
     /// How long since the last edit, for [`SETTLE`].
     still: Duration,
     /// How long the last build took, and at what atlas.
@@ -192,6 +207,7 @@ impl RecordEditor {
             // other and the panel and the body cannot start out of step.
             dirty: true,
             draft: false,
+            building: false,
             still: Duration::ZERO,
             last_build: None,
             last_panel: Duration::ZERO,
@@ -245,6 +261,26 @@ impl RecordEditor {
     #[must_use]
     pub fn last_build(&self) -> Option<(Duration, u32)> {
         self.last_build
+    }
+
+    /// Whether the body on screen is the finished one this record describes.
+    ///
+    /// **What a host must wait for before photographing anything** (#24). A
+    /// body arrives in stages — nothing at all, then a [`DRAFT_ATLAS`]
+    /// stand-in, then the full build — and every stage before the last is a
+    /// body somebody would draw the wrong conclusion from: the draft's
+    /// complexion is not the complexion that ships, and an empty frame looks
+    /// exactly like a record that failed to build. A `--shot` fired on a frame
+    /// count alone photographed a scene with no hair, eyes or cloth in it,
+    /// which is the bug this answers.
+    ///
+    /// False while an edit is outstanding, while a build is on the pool, while
+    /// a draft stands in, and before the first body has ever landed. Note that
+    /// a record describing no body never settles — there is no body to settle
+    /// on — so a caller that blocks on this needs a way out of the wait.
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        !self.dirty && !self.building && !self.draft && self.last_build.is_some()
     }
 
     /// How long the panel itself took to draw last frame.
@@ -339,6 +375,7 @@ pub fn rebuild_edited_avatar(
     });
     if let Some((built, atlas, full)) = finished {
         *building = None;
+        editor.building = false;
         if let Some((avatar, took)) = built {
             for entity in &edited {
                 // Despawned and rebuilt rather than patched, exactly as a
@@ -404,6 +441,7 @@ pub fn rebuild_edited_avatar(
         Avatar::build_with(&record, &config).map(|avatar| (avatar, at.elapsed()))
     });
     *building = Some(BuildJob { task, atlas, full });
+    editor.building = true;
     editor.dirty = false;
     editor.still = Duration::ZERO;
 }
@@ -2084,5 +2122,73 @@ mod tests {
             still.to_bits(),
             "a locked stature was re-rolled: {held} became {still}"
         );
+    }
+
+    /// A headless app running the real rebuild against the real compute pool.
+    fn building_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            bevy::mesh::MeshPlugin,
+            bevy::image::ImagePlugin::default(),
+        ))
+        .init_asset::<StandardMaterial>()
+        .init_asset::<SkinnedMeshInverseBindposes>()
+        .init_resource::<RecordEditor>()
+        .add_systems(Update, rebuild_edited_avatar);
+        app
+    }
+
+    #[test]
+    fn nothing_settles_until_the_full_body_is_the_one_on_screen() {
+        // The regression behind #24: a `--shot` counted frames from startup and
+        // photographed a scene that was still arriving. Frames are not the unit
+        // — a body lands off the compute pool when it lands — so this walks the
+        // real pipeline and holds `settled` to its word at every stage of it.
+        let mut app = building_app();
+        assert!(
+            !app.world().resource::<RecordEditor>().settled(),
+            "an editor settled before it had built anything at all"
+        );
+
+        let full = AvatarConfig::default().atlas;
+        let mut saw_draft = false;
+        let mut ticks = 0;
+        loop {
+            app.update();
+            ticks += 1;
+            let editor = app.world().resource::<RecordEditor>();
+            let settled = editor.settled();
+            let last_build = editor.last_build();
+            let bodies = app
+                .world_mut()
+                .query::<&AvatarBody>()
+                .iter(app.world())
+                .count();
+
+            match last_build {
+                // Nothing has landed yet, or a draft has. Either way the body
+                // on screen is not the one a judgement is made from, and this
+                // is exactly the window the old frame count could fire in.
+                None => assert!(!settled, "settled with no build behind it"),
+                Some((_, atlas)) if atlas != full => {
+                    saw_draft = true;
+                    assert!(!settled, "settled on a {atlas} draft atlas");
+                }
+                Some(_) => {
+                    assert!(settled, "the full body landed and nothing settled");
+                    assert_eq!(bodies, 1, "settled without a body in the world");
+                    break;
+                }
+            }
+            // The draft, the 250 ms settle and the full build are all real work
+            // on a real pool; this is a stall guard, not a schedule.
+            assert!(ticks < 100_000, "no full body after {ticks} ticks");
+        }
+        // Not incidental — it is the whole reason `settled` cannot just ask
+        // whether a body exists. If the ladder ever stops going up through a
+        // draft, this assertion is the thing that says so.
+        assert!(saw_draft, "the draft rung of the ladder never appeared");
     }
 }

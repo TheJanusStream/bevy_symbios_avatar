@@ -103,9 +103,21 @@ const START_BACK: f32 = 1.9;
 const FACE_BACK: f32 = 6.5;
 /// Pitch the camera starts at, in radians.
 const START_PITCH: f32 = 0.12;
-/// How many frames to let a body appear in before photographing it.
+/// How many frames to let a finished scene settle in before photographing it.
+///
+/// Counted from the frame the body is *complete*, not from startup. What is
+/// left to wait for by then is the GPU catching up: the meshes, the atlas and
+/// its two maps are handed over on one frame and uploaded across the next
+/// few, and a material whose textures have not landed yet does not draw at
+/// all — which is how a capture came back with a body but no hair, eyes or
+/// cloth on it (#24).
 const SETTLE: u32 = 12;
-/// How many frames to wait for the picture before giving up on it.
+/// How many frames to wait on any one thing before giving up on it.
+///
+/// Both waits use it, each from its own start: the scene becoming complete,
+/// and then the file appearing. A record that describes no body never
+/// completes, and a viewer that hung forever on one would be worse than a
+/// viewer that photographs the empty room and says so by the picture.
 const GIVE_UP: u32 = 600;
 /// How many frames to let a window disappear in before capturing.
 const CLEAR: u32 = 2;
@@ -621,13 +633,20 @@ fn typing(contexts: &mut bevy_egui::EguiContexts) -> bool {
 
 /// Whether a screenshot has been asked for, and how long to wait for it.
 ///
-/// A body takes a few frames to appear: it is built in `Update`, and the frame
-/// after that is the first one that has anything in it. Shooting immediately
-/// photographs an empty room, which looks exactly like a body that failed to
-/// build.
+/// A body does not appear, it *arrives*: nothing at all, then a draft built at
+/// a quarter atlas, then the real one, each landing off the compute pool
+/// whenever it lands. None of that is a number of frames, so [`Shot`] does not
+/// guess at one — it watches for the finished body and only then starts
+/// counting.
 #[derive(Resource, Default)]
 struct Shot {
+    /// Frames spent on the current wait — for the scene, then for the file.
+    ///
+    /// Restarted at the capture, because the two waits are separate budgets:
+    /// a scene that took its time is not a reason to give up on the file.
     frames: u32,
+    /// The frame the scene was first seen finished, once it has been.
+    ready: Option<u32>,
     taken: bool,
     /// A picture `P` asked for, held until the windows are off the screen.
     ///
@@ -652,6 +671,7 @@ fn shoot(
     mut state: ResMut<Shot>,
     mut editor: ResMut<RecordEditor>,
     mut animator: ResMut<Animator>,
+    bodies: Query<&AvatarBody>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -697,11 +717,31 @@ fn shoot(
         }
         return;
     }
-    if state.frames < SETTLE {
+
+    // **Wait for the scene, not for a number** (#24). The old version counted
+    // twelve frames from startup and photographed whatever was there, which on
+    // one run was a body still missing its hair, eyes and cloth. Two conditions
+    // and both are needed: the editor says the finished body has landed — not
+    // an outstanding edit, not a build still on the pool, not the draft atlas —
+    // and a body is actually in the world, because the editor sets that flag on
+    // the frame it *asks* for the spawn and the entity arrives a frame later.
+    if state.ready.is_none() && editor.settled() && !bodies.is_empty() {
+        state.ready = Some(state.frames);
+    }
+    let waited = match state.ready {
+        Some(at) => state.frames - at >= SETTLE,
+        // Never settles for a record that describes no body. Photograph the
+        // room anyway rather than hang: an empty picture is a report, and the
+        // panel has already said in words what went wrong.
+        None => state.frames > GIVE_UP,
+    };
+    if !waited {
         return;
     }
 
     state.taken = true;
+    // A fresh budget for the second wait — see [`Shot::frames`].
+    state.frames = 0;
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path.clone()));
