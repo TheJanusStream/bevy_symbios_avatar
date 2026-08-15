@@ -25,7 +25,7 @@
 //! joints of their own.
 
 use bevy::prelude::*;
-use symbios_avatar::anim::{GazeConfig, Speed, contacts_during, gaze};
+use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
     Stride, Talk, Viseme, Walk, Walked, Zone,
@@ -321,6 +321,22 @@ pub struct Animator {
     /// [`Animator::expression`]. Bypass-written each frame, like `lift`.
     showing: Expression,
     /// The engine's blink timer.
+    /// Whether a body with nothing else to do stands and breathes.
+    ///
+    /// **On by default, because a body doing nothing is the state a viewer sees
+    /// longest** and the one an idle exists for (engine #246). Off is what an
+    /// instrument wants when it is looking at the rest pose itself: a body that
+    /// is breathing and swaying has no frame that IS the rest pose, which makes
+    /// a still capture of the geometry impossible to take.
+    pub idle: bool,
+    /// Whether the idle is the one a body holds while someone else is talking.
+    ///
+    /// A listener goes stiller than a body alone in a room. The talking variant
+    /// is not a flag here — it follows [`Self::talking`], because a body that is
+    /// speaking is a body whose idle is the speaking one, and two switches for
+    /// one fact is how they come to disagree.
+    pub listening: bool,
+    idler: Idle,
     blink: Blink,
     /// The engine's speech driver.
     talk: Talk,
@@ -371,6 +387,9 @@ impl Default for Animator {
             expression: Expression::NEUTRAL,
             viseme: None,
             showing: Expression::NEUTRAL,
+            idle: true,
+            listening: false,
+            idler: Idle::seeded(0x1de),
             blink: Blink::seeded(7),
             talk: Talk::seeded(7),
             elapsed: 0.0,
@@ -546,6 +565,19 @@ pub fn drive_avatar_animation(
             }
             None => gaiting.then(|| walk(rig, &animator, &mut pose, &mut stance)),
         };
+        // **A body with nothing else to do stands and breathes** (engine #246).
+        // Only when nothing else is driving the legs: an idle is what a body
+        // does INSTEAD of walking or leaping, not a layer over them, and its
+        // weight shift moves the pelvis over one foot — which on a walking body
+        // would be a gait fighting a stand.
+        //
+        // The whole layer goes through `Idle::drive`, which advances the
+        // schedule and poses every layer in one call, for the reason
+        // `Walk::drive` does: a stage a caller has to remember is a stage a
+        // caller forgets, and this crate has the scars.
+        let idled = (animator.idle && walking.is_none() && animator.leap.is_none())
+            .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
+
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
             // its own tracks name — which is what lets an imported gesture ride
@@ -587,6 +619,7 @@ pub fn drive_avatar_animation(
             animator.bypass_change_detection().lift = walked.lift;
             animator.bypass_change_detection().straining = walked.straining();
         }
+        glance(rig, &mut pose, idled);
         // A target at head height, applied after the gait, because looking
         // somewhere is a turn added to whatever the spine is already doing.
         let angle = if animator.tracking {
@@ -779,6 +812,69 @@ fn walk(
     // back only the gait left the caller rebuilding a stride and gave this
     // crate two of them to keep in step.
     (gait, stride)
+}
+
+/// Aims the head where a fidget just decided to look.
+///
+/// **Through the engine's own gaze layer.** [`symbios_avatar::Idled`] reports a
+/// POINT for exactly this reason, so the spread down the chest, neck and head
+/// and the clamp at a neck's limit all stay in one place — a head turn written
+/// here would be a second answer to a question that already has one.
+///
+/// Applied before the tracked gaze, which is a deliberate aim and outranks a
+/// glance.
+fn glance(rig: &Rig, pose: &mut Pose, idled: Option<symbios_avatar::Idled>) {
+    let Some(target) = idled.and_then(|idled| idled.glance) else {
+        return;
+    };
+    gaze::look_at(
+        rig,
+        pose,
+        target,
+        &symbios_avatar::anim::idle::glance_config(),
+    );
+}
+
+/// Drives one frame of a body that is standing about doing nothing.
+///
+/// **A body with nothing else to do stands and breathes** (engine #246), and
+/// this is the state a viewer sees longest. Kept out of the main system for the
+/// same reason [`walk`] is: the whole layer is one call into the engine, and
+/// what lives here is only the choice of which parameter set that call gets.
+///
+/// Only ever reached when nothing else is driving the legs. An idle is what a
+/// body does INSTEAD of walking or leaping, not a layer over them — its weight
+/// shift settles the pelvis over one foot, which on a walking body would be a
+/// stand fighting a gait.
+///
+/// The talking variant follows [`Animator::talking`] rather than having a
+/// switch of its own: a body that is speaking is a body whose idle is the
+/// speaking one, and two switches for one fact is how they come to disagree.
+fn standing(
+    rig: &Rig,
+    animator: &mut Animator,
+    pose: &mut Pose,
+    delta: f32,
+    stance: &mut Vec<symbios_avatar::Limb>,
+) -> symbios_avatar::Idled {
+    let config = if animator.talking {
+        IdleConfig::talking()
+    } else if animator.listening {
+        IdleConfig::listening()
+    } else {
+        IdleConfig::default()
+    };
+    // The floor is read out before the driver is borrowed, because
+    // `Idle::drive_on` takes the animator mutably and the ground comes off the
+    // same struct.
+    let floor = sloping(animator.grade, animator.camber);
+    animator.idler.set_config(config);
+    let idled = animator.idler.drive_on(rig, pose, delta, floor);
+    // A standing body has every foot down, which is what the footing tail needs
+    // told — the idle has already solved and planted them, but the readout the
+    // panel shows is taken from this list.
+    *stance = rig.ground_contacts();
+    idled
 }
 
 /// Drives one frame of a leap, on [`Animator::cycle`]'s own clock.
@@ -1162,6 +1258,14 @@ fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
             .text("camber (lateral)")
             .fixed_decimals(2),
     );
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut animator.idle, "idle")
+            .on_hover_text("breath, sway, weight shift and fidgets when nothing else is driving");
+        ui.add_enabled_ui(animator.idle, |ui| {
+            ui.toggle_value(&mut animator.listening, "listening")
+                .on_hover_text("stiller: the variant a body holds while someone else talks");
+        });
+    });
     ui.add(
         egui::Slider::new(&mut animator.turn, -120.0..=120.0)
             .text("turn deg/s (+ is left)")
