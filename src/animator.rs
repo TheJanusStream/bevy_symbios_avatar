@@ -25,6 +25,7 @@
 //! joints of their own.
 
 use bevy::prelude::*;
+use symbios_avatar::Heading;
 use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
@@ -289,6 +290,16 @@ pub struct Animator {
     /// carrying its own hill round with it. Judge a turn on the flat, and a
     /// slope with this at zero.
     pub turn: f32,
+    /// Which way the body TRAVELS, in degrees off the way it faces: 0 is
+    /// forward, 180 is backwards, +90 strafes to its own left.
+    ///
+    /// **A heading rather than a mode** (engine #242). The whole point of the
+    /// engine expressing this as one angle is that a diagonal is a stride in
+    /// its own right, so the slider can be swung continuously and nothing pops
+    /// — which is the acceptance the issue was drafted with, and the one thing
+    /// no table can settle. Sweep it and watch the foot roll fade out at 90
+    /// degrees and come back inverted past it.
+    pub heading: f32,
     /// How long a transition between sources takes, in seconds. Zero snaps.
     pub blend: f32,
     /// How far the footing solve had to move the feet on the last frame, in
@@ -379,6 +390,7 @@ impl Default for Animator {
             grade: 0.0,
             camber: 0.0,
             turn: 0.0,
+            heading: 0.0,
             // Short enough to be a transition rather than a dissolve, long
             // enough to see. The number worth arguing about is on #141.
             blend: 0.15,
@@ -774,7 +786,8 @@ fn walk(
     stance: &mut Vec<symbios_avatar::Limb>,
 ) -> (Gait, Stride) {
     let gait = animator.gait.of(rig);
-    let mut stride = Stride::for_body(rig, animator.pace);
+    let mut stride =
+        Stride::for_body(rig, animator.pace).toward(rig, Heading::degrees(animator.heading));
     // A yaw RATE is per second and a stride is per stance, so the cadence joins
     // them — the body's own, recovered from the stride it is walking through
     // `Speed::of` rather than named beside it (engine #241). A turn this file
@@ -1266,6 +1279,11 @@ fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
                 .on_hover_text("stiller: the variant a body holds while someone else talks");
         });
     });
+    ui.add(
+        egui::Slider::new(&mut animator.heading, -180.0..=180.0)
+            .text("heading deg (+ is left, 180 is backwards)")
+            .fixed_decimals(0),
+    );
     ui.add(
         egui::Slider::new(&mut animator.turn, -120.0..=120.0)
             .text("turn deg/s (+ is left)")
