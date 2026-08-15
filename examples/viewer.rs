@@ -15,6 +15,7 @@
 //! ```text
 //! cargo run --release -F builtin-clips --example viewer
 //! cargo run --release -F builtin-clips --example viewer -- --swim 1.3
+//! cargo run --release -F builtin-clips --example viewer -- --gesture Greeting
 //! cargo run --release -F builtin-clips --example viewer -- --seed 7
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped
 //! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
@@ -447,6 +448,13 @@ fn starting_animator() -> Animator {
     // A swim, on the same cycle as everything else: `--cadence` is how fast it
     // strokes and `--phase` holds it still, exactly as for a walk.
     animator.swim = value("--swim").map(|pace| symbios_avatar::Swim::at(0.0).toward(pace));
+    // A procedural gesture by the baked roster's own name, so `--gesture
+    // Greeting` and `--clip Greeting` show the two answers to the same question.
+    //  holds the gesture where it holds the gait: one flag, because
+    // the whole point of scrubbing is to look at one instant of the BODY.
+    // `--phase` holds the gesture where it holds the gait: one flag, because the
+    // whole point of scrubbing is to look at one instant of the BODY.
+    animator.gesture = word("--gesture").map(|name| (name, value("--phase").unwrap_or(0.0)));
     animator.leap = value("--leap")
         .map(symbios_avatar::Leap::to_height)
         .or_else(|| value("--fall").map(symbios_avatar::Leap::falling))

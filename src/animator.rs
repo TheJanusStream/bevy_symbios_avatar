@@ -26,13 +26,21 @@
 
 use bevy::prelude::*;
 use symbios_avatar::Heading;
-use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze};
+use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze, gesture};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
     Stride, Swim, Talk, Viseme, Walk, Walked, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
+
+/// How long a procedural gesture takes, in seconds.
+///
+/// A second and a half, which is a greeting: long enough for three waves to
+/// read as waves and short enough that a body is not still doing it when the
+/// conversation has moved on. The engine's gestures are written in normalised
+/// time, so this is the only place the real duration is decided.
+const GESTURE_TIME: f32 = 1.5;
 
 /// How wide the motion window opens, in points.
 #[cfg(feature = "editor")]
@@ -186,6 +194,17 @@ pub struct Animator {
     pub cycle: f32,
     /// Whether [`Animator::cycle`] is being scrubbed by hand instead of run.
     pub scrub: bool,
+    /// A procedural gesture laid over whatever else the body is doing, and how
+    /// far through it is.
+    ///
+    /// **Over, not instead of** — which is the whole difference between this
+    /// and the swim beside it. A gesture is `Family::Expressive`: it writes the
+    /// limbs it addresses and leaves the rest alone, so a body can wave while
+    /// it walks. That is also why it carries its own clock rather than riding
+    /// [`Animator::cycle`]: a greeting is not a cycle, it happens once and
+    /// finishes, and pinning it to the gait's phase would make it play at the
+    /// speed the legs happen to be going.
+    pub gesture: Option<(String, f32)>,
     /// A swim to show instead of the walk, if any.
     ///
     /// **Instead of, for the same reason a leap is** (engine #244): a body
@@ -375,6 +394,7 @@ impl Default for Animator {
             cadence: 1.1,
             cycle: 0.0,
             scrub: false,
+            gesture: None,
             swim: None,
             leap: None,
             pace: 1.0,
@@ -519,20 +539,7 @@ pub fn drive_avatar_animation(
     }
 
     let delta = time.delta_secs();
-    // Every write below is guarded on the thing it advances actually running,
-    // which is what keeps the change-detection signal above from latching on.
-    //
-    // **One cursor for both sources, deliberately.** `anim::Play` is the
-    // engine's own cursor and this window already has one — the phase slider,
-    // which exists so a gait can be held still at one point in its cycle. Two
-    // cursors would disagree the first time somebody scrubbed, and the single
-    // thing an A/B most needs is that the gait and the clip are at the same
-    // point when they are compared. So `cycle` runs both, and a clip's time is
-    // `cycle * duration`.
-    let running = animator.walking || animator.clip.is_some();
-    if running && !animator.scrub {
-        animator.cycle = (animator.cycle + delta * animator.cadence).fract();
-    }
+    advance(&mut animator, delta);
     if animator.tracking {
         animator.elapsed += delta;
     }
@@ -597,6 +604,7 @@ pub fn drive_avatar_animation(
             && animator.swim.is_none())
         .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
 
+        gesturing(rig, &animator, &mut pose);
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
             // its own tracks name — which is what lets an imported gesture ride
@@ -895,6 +903,53 @@ fn standing(
     // panel shows is taken from this list.
     *stance = rig.ground_contacts();
     idled
+}
+
+/// Moves every clock this window runs on by `delta`.
+///
+/// **One cursor for the gait and the clip, deliberately.** `anim::Play` is the
+/// engine's own cursor and this window already has one — the phase slider,
+/// which exists so a gait can be held still at one point in its cycle. Two
+/// cursors would disagree the first time somebody scrubbed, and the single
+/// thing an A/B most needs is that the gait and the clip are at the same point
+/// when they are compared. So `cycle` runs both, and a clip's time is
+/// `cycle * duration`.
+///
+/// **A gesture is the exception and has its own.** A greeting happens once and
+/// finishes; running it on `cycle` would loop it forever and play it at
+/// whatever speed the legs happen to be going. It holds at its end rather than
+/// clearing itself, so a body that has waved is left with its arm back at rest
+/// and the picker still says which gesture it made.
+///
+/// Every write here is guarded on the thing it advances actually running, which
+/// is what keeps the change-detection signal in the caller from latching on.
+fn advance(animator: &mut Animator, delta: f32) {
+    let running = animator.walking || animator.clip.is_some();
+    if running && !animator.scrub {
+        animator.cycle = (animator.cycle + delta * animator.cadence).fract();
+    }
+    let scrubbing = animator.scrub;
+    if let Some((_, through)) = &mut animator.gesture
+        && !scrubbing
+    {
+        *through = (*through + delta / GESTURE_TIME).min(1.0);
+    }
+}
+
+/// Lays the procedural gesture over whatever the body is already doing.
+///
+/// **Over, and before the baked clip**, so the two clip forms layer in the
+/// order the engine describes them: goals first, angles over them. A gesture
+/// writes only the limbs it addresses, which is what lets a body wave while it
+/// walks — and what lets it wave at all on a body that has a hand free, and not
+/// on one that has none.
+fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) {
+    let Some((name, through)) = &animator.gesture else {
+        return;
+    };
+    if let Some(gesture) = gesture::by_name(name) {
+        gesture.apply(rig, pose, *through);
+    }
 }
 
 /// Drives whichever way of getting about is switched on, and says whether it
@@ -1295,6 +1350,31 @@ fn locomotion_section(
     if let Some(swim) = &mut animator.swim {
         ui.add(egui::Slider::new(&mut swim.pace, 0.0..=2.0).text("m/s"));
         ui.toggle_value(&mut swim.carriage, "carriage");
+    }
+
+    // **The gestures sit apart from the locomotion**, because they are not one
+    // of the things being chosen between: a gesture is laid over whatever the
+    // body is already doing, so it is its own row rather than another entry in
+    // the picker above.
+    ui.separator();
+    ui.label(egui::RichText::new("gesture").strong());
+    ui.horizontal(|ui| {
+        for name in gesture::ROSTER {
+            let playing = animator
+                .gesture
+                .as_ref()
+                .is_some_and(|(chosen, _)| chosen == name);
+            if ui.selectable_label(playing, *name).clicked() {
+                animator.gesture = (!playing).then(|| ((*name).to_string(), 0.0));
+            }
+        }
+    });
+    if let Some((_, through)) = &mut animator.gesture {
+        ui.add(
+            egui::Slider::new(through, 0.0..=1.0)
+                .text("through")
+                .fixed_decimals(2),
+        );
     }
 }
 
