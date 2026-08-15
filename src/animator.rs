@@ -39,10 +39,15 @@ const WINDOW_WIDTH: f32 = 260.0;
 
 /// Which pattern the legs move in.
 ///
-/// All four come from [`Gait`]; naming them here is only so a picker can offer
+/// All five come from [`Gait`]; naming them here is only so a picker can offer
 /// them. `Natural` is what a body walks unasked — a trot on four legs, a wave
 /// on anything else — and the others are worth having because a gait that
 /// looks right at the pattern the body chose can still be wrong at another.
+///
+/// `Running` arrived with symbios-avatar#186 and is the one that is not a walk:
+/// it has a moment with nothing on the ground. #15 was filed here as a missing
+/// viewer flag and turned out to be a missing gait — there was no run to select
+/// — so this is that flag, finally pointing at something.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum GaitKind {
     /// Whatever suits the number of legs.
@@ -52,16 +57,19 @@ pub enum GaitKind {
     Wave,
     /// Diagonal pairs together.
     Trot,
+    /// The same pattern with a flight phase — a run rather than a walk.
+    Running,
     /// Every contact down, always.
     Standing,
 }
 
 impl GaitKind {
     /// Every kind, in picker order.
-    pub const ALL: [GaitKind; 4] = [
+    pub const ALL: [GaitKind; 5] = [
         GaitKind::Natural,
         GaitKind::Wave,
         GaitKind::Trot,
+        GaitKind::Running,
         GaitKind::Standing,
     ];
 
@@ -72,6 +80,7 @@ impl GaitKind {
             GaitKind::Natural => "natural",
             GaitKind::Wave => "wave",
             GaitKind::Trot => "trot",
+            GaitKind::Running => "running",
             GaitKind::Standing => "standing",
         }
     }
@@ -94,6 +103,7 @@ impl GaitKind {
             GaitKind::Natural => Gait::natural(rig),
             GaitKind::Wave => Gait::wave(rig),
             GaitKind::Trot => Gait::trot(rig),
+            GaitKind::Running => Gait::running(rig),
             GaitKind::Standing => Gait::standing(rig),
         }
     }
@@ -1673,20 +1683,19 @@ mod tests {
     }
 
     #[test]
-    fn no_procedural_gait_this_viewer_can_select_is_a_run() {
-        // **Written down because #15 assumed the opposite and it cost a
-        // session's premise.** `Gait::duty`'s own docstring says a duty above a
-        // half is what makes a gait a walk and below it the body has airborne
-        // moments and is running — but no constructor reaches below a half on
-        // two legs: `wave` floors at `0.5 + DOUBLE_SUPPORT`, `trot` falls back
-        // to `wave` on anything that is not four-legged, and `standing` is 1.0.
-        // So there is no `--gait run` to add and never was.
+    fn the_viewer_can_select_a_run_and_every_other_gait_is_still_a_walk() {
+        // **This test used to assert the opposite, and that is the record worth
+        // keeping.** #15 was filed here as a missing viewer flag; it turned out
+        // no constructor in the engine reached below a duty of a half on two
+        // legs — `wave` floored at `0.5 + DOUBLE_SUPPORT`, `trot` fell back to
+        // `wave` off four legs, `standing` was 1.0 — so there was no run to
+        // select and never had been. The finding went upstream as
+        // symbios-avatar#186 and this held the gap until it landed.
         //
-        // A humanoid's run is a BAKED CLIP — `Jog` and `Sprint`, which is what
-        // symbios-avatar#141 settled locomotion on — and it is captured with
-        // `--clip Sprint --phase 0.35`. This asserts the gap rather than
-        // describing it: if a running gait is ever built for the procedural
-        // path, this fails and says so.
+        // It now asserts the thing itself: exactly one selectable gait leaves
+        // the ground, and it is the one called `running`. A humanoid's run was
+        // a BAKED CLIP until this — `Jog` and `Sprint` — and epic #237 is
+        // removing those, so the procedural run is the only one that survives.
         let mut app = app();
         let mut bodies = app.world_mut().query::<&AvatarBody>();
         let rig = bodies
@@ -1697,13 +1706,21 @@ mod tests {
             .rig
             .clone();
         assert_eq!(rig.ground_contacts().len(), 2, "the fixture is a biped");
-        for kind in GaitKind::ALL {
-            assert!(
-                kind.of(&rig).duty >= 0.5,
-                "{} runs on two legs now — give the viewer a flag for it",
-                kind.label()
-            );
-        }
+
+        let running: Vec<&str> = GaitKind::ALL
+            .into_iter()
+            .filter(|kind| kind.of(&rig).has_flight())
+            .map(GaitKind::label)
+            .collect();
+        assert_eq!(
+            running,
+            vec!["running"],
+            "exactly one selectable gait should leave the ground"
+        );
+        assert!(
+            GaitKind::named("running").is_some(),
+            "a run the picker offers must be reachable by name from --gait"
+        );
     }
 }
 

@@ -20,6 +20,7 @@
 //! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
 //! cargo run --release -F builtin-clips --example viewer -- --gait wave --pace 1.4 --shot wave.png
+//! cargo run --release --example viewer -- --gait running                 # a real flight phase
 //! cargo run --release -F builtin-clips --example viewer -- --walk --phase 0.35 --cadence 1.6
 //! cargo run --release -F builtin-clips --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
 //! cargo run --release -F builtin-clips --example viewer -- --mane 0     # bald, for judging a jaw
@@ -57,16 +58,18 @@
 //!   way to look at a foot plant.
 //! - **Everything the motion window steers about a gait has a flag now** (#15).
 //!   It had `--walk` and nothing else, so a captured frame could show one of
-//!   the four patterns, at one cadence, at one pace — and the window that
+//!   the patterns, at one cadence, at one pace — and the window that
 //!   reaches the rest is the one `--shot` deliberately never opens. `--gait`,
 //!   `--cadence` and `--pace` close that, and `--phase` already held both a
 //!   gait and a clip at a chosen point in the cycle.
-//! - **A humanoid's RUN is `--clip Jog` or `--clip Sprint`**, not a gait.
-//!   symbios-avatar#141 settled locomotion on imported clips for humanoids and
-//!   kept the procedural gait for the bodies the correspondence refuses, and
-//!   the procedural gait cannot run in any case: every `Gait` constructor
-//!   floors a two-legged body's duty at a half, which is the definition of a
-//!   walk. `no_procedural_gait_this_viewer_can_select_is_a_run` asserts it.
+//! - **A run is `--gait running`** (#15). It was `--clip Jog` or `--clip
+//!   Sprint` until symbios-avatar#186, because the procedural gait genuinely
+//!   could not run: every `Gait` constructor floored a two-legged body's duty
+//!   at a half, which is the definition of a walk, so this flag had nothing to
+//!   point at. It does now, and epic #237 is removing the clips that were
+//!   covering for it.
+//!   `the_viewer_can_select_a_run_and_every_other_gait_is_still_a_walk` holds
+//!   it: exactly one selectable gait leaves the ground.
 //! - `H` hides both windows, and `--shot` never shows them.
 //! - `F` frames the camera on the body again. Editing a record never moves the
 //!   camera — a view that shifts while you are changing something else is a view
