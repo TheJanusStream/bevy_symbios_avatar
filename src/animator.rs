@@ -26,7 +26,9 @@
 
 use bevy::prelude::*;
 use symbios_avatar::Heading;
-use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze, gesture};
+use symbios_avatar::anim::{
+    GazeConfig, Idle, IdleConfig, Speed, Target, contacts_during, gaze, gesture,
+};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
     Stride, Swim, Talk, Viseme, Walk, Walked, Zone,
@@ -604,7 +606,7 @@ pub fn drive_avatar_animation(
             && animator.swim.is_none())
         .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
 
-        gesturing(rig, &animator, &mut pose);
+        let aimed = gesturing(rig, &animator, &mut pose);
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
             // its own tracks name — which is what lets an imported gesture ride
@@ -646,28 +648,44 @@ pub fn drive_avatar_animation(
             animator.bypass_change_detection().lift = walked.lift;
             animator.bypass_change_detection().straining = walked.straining();
         }
-        glance(rig, &mut pose, idled);
-        // A target at head height, applied after the gait, because looking
-        // somewhere is a turn added to whatever the spine is already doing.
-        let angle = if animator.tracking {
-            scanned_angle(animator.elapsed, animator.gaze_speed, animator.gaze_limit)
-        } else {
-            animator.gaze_angle
-        };
-        let head = rig
-            .in_zone(Zone::Head)
-            .first()
-            .map_or(1.5, |&joint| rig.joints[joint].position.y);
-        let target = Vec3::new(angle.sin() * 2.0, head, angle.cos() * 2.0);
-        gaze::look_at(
-            rig,
-            &mut pose,
-            target,
-            &GazeConfig {
-                limit: animator.gaze_limit,
-                ..GazeConfig::default()
-            },
-        );
+        // **Both gaze layers stand aside for a gesture that aims the head, and
+        // only for one that does** (#30). Everything below writes the head
+        // outright — `look_at` assigns a chest, neck and head rotation rather
+        // than composing one — so a nod applied above arrived correct and was
+        // put back level a few lines later, which is a gesture the viewer could
+        // not show at all.
+        //
+        // Asked of the clip rather than of the gesture's name, because the
+        // engine already answers it: a clip that aims the head carries a
+        // `Target::Gaze` track and one that does not, does not. So a wave still
+        // lets the body look around while it waves — which is what a waving
+        // body does — and a nod owns the head for as long as it runs. The
+        // gaze slider and the idle's glance both lose to it, and that is the
+        // right way round: a gesture is something the body is doing on purpose.
+        if !aimed {
+            glance(rig, &mut pose, idled);
+            // A target at head height, applied after the gait, because looking
+            // somewhere is a turn added to whatever the spine is already doing.
+            let angle = if animator.tracking {
+                scanned_angle(animator.elapsed, animator.gaze_speed, animator.gaze_limit)
+            } else {
+                animator.gaze_angle
+            };
+            let head = rig
+                .in_zone(Zone::Head)
+                .first()
+                .map_or(1.5, |&joint| rig.joints[joint].position.y);
+            let target = Vec3::new(angle.sin() * 2.0, head, angle.cos() * 2.0);
+            gaze::look_at(
+                rig,
+                &mut pose,
+                target,
+                &GazeConfig {
+                    limit: animator.gaze_limit,
+                    ..GazeConfig::default()
+                },
+            );
+        }
         // The face, after the gaze for the same reason the gaze comes after
         // the gait: everything here is added to wherever the head already is.
         pose_face(rig, &mut pose, jaw_angle, showing, animator.viseme);
@@ -936,20 +954,32 @@ fn advance(animator: &mut Animator, delta: f32) {
     }
 }
 
-/// Lays the procedural gesture over whatever the body is already doing.
+/// Lays the procedural gesture over whatever the body is already doing, and
+/// says whether it aimed the head.
 ///
 /// **Over, and before the baked clip**, so the two clip forms layer in the
 /// order the engine describes them: goals first, angles over them. A gesture
-/// writes only the limbs it addresses, which is what lets a body wave while it
+/// writes only the parts it addresses, which is what lets a body wave while it
 /// walks — and what lets it wave at all on a body that has a hand free, and not
 /// on one that has none.
-fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) {
+///
+/// **The return is what the gaze layers below need to know** (#30). They write
+/// the head outright, so a gesture that aims it has to be able to say so; the
+/// clip already does, by carrying a [`Target::Gaze`] track, and asking the clip
+/// beats keeping a list of which gestures involve the head — a list that would
+/// be wrong the moment the roster grew.
+fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) -> bool {
     let Some((name, through)) = &animator.gesture else {
-        return;
+        return false;
     };
-    if let Some(gesture) = gesture::by_name(name) {
-        gesture.apply(rig, pose, *through);
-    }
+    let Some(gesture) = gesture::by_name(name) else {
+        return false;
+    };
+    gesture.apply(rig, pose, *through);
+    gesture
+        .tracks
+        .iter()
+        .any(|track| track.target == Target::Gaze)
 }
 
 /// Drives whichever way of getting about is switched on, and says whether it
@@ -2173,6 +2203,98 @@ mod tests {
             "no wind-up to speak of"
         );
         assert!(at(&mut app, 1.0).abs() < 0.02, "it did not come back down");
+    }
+
+    #[test]
+    fn a_gesture_that_aims_the_head_keeps_it_and_one_that_does_not_lets_go() {
+        // **#30, and it is two assertions rather than one** because the fix is
+        // a rule about which gestures win rather than a reordering. The viewer
+        // aims the head at the tail of its pipeline and does it by assignment,
+        // so before this a Head Nod arrived correct from the engine — 17.2
+        // degrees down, measured there across eleven bodies — and was put back
+        // level three lines later. It rendered as a body standing still.
+        //
+        // The rule is that a clip carrying a `Target::Gaze` track owns the head
+        // while it plays and nothing else does. So:
+        //   a nod dips the head even with the gaze slider held elsewhere;
+        //   a wave leaves the slider in charge, because a waving body should
+        //   still look at the person it is waving at.
+        //
+        // Reintroduced by dropping the `aimed` guard: the nod reads 0.0 degrees
+        // and the head sits exactly where the slider put it.
+        let mut app = app();
+        let rig = {
+            let mut bodies = app.world_mut().query::<&AvatarBody>();
+            bodies
+                .iter(app.world())
+                .next()
+                .expect("a body")
+                .avatar
+                .rig
+                .clone()
+        };
+        let head = *rig
+            .in_zone(Zone::Head)
+            .first()
+            .expect("the default body has a head");
+
+        // Where the head points, as a pitch below level and a yaw off forward.
+        let facing = |app: &mut App, gesture: &str, through: f32| {
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.gesture = Some((gesture.to_string(), through));
+                // The slider rather than the scan, so the comparison has a
+                // fixed thing to be measured against.
+                animator.tracking = false;
+                animator.gaze_angle = 0.6;
+                // Held, so the gesture stays at the phase it was asked for
+                // rather than advancing out of it between updates.
+                animator.scrub = true;
+                // **The idle off, and that is isolation rather than
+                // convenience.** A gaze track is body-relative, so a breathing,
+                // swaying idle carries the nod's own frame with it and the
+                // head's pitch measured against the WORLD wanders by about a
+                // degree — correctly, because a nod nods with the body. This
+                // test is about a third source of head motion not clobbering
+                // the first, so the second is switched off and the number can
+                // be the engine's exact one.
+                animator.idle = false;
+            }
+            // Several frames, because the viewer blends between poses and the
+            // first one after a switch is part of the way there. What is being
+            // asserted is where the head ends up, not how fast it gets there.
+            for _ in 0..40 {
+                app.update();
+            }
+            let mut posed = app.world_mut().query::<&AvatarPose>();
+            let pose = posed.iter(app.world()).next().expect("a pose").0.clone();
+            let out = pose.forward(&rig).rotations[head] * symbios_avatar::rig::landmark::FORWARD;
+            (
+                -out.y.atan2(out.z.hypot(out.x)).to_degrees(),
+                out.x.atan2(out.z).to_degrees(),
+            )
+        };
+
+        let (nod_pitch, nod_yaw) = facing(&mut app, "Head Nod", 0.225);
+        assert!(
+            (nod_pitch - 17.2).abs() < 1.0,
+            "a nod at its peak pitched the head {nod_pitch:.1} degrees down, not 17.2",
+        );
+        assert!(
+            nod_yaw.abs() < 1.0,
+            "a nod let the gaze slider yaw the head by {nod_yaw:.1} degrees",
+        );
+
+        let (wave_pitch, wave_yaw) = facing(&mut app, "Greeting", 0.5);
+        assert!(
+            wave_pitch.abs() < 1.0,
+            "a wave pitched the head {wave_pitch:.1} degrees on its own",
+        );
+        assert!(
+            wave_yaw > 20.0,
+            "a wave should leave the gaze slider in charge; the head yawed \
+             {wave_yaw:.1} degrees of the 34 it was asked for",
+        );
     }
 
     #[test]
