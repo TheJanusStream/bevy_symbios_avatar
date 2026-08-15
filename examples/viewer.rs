@@ -21,6 +21,9 @@
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
 //! cargo run --release -F builtin-clips --example viewer -- --gait wave --pace 1.4 --shot wave.png
 //! cargo run --release --example viewer -- --gait running                 # a real flight phase
+//! cargo run --release --example viewer -- --leap 0.4                    # a jump (#243)
+//! cargo run --release --example viewer -- --fall 1.0                    # a drop, no wind-up
+//! cargo run --release --example viewer -- --ledge 0.8 --phase 0.6       # jump off a ledge, held
 //! cargo run --release -F builtin-clips --example viewer -- --walk --phase 0.35 --cadence 1.6
 //! cargo run --release -F builtin-clips --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
 //! cargo run --release -F builtin-clips --example viewer -- --mane 0     # bald, for judging a jaw
@@ -413,6 +416,21 @@ fn starting_animator() -> Animator {
     animator.gaze_angle = value("--gaze").unwrap_or(0.0);
     animator.grade = value("--grade").or_else(|| value("--slope")).unwrap_or(0.0);
     animator.camber = value("--camber").unwrap_or(0.0);
+    // **A jump is the one motion that cannot be judged from a table** (engine
+    // #243): the numbers say the wind-up, the flight and the landing MEET, and
+    // a body can meet at every seam and still read as three animations played
+    // in a row. `--phase` scrubs it, exactly as it scrubs a gait.
+    animator.leap = value("--leap")
+        .map(symbios_avatar::Leap::to_height)
+        .or_else(|| value("--fall").map(symbios_avatar::Leap::falling))
+        .or_else(|| {
+            value("--ledge").map(|drop| {
+                symbios_avatar::Leap::off_a_ledge(
+                    symbios_avatar::Leap::to_height(0.3).launch(),
+                    drop,
+                )
+            })
+        });
     animator.layered = flag("--layer");
     animator
 }

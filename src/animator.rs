@@ -27,8 +27,8 @@
 use bevy::prelude::*;
 use symbios_avatar::anim::{GazeConfig, contacts_during, gaze};
 use symbios_avatar::{
-    Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Pose, Rig, Stride,
-    Talk, Viseme, Walk, Walked, Zone,
+    Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
+    Stride, Talk, Viseme, Walk, Walked, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
@@ -185,6 +185,19 @@ pub struct Animator {
     pub cycle: f32,
     /// Whether [`Animator::cycle`] is being scrubbed by hand instead of run.
     pub scrub: bool,
+    /// A leap to show instead of the walk, if any.
+    ///
+    /// **A jump is the one motion in this crate that cannot be judged from a
+    /// table** (engine #243). Its whole quality is whether the wind-up, the
+    /// flight and the landing read as one movement, and the numbers say only
+    /// that they meet — a body can meet at every seam and still look like three
+    /// animations played in a row. So it gets a flag here, and the flag is the
+    /// deliverable.
+    ///
+    /// [`Animator::cycle`] drives it, so `hold` scrubs a leap exactly as it
+    /// scrubs a gait: `0` is the start of the wind-up and `1` is standing
+    /// again.
+    pub leap: Option<Leap>,
     /// How long a step is, as a multiple of what the legs would take.
     pub pace: f32,
     /// Whether the postural layer over the legs runs: the arms swinging against
@@ -310,6 +323,7 @@ impl Default for Animator {
             cadence: 1.1,
             cycle: 0.0,
             scrub: false,
+            leap: None,
             pace: 1.0,
             posture: true,
             footing: true,
@@ -488,7 +502,16 @@ pub fn drive_avatar_animation(
         // Returned rather than kept local so the ankles can roll AFTER the
         // plant: the plant lays every sole flat and a roll applied before it is
         // simply levelled away.
-        let walking = gaiting.then(|| walk(rig, &animator, &mut pose, &mut stance));
+        // A leap replaces the walk rather than layering over it: a body cannot
+        // be mid-stride and mid-air at once, and pretending otherwise is how a
+        // jump ends up with a walk cycle still running underneath it.
+        let walking = match animator.leap {
+            Some(leap) => {
+                leaping(rig, &animator, leap, &mut pose, &mut stance);
+                None
+            }
+            None => gaiting.then(|| walk(rig, &animator, &mut pose, &mut stance)),
+        };
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
             // its own tracks name — which is what lets an imported gesture ride
@@ -702,6 +725,31 @@ fn walk(
     );
     *stance = walked.steps.stance;
     gait
+}
+
+/// Drives one frame of a leap, on [`Animator::cycle`]'s own clock.
+///
+/// The cycle runs `0..1` over the whole leap — wind-up, flight and landing —
+/// so `hold` scrubs a jump exactly as it scrubs a gait, which is the only way
+/// to look at one instant of it.
+fn leaping(
+    rig: &Rig,
+    animator: &Animator,
+    leap: Leap,
+    pose: &mut Pose,
+    stance: &mut Vec<symbios_avatar::Limb>,
+) {
+    let leapt = leap.drive(
+        rig,
+        pose,
+        animator.cycle * leap.duration(rig),
+        sloping(animator.grade, animator.camber),
+    );
+    // The footing tail runs only where the body has feet down; in flight there
+    // is nothing to settle and asking would drag them back to the floor.
+    if leapt.stage.is_grounded() {
+        *stance = rig.ground_contacts();
+    }
 }
 
 /// Settles the contacts and rolls the ankles, and records what it cost.
@@ -1680,6 +1728,62 @@ mod tests {
                 kind.label()
             );
         }
+    }
+
+    #[test]
+    fn a_leap_replaces_the_walk_and_carries_the_body_off_the_ground() {
+        // **#29.** A jump has to be watched, and the viewer is where it is
+        // watched — so the flag is the deliverable. What is asserted here is
+        // only that the wiring reaches the body: that the leap drives instead
+        // of the gait, that the root actually leaves the floor mid-flight, and
+        // that it comes back. How it READS is the eye's business and the reason
+        // the flag exists at all.
+        let mut app = app();
+        let rig = {
+            let mut bodies = app.world_mut().query::<&AvatarBody>();
+            bodies
+                .iter(app.world())
+                .next()
+                .expect("a body")
+                .avatar
+                .rig
+                .clone()
+        };
+        let leap = Leap::to_height(0.4);
+        let root = rig
+            .joints
+            .iter()
+            .position(|joint| joint.parent.is_none())
+            .expect("a root");
+        let rest = rig.joints[root].position.y;
+
+        let at = |app: &mut App, cycle: f32| {
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.leap = Some(leap);
+                animator.scrub = true;
+                animator.cycle = cycle;
+            }
+            app.update();
+            let mut posed = app.world_mut().query::<&AvatarPose>();
+            let pose = posed.iter(app.world()).next().expect("a pose").0.clone();
+            pose.forward(&rig).positions[root].y - rest
+        };
+
+        // Mid-flight, in the leap's own timeline rather than a guess.
+        let wind_up = leap.wind_up(&rig) / leap.duration(&rig);
+        let flight = leap.flight() / leap.duration(&rig);
+        let apex = at(&mut app, wind_up + flight * 0.5);
+        assert!(
+            apex > 0.2,
+            "the body barely left the ground: {apex:.3} m at the apex"
+        );
+        // Down at the bottom of the wind-up, and back on the floor at the end.
+        assert!(
+            at(&mut app, wind_up * 0.5) < -0.02,
+            "no wind-up to speak of"
+        );
+        assert!(at(&mut app, 1.0).abs() < 0.02, "it did not come back down");
     }
 
     #[test]
