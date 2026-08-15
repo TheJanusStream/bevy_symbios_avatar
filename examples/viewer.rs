@@ -172,7 +172,10 @@ fn main() {
         .insert_resource(starting_animator())
         .init_resource::<Shot>()
         .add_systems(Startup, (stage, pick_clip))
-        .add_systems(Update, (frame_on_body, shortcuts, shoot, tilt_floor))
+        .add_systems(
+            Update,
+            (frame_on_body, shortcuts, shoot, tilt_floor, turn_body),
+        )
         .add_systems(
             PostUpdate,
             // Before the crate reads its input for the frame, which is what
@@ -217,6 +220,26 @@ fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Flo
     let tilt = floor_tilt(animator.grade, animator.camber);
     for mut transform in &mut floor {
         transform.rotation = tilt;
+    }
+}
+
+/// Yaws the whole body by the turn the animator is walking.
+///
+/// **The viewer draws a gait in place, so without this a turn is invisible in
+/// the one way that matters most** — the feet come round in body space, which
+/// is correct and reads as nothing at all, because the body they are coming
+/// round under is not moving. Turning the body puts the contacts back on a
+/// fixed patch of floor, where a foot that is skating stands out and a foot
+/// that is holding its ground looks planted.
+///
+/// The angle is [`Animator::heading`] rather than one integrated here, for the
+/// reason #252 gave about the floor tilt: a quantity the viewer draws and the
+/// engine walks must have one definition, or the two drift apart and nobody
+/// notices for a release.
+fn turn_body(animator: Res<Animator>, mut bodies: Query<&mut Transform, With<AvatarBody>>) {
+    let heading = Quat::from_rotation_y(animator.heading());
+    for mut transform in &mut bodies {
+        transform.rotation = heading;
     }
 }
 

@@ -25,7 +25,7 @@
 //! joints of their own.
 
 use bevy::prelude::*;
-use symbios_avatar::anim::{GazeConfig, contacts_during, gaze};
+use symbios_avatar::anim::{GazeConfig, Speed, contacts_during, gaze};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
     Stride, Talk, Viseme, Walk, Walked, Zone,
@@ -273,6 +273,22 @@ pub struct Animator {
     /// ankles and the width of its stance. Together the two reach every plane
     /// through the origin, so any slope in 3D can be put under the body (#252).
     pub camber: f32,
+    /// How fast the body is turning, in degrees per second, positive toward its
+    /// own left.
+    ///
+    /// **The control the turn has to be judged by eye through** (engine #241).
+    /// A turn is three things a number can score — the skate, the yaw
+    /// delivered, the sole clearance, all of which `examples/walkaudit` reads —
+    /// and one it cannot: whether the body looks like it is turning or like it
+    /// is being carried round a corner. That is the differential stride, the
+    /// bank and the head lead composing, and the only instrument for it is this
+    /// one.
+    ///
+    /// The gait is what turns; the ground is not. The viewer's floor is a plane
+    /// through the body's own frame, so a turn on a grade shows the body
+    /// carrying its own hill round with it. Judge a turn on the flat, and a
+    /// slope with this at zero.
+    pub turn: f32,
     /// How long a transition between sources takes, in seconds. Zero snaps.
     pub blend: f32,
     /// How far the footing solve had to move the feet on the last frame, in
@@ -346,6 +362,7 @@ impl Default for Animator {
             in_place: true,
             grade: 0.0,
             camber: 0.0,
+            turn: 0.0,
             // Short enough to be a transition rather than a dissolve, long
             // enough to see. The number worth arguing about is on #141.
             blend: 0.15,
@@ -363,6 +380,23 @@ impl Default for Animator {
 }
 
 impl Animator {
+    /// How far the body has turned since the viewer started, in radians.
+    ///
+    /// **The viewer draws the body in place**, so a turn shows in the legs, the
+    /// bank and the head and nowhere else — which is most of what there is to
+    /// judge, but not the part that says whether the feet are keeping up with
+    /// the heading. Yawing the body by this puts that back: the contacts stay
+    /// on their patch of floor while the body comes round over them, and a foot
+    /// that is skating is then impossible to miss.
+    ///
+    /// Published rather than left to the caller to integrate, so the yaw drawn
+    /// and the yaw walked cannot drift apart — which is #252's lesson about the
+    /// floor tilt, applied before it has a chance to happen twice.
+    #[must_use]
+    pub fn heading(&self) -> f32 {
+        self.turn.to_radians() * self.elapsed
+    }
+
     /// Whether anything at all is moving.
     ///
     /// A still body is not written every frame — not as an optimisation, but so
@@ -544,8 +578,8 @@ pub fn drive_avatar_animation(
         //
         // Runs only when a gait is driving: a clip carries its own ankle motion
         // and rolling on top of authored feet would fight it.
-        if let Some(gait) = &walking {
-            let walked = settle(rig, &animator, &mut pose, gait, &stance);
+        if let Some((gait, stride)) = &walking {
+            let walked = settle(rig, &animator, &mut pose, gait, stride, &stance);
             // Through `bypass_change_detection`, because these are a readout
             // and not an instruction: writing them through the `ResMut` would
             // mark the resource changed every frame and defeat the still-body
@@ -705,14 +739,29 @@ fn walk(
     animator: &Animator,
     pose: &mut Pose,
     stance: &mut Vec<symbios_avatar::Limb>,
-) -> Gait {
+) -> (Gait, Stride) {
     let gait = animator.gait.of(rig);
-    let stride = Stride::for_body(rig, animator.pace);
+    let mut stride = Stride::for_body(rig, animator.pace);
+    // A yaw RATE is per second and a stride is per stance, so the cadence joins
+    // them — the body's own, recovered from the stride it is walking through
+    // `Speed::of` rather than named beside it (engine #241). A turn this file
+    // asserted independently of the legs would be a turn the feet were not
+    // taking.
+    let cadence = Speed::of(rig, &gait, &stride).cadence(rig);
+    if cadence > f32::EPSILON {
+        stride.yaw = animator.turn.to_radians() / cadence * gait.duty;
+    }
     // Footing OFF here: this crate can layer an imported clip over the
     // procedural walk, and a clip moves the legs — so the contacts are settled
     // and the ankles rolled after that, through `Walk::settle`, further down.
     let walked = Walk {
         posture: animator.posture,
+        // Only while turning, and only while the postural layer is on. A gaze
+        // led down a straight path is a target the head already points at, so
+        // switching it on there would cost nothing and say nothing; switching
+        // it on with the posture off would put a head turn on a body that is
+        // deliberately being shown as bare legs.
+        gaze: (animator.posture && animator.turn != 0.0).then(GazeConfig::default),
         footing: None,
         ..Walk::at(animator.cycle)
     }
@@ -724,7 +773,12 @@ fn walk(
         sloping(animator.grade, animator.camber),
     );
     *stance = walked.steps.stance;
-    gait
+    // **Both, because the tail needs both.** `Walk::settle` rolls the ankles,
+    // and since engine #241 that stage also turns each contact to face where it
+    // was planted — which is a property of the stride, not of the gait. Handing
+    // back only the gait left the caller rebuilding a stride and gave this
+    // crate two of them to keep in step.
+    (gait, stride)
 }
 
 /// Drives one frame of a leap, on [`Animator::cycle`]'s own clock.
@@ -763,6 +817,7 @@ fn settle(
     animator: &Animator,
     pose: &mut Pose,
     gait: &Gait,
+    stride: &Stride,
     stance: &[symbios_avatar::Limb],
 ) -> Walked {
     Walk {
@@ -773,6 +828,7 @@ fn settle(
         rig,
         pose,
         gait,
+        stride,
         stance,
         sloping(animator.grade, animator.camber),
     )
@@ -1105,6 +1161,11 @@ fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
         egui::Slider::new(&mut animator.camber, -0.4..=0.4)
             .text("camber (lateral)")
             .fixed_decimals(2),
+    );
+    ui.add(
+        egui::Slider::new(&mut animator.turn, -120.0..=120.0)
+            .text("turn deg/s (+ is left)")
+            .fixed_decimals(0),
     );
     ui.add(
         egui::Slider::new(&mut animator.blend, 0.0..=0.6)
