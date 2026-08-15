@@ -29,7 +29,7 @@ use symbios_avatar::Heading;
 use symbios_avatar::anim::{GazeConfig, Idle, IdleConfig, Speed, contacts_during, gaze};
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
-    Stride, Talk, Viseme, Walk, Walked, Zone,
+    Stride, Swim, Talk, Viseme, Walk, Walked, Zone,
 };
 
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
@@ -186,6 +186,15 @@ pub struct Animator {
     pub cycle: f32,
     /// Whether [`Animator::cycle`] is being scrubbed by hand instead of run.
     pub scrub: bool,
+    /// A swim to show instead of the walk, if any.
+    ///
+    /// **Instead of, for the same reason a leap is** (engine #244): a body
+    /// cannot be mid-stride and prone in the water at once. [`Animator::cycle`]
+    /// drives the stroke, so `hold` scrubs a swim exactly as it scrubs a gait,
+    /// and [`Animator::cadence`] is how fast it strokes — which is the whole of
+    /// the difference between treading and swimming in real time, because the
+    /// engine runs both on one cycle.
+    pub swim: Option<Swim>,
     /// A leap to show instead of the walk, if any.
     ///
     /// **A jump is the one motion in this crate that cannot be judged from a
@@ -366,6 +375,7 @@ impl Default for Animator {
             cadence: 1.1,
             cycle: 0.0,
             scrub: false,
+            swim: None,
             leap: None,
             pace: 1.0,
             posture: true,
@@ -570,13 +580,7 @@ pub fn drive_avatar_animation(
         // A leap replaces the walk rather than layering over it: a body cannot
         // be mid-stride and mid-air at once, and pretending otherwise is how a
         // jump ends up with a walk cycle still running underneath it.
-        let walking = match animator.leap {
-            Some(leap) => {
-                leaping(rig, &animator, leap, &mut pose, &mut stance);
-                None
-            }
-            None => gaiting.then(|| walk(rig, &animator, &mut pose, &mut stance)),
-        };
+        let walking = travelling(rig, &animator, gaiting, &mut pose, &mut stance);
         // **A body with nothing else to do stands and breathes** (engine #246).
         // Only when nothing else is driving the legs: an idle is what a body
         // does INSTEAD of walking or leaping, not a layer over them, and its
@@ -587,8 +591,11 @@ pub fn drive_avatar_animation(
         // schedule and poses every layer in one call, for the reason
         // `Walk::drive` does: a stage a caller has to remember is a stage a
         // caller forgets, and this crate has the scars.
-        let idled = (animator.idle && walking.is_none() && animator.leap.is_none())
-            .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
+        let idled = (animator.idle
+            && walking.is_none()
+            && animator.leap.is_none()
+            && animator.swim.is_none())
+        .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
 
         if let Some(clip) = clip {
             // After the gait, because `PoseClip::apply` writes only the joints
@@ -890,6 +897,41 @@ fn standing(
     idled
 }
 
+/// Drives whichever way of getting about is switched on, and says whether it
+/// was the walk.
+///
+/// **One at a time, and that is the point of gathering them here.** A body
+/// cannot be mid-stride and mid-air, or mid-stride and prone in the water, at
+/// once; pretending otherwise is how a jump ends up with a walk cycle still
+/// running underneath it. Written as one match over the three so that adding a
+/// fourth has to say what it replaces.
+fn travelling(
+    rig: &Rig,
+    animator: &Animator,
+    gaiting: bool,
+    pose: &mut Pose,
+    stance: &mut Vec<symbios_avatar::Limb>,
+) -> Option<(Gait, Stride)> {
+    match (animator.swim, animator.leap) {
+        // Nothing is added to `stance`: a swimming body has nothing on the
+        // ground, and handing the footing tail a contact list is what would
+        // drag its feet back down to a floor it is nowhere near.
+        (Some(swim), _) => {
+            Swim {
+                cycle: animator.cycle,
+                ..swim
+            }
+            .drive(rig, pose);
+            None
+        }
+        (None, Some(leap)) => {
+            leaping(rig, animator, leap, pose, stance);
+            None
+        }
+        (None, None) => gaiting.then(|| walk(rig, animator, pose, stance)),
+    }
+}
+
 /// Drives one frame of a leap, on [`Animator::cycle`]'s own clock.
 ///
 /// The cycle runs `0..1` over the whole leap — wind-up, flight and landing —
@@ -1174,8 +1216,9 @@ fn locomotion_section(
 ) {
     use bevy_egui::egui;
     let clipping = animator.clip.is_some();
-    let walking = animator.walking && animator.gait != GaitKind::Standing;
-    let standing = !clipping && !walking;
+    let swimming = animator.swim.is_some();
+    let walking = animator.walking && animator.gait != GaitKind::Standing && !swimming;
+    let standing = !clipping && !walking && !swimming;
 
     ui.label(egui::RichText::new("locomotion").strong());
     ui.horizontal(|ui| {
@@ -1187,12 +1230,22 @@ fn locomotion_section(
             animator.gait = GaitKind::Standing;
             animator.clip = None;
             animator.layered = false;
+            animator.swim = None;
         }
         if ui.selectable_label(walking && !clipping, "walk").clicked() {
             animator.walking = true;
             if animator.gait == GaitKind::Standing {
                 animator.gait = GaitKind::Natural;
             }
+            animator.clip = None;
+            animator.layered = false;
+            animator.swim = None;
+        }
+        // A swim replaces the walk rather than layering over it, so it belongs
+        // beside the others rather than in a checkbox: a body cannot be
+        // mid-stride and prone in the water at once.
+        if ui.selectable_label(swimming, "swim").clicked() {
+            animator.swim = (!swimming).then(|| Swim::at(animator.cycle));
             animator.clip = None;
             animator.layered = false;
         }
@@ -1234,6 +1287,14 @@ fn locomotion_section(
     if walking {
         ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
         ui.toggle_value(&mut animator.posture, "posture");
+    }
+    // **The one axis a swim has**, and the whole of what there is to look at:
+    // zero treads water and the top of the range is a body swimming flat out.
+    // The engine reads it in metres per second and normalises by the body's own
+    // length, so the same slider means the same stroke on a child and a giant.
+    if let Some(swim) = &mut animator.swim {
+        ui.add(egui::Slider::new(&mut swim.pace, 0.0..=2.0).text("m/s"));
+        ui.toggle_value(&mut swim.carriage, "carriage");
     }
 }
 
@@ -1911,6 +1972,71 @@ mod tests {
                 kind.label()
             );
         }
+    }
+
+    #[test]
+    fn a_swim_replaces_the_walk_and_lays_the_body_down() {
+        // **Engine #244.** A swim has to be watched, and the viewer is where it
+        // is watched, so the flag and the picker entry are the deliverable.
+        // What is asserted here is only that the wiring reaches the body: that
+        // the swim drives instead of the gait, that the trunk actually lies
+        // over, and that the footing tail is not handed a contact to drag the
+        // body back to a floor it is nowhere near. How it READS is the eye's
+        // business and the reason the flag exists at all.
+        let mut app = app();
+        let rig = {
+            let mut bodies = app.world_mut().query::<&AvatarBody>();
+            bodies
+                .iter(app.world())
+                .next()
+                .expect("a body")
+                .avatar
+                .rig
+                .clone()
+        };
+        let head = *rig
+            .in_zone(Zone::Head)
+            .first()
+            .expect("the default body has a head");
+        let root = rig
+            .joints
+            .iter()
+            .position(|joint| joint.parent.is_none())
+            .expect("a root");
+
+        let at = |app: &mut App, pace: Option<f32>| {
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.walking = true;
+                animator.swim = pace.map(|pace| Swim::at(0.0).toward(pace));
+                animator.scrub = true;
+                animator.cycle = 0.25;
+            }
+            app.update();
+            let mut posed = app.world_mut().query::<&AvatarPose>();
+            let pose = posed.iter(app.world()).next().expect("a pose").0.clone();
+            let places = pose.forward(&rig).positions;
+            places[head] - places[root]
+        };
+
+        // Standing, the head is above the root and barely ahead of it. Swimming,
+        // it is out in front and the two are nearly level: the body has lain
+        // down, which is the one thing about a swim that is visible from a
+        // single joint.
+        let upright = at(&mut app, None);
+        let prone = at(&mut app, Some(1.3));
+        assert!(
+            upright.y > upright.z.abs(),
+            "a standing body's head sat {:.2} up and {:.2} forward of its root",
+            upright.y,
+            upright.z,
+        );
+        assert!(
+            prone.z > prone.y,
+            "a swimming body's head sat {:.2} up and {:.2} forward of its root",
+            prone.y,
+            prone.z,
+        );
     }
 
     #[test]

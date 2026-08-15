@@ -14,6 +14,7 @@
 //!
 //! ```text
 //! cargo run --release -F builtin-clips --example viewer
+//! cargo run --release -F builtin-clips --example viewer -- --swim 1.3
 //! cargo run --release -F builtin-clips --example viewer -- --seed 7
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped
 //! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
@@ -443,6 +444,9 @@ fn starting_animator() -> Animator {
     // #243): the numbers say the wind-up, the flight and the landing MEET, and
     // a body can meet at every seam and still read as three animations played
     // in a row. `--phase` scrubs it, exactly as it scrubs a gait.
+    // A swim, on the same cycle as everything else: `--cadence` is how fast it
+    // strokes and `--phase` holds it still, exactly as for a walk.
+    animator.swim = value("--swim").map(|pace| symbios_avatar::Swim::at(0.0).toward(pace));
     animator.leap = value("--leap")
         .map(symbios_avatar::Leap::to_height)
         .or_else(|| value("--fall").map(symbios_avatar::Leap::falling))
