@@ -73,12 +73,21 @@ serde_json = { version = "1.0", optional = true }
 # override.
 bevy_panorbit_camera = "0.34"
 
-# Dependencies at full optimisation even in a debug build. Building a body is
-# real numeric work — subdivision, skinning, a megapixel atlas — and unoptimised
-# it runs about twenty times slower, which is the difference between a test suite
-# that waits seconds on a build and one that waits minutes. This crate's own code
-# stays unoptimised and debuggable.
-[profile.dev.package."*"]
+# The engine and the maths under it at full optimisation even in a debug build.
+# Building a body is real numeric work — subdivision, skinning, a megapixel atlas
+# — and unoptimised it runs about twenty times slower: the difference between a
+# test suite that waits seconds on a build and one that waits minutes.
+#
+# Named crates rather than `"*"`, which would sweep in the whole of Bevy for no
+# gain here and cost CI a very long optimised build of it. These four are where
+# the time actually goes.
+[profile.dev.package.symbios-avatar]
+opt-level = 3
+[profile.dev.package.symbios-texture]
+opt-level = 3
+[profile.dev.package.glam]
+opt-level = 3
+[profile.dev.package.noise]
 opt-level = 3
 
 [lints.rust]

@@ -15,26 +15,54 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # Bevy links against the host's windowing, audio and input
+            # libraries, and a bare ubuntu runner carries none of their headers:
+            # `wayland-sys` fails in its build script long before any code of
+            # ours is compiled. Installed rather than switched off, because the
+            # feature set CI builds should be the one consumers get — this crate
+            # exists to be a faithful second instrument, and a CI that checks a
+            # different Bevy from the one that ships is not checking it.
+            #
+            # `x11-dl` and `xkbcommon-dl` dlopen at run time, so they need no
+            # headers here.
+            - name: Install the system libraries Bevy links against
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --no-install-recommends -y \
+                      libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+
             - name: Check Formatting
               run: cargo fmt -- --check
 
-            # --all-targets, so examples and tests are linted too. The render
-            # tool is the instrument every quality judgement here is made with;
+            # --all-targets, so examples and tests are linted too. The viewer
+            # is the instrument every quality judgement here is made with;
             # letting it rot behind a lint gate that does not cover it is how it
             # stops being trustworthy.
+            #
+            # --all-features is what makes that true rather than merely
+            # intended. The viewer declares `required-features`, and cargo does
+            # not build a target whose features are off — it skips it in
+            # silence, which reads exactly like a clean lint.
             - name: Clippy (Linting)
-              run: cargo clippy --all-targets -- -D warnings
+              run: cargo clippy --all-features --all-targets -- -D warnings
 
             - name: Build
-              run: cargo build --verbose
+              run: cargo build --all-features --verbose
 
             - name: Run Tests
-              run: cargo test --verbose
+              run: cargo test --all-features --verbose
+
+            # `default-features = false` is a promise the README makes: the
+            # editor is severable, and with it the only dependencies beyond Bevy
+            # and the engine. Nothing else here compiles that configuration, so
+            # nothing else can catch the day it stops building.
+            - name: Check without the editor
+              run: cargo check --no-default-features --verbose
 
             # Documentation is the design record for this crate; a warning here
             # is usually a link gone stale against a rename.
             - name: Documentation
-              run: cargo doc --no-deps --document-private-items
+              run: cargo doc --no-deps --all-features --document-private-items
               env:
                   RUSTDOCFLAGS: -D warnings
 
@@ -49,7 +77,8 @@ jobs:
             - name: Add the wasm target
               run: rustup target add wasm32-unknown-unknown
 
-            # `.cargo/config.toml` carries the getrandom backend flag this
-            # needs; see the note there for why it is required at all.
+            # No system libraries here: `--target wasm32` resolves its own
+            # dependency graph, and the windowing and audio crates above are
+            # native-only.
             - name: Check for wasm32
               run: cargo check --target wasm32-unknown-unknown --lib --verbose
