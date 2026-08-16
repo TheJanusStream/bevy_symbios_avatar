@@ -42,7 +42,7 @@ pub struct SpawnAvatar {
     /// How shut the eyes start, `0` open and `1` closed.
     ///
     /// Recorded onto the root as [`AvatarClosure`]. It does not move geometry:
-    /// a blink is a pose (symbios-avatar#118), the four lids are joints, so
+    /// a blink is a pose — the four lids are joints — so
     /// shutting the eyes means writing an [`AvatarPose`] — which is what
     /// [`crate::AnimatorPlugin`] does with its own closure control.
     pub closure: f32,
@@ -90,7 +90,7 @@ pub struct AvatarPose(pub Pose);
 ///
 /// The record of what the lids are holding, and nothing more: the animator
 /// writes it beside every pose it applies, so anything that wants to ask can.
-/// It drives no geometry. A blink is a pose (symbios-avatar#118) — the four
+/// It drives no geometry. A blink is a pose — the four
 /// lids have joints, their shells are part of the skin's own draw, and
 /// `Eyes::blink` writes the four rotations onto whatever pose the body is
 /// already holding — so shutting the eyes means writing an [`AvatarPose`],

@@ -10,6 +10,12 @@ repository = "https://github.com/TheJanusStream/bevy_symbios_avatar"
 keywords = ["avatar", "procedural", "generative", "bevy", "atproto"]
 categories = ["game-development", "graphics"]
 
+# docs.rs builds every feature, so the editor's public section functions and the
+# clip resource are documented whether or not a default build carries them.
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["editor"]
 # The record editor, and the only reason anything but bevy and the engine is in
@@ -35,17 +41,16 @@ required-features = ["editor", "builtin-clips"]
 [dependencies]
 bevy = "0.18"
 
-# A path dependency on purpose, and for as long as the engine is pre-release.
-# This crate exists to be a *second instrument* on the same body: if the two
-# ever read a different version of the engine they stop being comparable, which
-# is the one thing it is here to do.
+# Pinned to one minor line rather than tracked loosely. This crate exists to be
+# a *second instrument* on the same body: if the two ever read a different
+# version of the engine they stop being comparable, which is the one thing it is
+# here to do.
 symbios-avatar = "0.1"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
-# than accidental. Judging a body has been a slow loop — change a constant,
+# than accidental. Judging a body off-line is a slow loop — change a constant,
 # rebuild, render four fixed angles, hand over a picture — and it cannot answer
-# what an axis does across its *range*, which is the question the open geometry
-# issues are stuck on. A live panel can.
+# what an axis does across its *range*. A live panel can.
 #
 # Pinned to the pair known to work against Bevy 0.18 rather than to whatever is
 # latest, which is how the sibling project that uses it daily runs.
@@ -70,6 +75,8 @@ bevy_panorbit_camera = "0.34"
 
 [lints.rust]
 missing_docs = "warn"
+# Set by docs.rs only; see the attribute at the top of `src/lib.rs`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

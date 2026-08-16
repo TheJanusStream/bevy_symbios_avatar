@@ -1,19 +1,34 @@
 //! Drawing a [`symbios_avatar::Avatar`] in Bevy.
 //!
-//! This crate is a **second instrument**, and that is the whole reason it
-//! exists. The engine ships with a software renderer, and every quality
-//! judgement made about a body so far has been made through it. Twice that
-//! instrument has produced a false diagnosis on its own: a blink that looked
-//! broken because lids and globes were drawn in one colour, and UV seam normals
-//! that read as a skinning defect and sent a day's work after the wrong
-//! culprit. A defect that appears in one renderer and not the other is a defect
-//! in the renderer; one that appears in both is a defect in the body. There is
-//! no way to tell those apart with one instrument.
+//! The engine builds parametric 3D avatars from atproto records; this crate
+//! draws them. Nothing here decides what a body looks like. Every shape,
+//! weight, chart and colour comes from [`symbios_avatar::Avatar::build`], and
+//! every number that decides how a body *moves* comes from
+//! [`symbios_avatar::anim`] — this crate converts, uploads and applies.
+//!
+//! Where it has to make a choice the engine did not — how a material is
+//! parameterised, which colour space a buffer is in — the choice is written
+//! down beside it in [`convert`], because a difference between the two
+//! renderers that is really a difference in those choices is exactly the false
+//! diagnosis this crate is meant to prevent.
+//!
+//! # Why it exists
+//!
+//! This crate is a **second instrument**. The engine ships with a software
+//! renderer, and every quality judgement made about a body so far has been made
+//! through it. Twice that instrument has produced a false diagnosis on its own:
+//! a blink that looked broken because lids and globes were drawn in one colour,
+//! and UV seam normals that read as a skinning defect and sent a day's work
+//! after the wrong culprit. A defect that appears in one renderer and not the
+//! other is a defect in the renderer; one that appears in both is a defect in
+//! the body. There is no way to tell those apart with one instrument.
 //!
 //! It is also the only place the shipping tier is real. The budget the engine is
 //! judged against — one to three skinned draws, thirty thousand triangles, a
 //! WebGL2 feature set — is a number in a document until something uploads the
 //! meshes to a GPU and a frame comes back.
+//!
+//! # Drawing a body
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -31,17 +46,47 @@
 //!     .run();
 //! ```
 //!
-//! Nothing here decides what a body looks like. Every shape, weight, chart and
-//! colour comes from [`symbios_avatar::Avatar::build`]; this crate converts and
-//! uploads. Where it has to make a choice the engine did not — how a material
-//! is parameterised, which colour space a buffer is in — the choice is written
-//! down beside it, because a difference between the two instruments that is
-//! really a difference in those choices is exactly the false diagnosis this
-//! crate is meant to prevent.
+//! A [`SpawnAvatar`] becomes a root entity, one entity per joint of the rig
+//! hanging off it in the rig's own hierarchy, and one entity per drawn mesh —
+//! which is also the shape the draw budget is stated in. Write an [`AvatarPose`]
+//! on the root and the joints follow; [`AvatarJoints`] indexes the joint
+//! entities, and [`AvatarBody`] keeps the whole built [`symbios_avatar::Avatar`]
+//! for anything that wants to ask what it cost. [`spawn`] has the details.
 //!
-//! # The panel, and the rule it does not break
+//! Bring your own camera and lights: this crate draws a body and holds no
+//! opinion about the scene it stands in.
 //!
-//! [`editor`] adds a control for every axis an
+//! # Moving a body
+//!
+//! [`AnimatorPlugin`] adds an [`Animator`] resource, ticks the engine's motion
+//! every frame and writes the result onto components.
+//!
+//! ```no_run
+//! use bevy::prelude::*;
+//! use bevy_symbios_avatar::{Animator, AnimatorPlugin, AvatarPlugin, SpawnAvatar};
+//! use symbios_avatar::{Archetype, AvatarRecord};
+//!
+//! App::new()
+//!     .add_plugins((DefaultPlugins, AvatarPlugin, AnimatorPlugin))
+//!     .add_systems(
+//!         Startup,
+//!         |mut commands: Commands, mut animator: ResMut<Animator>| {
+//!             animator.walking = true;
+//!             commands.spawn(SpawnAvatar::from(AvatarRecord::new(
+//!                 "Someone",
+//!                 Archetype::default(),
+//!             )));
+//!         },
+//!     )
+//!     .run();
+//! ```
+//!
+//! The driving half needs no GUI and is always compiled; only the window that
+//! steers it is behind the `editor` feature. [`animator`] has the rest.
+//!
+//! # Editing a record
+//!
+//! The `editor` module adds a control for every axis a
 //! [`symbios_avatar::AvatarRecord`] can hold, so a body can be watched while an
 //! axis moves rather than judged from four fixed angles after the fact. That
 //! reads like a contradiction of the viewer's own rule — a body, a light and a
@@ -49,21 +94,33 @@
 //! thing that could be blamed for what is on the screen — and it would be, but
 //! for two things it owes that rule and pays.
 //!
-//! It edits the **record and only the record**, so nothing tuned through it is
-//! a body no one else can rebuild. And it **never appears in a judgement
-//! image**: the panel hides on a key and does not draw at all under `--shot`,
-//! so what is photographed is the same body, light and camera it always was.
-//! Turn the feature off with `default-features = false` and this crate is
-//! exactly what it was.
+//! It edits the **record and only the record**, so nothing tuned through it is a
+//! body no one else can rebuild. And it **never appears in a judgement image**:
+//! the panel hides on a key and does not draw at all under the viewer's
+//! `--shot`, so what is photographed is the same body, light and camera it
+//! always was.
 //!
-//! [`animator`] is the second window, and holds to the same line: every number
-//! that decides how a body *moves* comes from [`symbios_avatar::anim`], and
-//! this crate ticks a cycle and writes the result onto components. Its driving
-//! half needs no GUI and is always compiled. The `builtin-clips` feature
-//! embeds the engine's baked CC0 clip set so the window has clips to pick —
-//! off by default, because the artifact is 200 KiB a consumer that never plays
-//! it should not carry, and one that fetches `clips.bin` at run time inserts
-//! its own [`Clips`] resource instead.
+//! # Features
+//!
+//! - **`editor`** (default) — the record editor's panel and the motion
+//!   window, and with them the only dependencies this crate has beyond Bevy and
+//!   the engine, `bevy_egui` and `serde_json`. `default-features = false`
+//!   removes all three and leaves the drawing and the driving untouched.
+//! - **`builtin-clips`** (off) — the engine's baked CC0 clip set, embedded in
+//!   the binary, which is what [`Clips::builtin`] returns. Off by default
+//!   because the artifact is 200 KiB and a consumer that only draws bodies
+//!   should not pay for motion it never plays — least of all a wasm one. A
+//!   consumer that fetches `clips.bin` at run time inserts its own [`Clips`]
+//!   resource instead.
+//!
+//! Both windows draw in `bevy_egui`'s `EguiPrimaryContextPass`, so an app that
+//! wants them adds `EguiPlugin` alongside these plugins. `examples/viewer.rs` is
+//! the worked example of all of it.
+
+// docs.rs builds with `--cfg docsrs` on nightly, which is what puts the
+// "available on crate feature `editor`" badges on the gated items. Inert
+// everywhere else.
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 pub mod animator;
 pub mod convert;
@@ -88,8 +145,7 @@ use bevy::prelude::*;
 /// that is what a re-roll is, and what every step of a slider in the record
 /// editor is — and anything that decided what to do with a body before that
 /// happened is holding an entity that no longer exists. Queuing a component
-/// onto one is not a subtle failure: Bevy panics on applying the command, and
-/// it did, the first time these two ran unordered.
+/// onto one is not a subtle failure: Bevy panics on applying the command.
 ///
 /// Chained in [`Update`], which puts a command flush between each pair, so a
 /// system in a later set never sees a body an earlier set removed.

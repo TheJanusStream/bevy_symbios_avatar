@@ -12,17 +12,15 @@
 //!
 //! ## Why a window rather than more keys
 //!
-//! Before this, the viewer's motion was three CLI flags and a held `W`. That is
-//! enough to say "walk" and nothing else: it cannot hold a gait at one point in
-//! its cycle, cannot slow a cadence to look at a foot plant, cannot compare a
-//! trot against a wave on the same body, and cannot aim a gaze anywhere except
-//! wherever the clock had swung the target when the shutter opened. All four
-//! are things somebody judging a walk actually needs, and none of them is worth
-//! a flag.
+//! A flag and a held key are enough to say "walk" and nothing else. They cannot
+//! hold a gait at one point in its cycle, cannot slow a cadence to look at a
+//! foot plant, cannot compare a trot against a wave on the same body, and cannot
+//! aim a gaze anywhere except wherever the clock had swung the target when the
+//! shutter opened. All four are things somebody judging a walk actually needs,
+//! and none of them is worth a flag of its own.
 //!
 //! Unlike a rebuild, none of this costs anything: a pose is a few dozen
-//! quaternions — a blink included, since symbios-avatar#118 gave the four lids
-//! joints of their own.
+//! quaternions — a blink included, since the four lids have joints of their own.
 
 use bevy::prelude::*;
 use symbios_avatar::Heading;
@@ -55,10 +53,8 @@ const WINDOW_WIDTH: f32 = 260.0;
 /// on anything else — and the others are worth having because a gait that
 /// looks right at the pattern the body chose can still be wrong at another.
 ///
-/// `Running` arrived with symbios-avatar#186 and is the one that is not a walk:
-/// it has a moment with nothing on the ground. #15 was filed here as a missing
-/// viewer flag and turned out to be a missing gait — there was no run to select
-/// — so this is that flag, finally pointing at something.
+/// `Running` is the one that is not a walk: it has a moment with nothing on the
+/// ground, which is what separates it from the two patterns above it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum GaitKind {
     /// Whatever suits the number of legs.
@@ -99,9 +95,9 @@ impl GaitKind {
     /// The kind that goes by this name, if any.
     ///
     /// The inverse of [`Self::label`], so a command line can reach the picker's
-    /// own set. Until #15 the pattern was selectable **only** through the motion
-    /// window, and `--shot` never opens a window — so of the four gaits below,
-    /// a captured frame could show one.
+    /// own set. Without it the pattern would be selectable only through the
+    /// motion window, and a capture never opens a window — so a captured frame
+    /// could show one gait of the five.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.label() == name)
@@ -209,7 +205,7 @@ pub struct Animator {
     pub gesture: Option<(String, f32)>,
     /// A swim to show instead of the walk, if any.
     ///
-    /// **Instead of, for the same reason a leap is** (engine #244): a body
+    /// **Instead of, for the same reason a leap is:** a body
     /// cannot be mid-stride and prone in the water at once. [`Animator::cycle`]
     /// drives the stroke, so `hold` scrubs a swim exactly as it scrubs a gait,
     /// and [`Animator::cadence`] is how fast it strokes — which is the whole of
@@ -219,7 +215,7 @@ pub struct Animator {
     /// A leap to show instead of the walk, if any.
     ///
     /// **A jump is the one motion in this crate that cannot be judged from a
-    /// table** (engine #243). Its whole quality is whether the wind-up, the
+    /// table.** Its whole quality is whether the wind-up, the
     /// flight and the landing read as one movement, and the numbers say only
     /// that they meet — a body can meet at every seam and still look like three
     /// animations played in a row. So it gets a flag here, and the flag is the
@@ -237,7 +233,7 @@ pub struct Animator {
     /// One toggle rather than two because it exists for one purpose — taking
     /// the posture off to look at what the legs alone are doing — and because
     /// what it hides is one answer to one question. A body with neither is the
-    /// mannequin #102 described.
+    /// mannequin a body with neither is.
     pub posture: bool,
     /// Whether the feet are solved onto the ground.
     pub footing: bool,
@@ -265,7 +261,8 @@ pub struct Animator {
     /// Which baked clip is playing, as an index into [`Clips`].
     ///
     /// `None` is the procedural gait alone, which is what this crate did before
-    /// there were clips and is one half of the comparison #141 exists to make.
+    /// there were clips and is one half of the comparison this window exists to
+    /// make.
     pub clip: Option<usize>,
     /// Whether the clip plays **over** the gait rather than instead of it.
     ///
@@ -293,7 +290,7 @@ pub struct Animator {
     /// imported walk is asked the question a procedural one answers by solving.
     ///
     /// `+z` because that is the way the body faces: the engine's forward is
-    /// `+z` and `Stride::for_body` strides down it (#251).
+    /// `+z` and `Stride::for_body` strides down it.
     pub grade: f32,
     /// How steeply the ground rises toward `+x`, as a rise over run — the hill
     /// the body stands ACROSS rather than climbs.
@@ -302,13 +299,13 @@ pub struct Animator {
     /// sideways, which is why it is a second slider and not a heading: a gait
     /// answers a grade with its stride and its crouch, and a camber with its
     /// ankles and the width of its stance. Together the two reach every plane
-    /// through the origin, so any slope in 3D can be put under the body (#252).
+    /// through the origin, so any slope in 3D can be put under the body.
     pub camber: f32,
     /// How fast the body is turning, in degrees per second, positive toward its
     /// own left.
     ///
-    /// **The control the turn has to be judged by eye through** (engine #241).
-    /// A turn is three things a number can score — the skate, the yaw
+    /// **The control the turn has to be judged by eye through.** A turn is three
+    /// things a number can score — the skate, the yaw
     /// delivered, the sole clearance, all of which `examples/walkaudit` reads —
     /// and one it cannot: whether the body looks like it is turning or like it
     /// is being carried round a corner. That is the differential stride, the
@@ -323,11 +320,10 @@ pub struct Animator {
     /// Which way the body TRAVELS, in degrees off the way it faces: 0 is
     /// forward, 180 is backwards, +90 strafes to its own left.
     ///
-    /// **A heading rather than a mode** (engine #242). The whole point of the
-    /// engine expressing this as one angle is that a diagonal is a stride in
-    /// its own right, so the slider can be swung continuously and nothing pops
-    /// — which is the acceptance the issue was drafted with, and the one thing
-    /// no table can settle. Sweep it and watch the foot roll fade out at 90
+    /// **A heading rather than a mode.** The whole point of the engine expressing
+    /// this as one angle is that a diagonal is a stride in its own right, so the
+    /// slider can be swung continuously and nothing pops — the one thing no table
+    /// can settle. Sweep it and watch the foot roll fade out at 90
     /// degrees and come back inverted past it.
     pub heading: f32,
     /// How long a transition between sources takes, in seconds. Zero snaps.
@@ -352,7 +348,7 @@ pub struct Animator {
     pub expression: Expression,
     /// A lipsync mouth shape held over the expression, if any.
     ///
-    /// Speech owns the mouth (symbios-avatar#218): when this is set it writes
+    /// Speech owns the mouth: when this is set it writes
     /// the jaw and the corners over whatever `talk` and the expression put
     /// there, which is exactly what a viseme stream arriving from an audio
     /// pipeline would do. The panel exposes it so each shape can be judged
@@ -361,11 +357,10 @@ pub struct Animator {
     /// The expression currently showing — the cursor easing toward
     /// [`Animator::expression`]. Bypass-written each frame, like `lift`.
     showing: Expression,
-    /// The engine's blink timer.
     /// Whether a body with nothing else to do stands and breathes.
     ///
     /// **On by default, because a body doing nothing is the state a viewer sees
-    /// longest** and the one an idle exists for (engine #246). Off is what an
+    /// longest** and the one an idle exists for. Off is what an
     /// instrument wants when it is looking at the rest pose itself: a body that
     /// is breathing and swaying has no frame that IS the rest pose, which makes
     /// a still capture of the geometry impossible to take.
@@ -377,7 +372,9 @@ pub struct Animator {
     /// speaking is a body whose idle is the speaking one, and two switches for
     /// one fact is how they come to disagree.
     pub listening: bool,
+    /// The engine's idle driver.
     idler: Idle,
+    /// The engine's blink timer.
     blink: Blink,
     /// The engine's speech driver.
     talk: Talk,
@@ -453,8 +450,8 @@ impl Animator {
     /// that is skating is then impossible to miss.
     ///
     /// Published rather than left to the caller to integrate, so the yaw drawn
-    /// and the yaw walked cannot drift apart — which is #252's lesson about the
-    /// floor tilt, applied before it has a chance to happen twice.
+    /// and the yaw walked cannot drift apart, for the same reason [`floor_tilt`]
+    /// is published beside [`ground_normal`].
     #[must_use]
     pub fn heading(&self) -> f32 {
         self.turn.to_radians() * self.elapsed
@@ -727,18 +724,12 @@ pub fn drive_avatar_animation(
     }
 }
 
-/// The jaw's pivot: the parent of the marker chain's tip (#152).
-///
-/// The same identification `rig::skin::bind` uses — the two markers are the
-/// only joints in a rig that carry the flag — so the joint the animator turns
-/// is by construction the joint the mandible region is bound to. A quadruped
-/// has no markers and gets `None`, which leaves its pose untouched.
 /// Writes the face's pose layers in their contract order.
 ///
 /// Speech's jaw first; then the resting expression, which COMPOSES its jaw
 /// bias over speech (a happy body keeps its parted rest while talking) and
 /// owns the brows and corners outright; then a held viseme over the mouth,
-/// because speech owns it (symbios-avatar#218) — a viseme writes the jaw and
+/// because speech owns it — a viseme writes the jaw and
 /// corners over both layers above, which is what a lipsync stream would do.
 /// The lids are written by nothing here: they arrive through the closure,
 /// after the blend, like every blink.
@@ -775,6 +766,12 @@ fn ease_expression(showing: Expression, target: Expression, delta: f32, blend: f
     if settled { target } else { eased }
 }
 
+/// The jaw's pivot: the parent of the marker chain's tip.
+///
+/// The same identification `rig::skin::bind` uses — the two markers are the
+/// only joints in a rig that carry the flag — so the joint the animator turns
+/// is by construction the joint the mandible region is bound to. A quadruped
+/// has no markers and gets `None`, which leaves its pose untouched.
 fn jaw_pivot(rig: &Rig) -> Option<usize> {
     (0..rig.len()).find_map(|tip| {
         let pivot = rig.joints[tip].parent?;
@@ -784,12 +781,12 @@ fn jaw_pivot(rig: &Rig) -> Option<usize> {
 
 /// Where a tracked gaze points, `elapsed` seconds into its scan.
 ///
-/// A continuous scan, not a lap (#26): the target used to circle one way
-/// forever, so the head swept to its limit, snapped across as the target
-/// passed behind it, and swept again. A triangle wave runs the same arc at the
-/// same `speed` in both directions and reverses at the ends — the scanning
-/// loop the control was always meant to be. Phase-offset by one span so it
-/// starts at zero moving positive; speed 0 holds it there.
+/// A continuous scan, not a lap. A target circling one way forever sweeps the
+/// head to its limit, snaps across as the target passes behind it, and sweeps
+/// again. A triangle wave runs the same arc at the same `speed` in both
+/// directions and reverses at the ends, which is the scanning loop this control
+/// is for. Phase-offset by one span so it starts at zero moving positive;
+/// speed 0 holds it there.
 fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
     let span = limit.clamp(0.01, std::f32::consts::PI);
     let along = (span + elapsed * speed).rem_euclid(4.0 * span);
@@ -802,13 +799,11 @@ fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
 
 /// Walks the body one frame and reports what the engine's own drive did.
 ///
-/// **Every stage, through [`Walk::drive`]** (engine #253). This crate had the
-/// sequence hand-rolled and was one of the three consumers that had simply
-/// forgotten `roll_feet` — for as long as it existed, so the viewer, which is
-/// the place a walk is judged BY EYE, was drawing a gait missing a stage. The
-/// entry point is the fix for the class rather than for that instance: the
-/// order, the ground given to both the stride and the plant, and the roll
-/// landing after the settle are all its problem now.
+/// **Every stage, through [`Walk::drive`]**, rather than a hand-rolled sequence
+/// that can silently drop one. A consumer that spells the stages out itself is a
+/// consumer that can forget `roll_feet` and go on drawing a gait that is missing
+/// it. The engine's entry point owns the order, the ground given to both the
+/// stride and the plant, and the roll landing after the settle.
 ///
 /// The toggles map onto its ablation switches, so turning the posture or the
 /// footing off here takes off exactly that and nothing else.
@@ -883,9 +878,9 @@ fn glance(rig: &Rig, pose: &mut Pose, idled: Option<symbios_avatar::Idled>) {
 
 /// Drives one frame of a body that is standing about doing nothing.
 ///
-/// **A body with nothing else to do stands and breathes** (engine #246), and
-/// this is the state a viewer sees longest. Kept out of the main system for the
-/// same reason [`walk`] is: the whole layer is one call into the engine, and
+/// **A body with nothing else to do stands and breathes**, and this is the
+/// state a viewer sees longest. Kept out of the main system for the same reason
+/// [`walk`] is: the whole layer is one call into the engine, and
 /// what lives here is only the choice of which parameter set that call gets.
 ///
 /// Only ever reached when nothing else is driving the legs. An idle is what a
@@ -963,7 +958,7 @@ fn advance(animator: &mut Animator, delta: f32) {
 /// walks — and what lets it wave at all on a body that has a hand free, and not
 /// on one that has none.
 ///
-/// **The return is what the gaze layers below need to know** (#30). They write
+/// **The return is what the gaze layers below need to know.** They write
 /// the head outright, so a gesture that aims it has to be able to say so; the
 /// clip already does, by carrying a [`Target::Gaze`] track, and asking the clip
 /// beats keeping a list of which gestures involve the head — a list that would
@@ -1044,7 +1039,7 @@ fn leaping(
 
 /// Settles the contacts and rolls the ankles, and records what it cost.
 ///
-/// The tail of the engine's own drive sequence (engine #253), kept apart from
+/// The tail of the engine's own drive sequence, kept apart from
 /// [`walk`] because this crate can layer an imported clip between the two — a
 /// clip moves the legs, so the feet are settled and the ankles rolled after it
 /// rather than before.
@@ -1074,11 +1069,11 @@ fn settle(
 ///
 /// **The one place the plane is defined, and that is the point of it.** The
 /// ground the feet are solved against and the floor the viewer draws are two
-/// expressions of a single surface, and they have now disagreed twice: #21
-/// found the drawn tilt rotating the opposite way to the solved one, and #252
-/// found it square to it, because #251 moved the solved surface from `+x` to
-/// `+z` and the drawn one stayed where it was. Both times the two were kept in
-/// agreement by a comment saying they had to be. A comment is not a mechanism.
+/// expressions of a single surface, and they have drifted apart twice — once
+/// with the drawn tilt rotating the opposite way to the solved one, once square
+/// to it, after the solved surface moved axis and the drawn one stayed where it
+/// was. Both times the two were kept in agreement by a comment saying they had
+/// to be. A comment is not a mechanism.
 ///
 /// Now the ground closure builds its surface from this and [`floor_tilt`]
 /// rotates the drawn floor onto it, so a change of axis moves both or neither,
@@ -1105,15 +1100,14 @@ pub fn floor_tilt(grade: f32, camber: f32) -> Quat {
 
 /// The surface the slope controls describe — position AND normal.
 ///
-/// **Grade runs along Z, the way the body walks**, and it ran along X until
-/// #251: X is the body's lateral axis — the engine's forward is `+Z` and
-/// [`Stride::for_body`] strides down it — so tilting X asked the slider's
-/// question about a camber the body stood across rather than a hill it climbed.
-/// Camber is now that second axis on purpose (#252), so the pair reaches every
-/// plane.
+/// **Grade runs along Z, the way the body walks.** X is the body's lateral axis
+/// — the engine's forward is `+Z` and [`Stride::for_body`] strides down it — so
+/// tilting X would ask the grade slider's question about a camber the body
+/// stands across rather than a hill it climbs. Camber is that second axis on
+/// purpose, so the pair reaches every plane.
 ///
-/// Shared by the footing solve and by the stride, which since symbios-avatar
-/// #221 seats its stride on whatever ground it is given: handing those two
+/// Shared by the footing solve and by the stride, which seats its stride on
+/// whatever ground it is given: handing those two
 /// different floors is exactly what leaves a swing arc at the rest ground height
 /// while the plant settles onto a hill.
 fn sloping(grade: f32, camber: f32) -> impl Fn(Vec3) -> Option<Ground> {

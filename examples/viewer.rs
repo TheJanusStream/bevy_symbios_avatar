@@ -22,10 +22,10 @@
 //! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
 //! cargo run --release -F builtin-clips --example viewer -- --gait wave --pace 1.4 --shot wave.png
-//! cargo run --release --example viewer -- --gait running                 # a real flight phase
-//! cargo run --release --example viewer -- --leap 0.4                    # a jump (#243)
-//! cargo run --release --example viewer -- --fall 1.0                    # a drop, no wind-up
-//! cargo run --release --example viewer -- --ledge 0.8 --phase 0.6       # jump off a ledge, held
+//! cargo run --release -F builtin-clips --example viewer -- --gait running      # a real flight phase
+//! cargo run --release -F builtin-clips --example viewer -- --leap 0.4           # a jump
+//! cargo run --release -F builtin-clips --example viewer -- --fall 1.0           # a drop, no wind-up
+//! cargo run --release -F builtin-clips --example viewer -- --ledge 0.8 --phase 0.6  # off a ledge, held
 //! cargo run --release -F builtin-clips --example viewer -- --walk --phase 0.35 --cadence 1.6
 //! cargo run --release -F builtin-clips --example viewer -- --clip Sprint --phase 0.35 --yaw 0.9  # a RUN
 //! cargo run --release -F builtin-clips --example viewer -- --mane 0     # bald, for judging a jaw
@@ -61,18 +61,14 @@
 //!   software renderer is this crate's fault, and one that reads wrong in both
 //!   is the engine's. `scrub` holds the gait at one phase, which is the only
 //!   way to look at a foot plant.
-//! - **Everything the motion window steers about a gait has a flag now** (#15).
-//!   It had `--walk` and nothing else, so a captured frame could show one of
-//!   the patterns, at one cadence, at one pace — and the window that
-//!   reaches the rest is the one `--shot` deliberately never opens. `--gait`,
-//!   `--cadence` and `--pace` close that, and `--phase` already held both a
-//!   gait and a clip at a chosen point in the cycle.
-//! - **A run is `--gait running`** (#15). It was `--clip Jog` or `--clip
-//!   Sprint` until symbios-avatar#186, because the procedural gait genuinely
-//!   could not run: every `Gait` constructor floored a two-legged body's duty
-//!   at a half, which is the definition of a walk, so this flag had nothing to
-//!   point at. It does now, and epic #237 is removing the clips that were
-//!   covering for it.
+//! - **Everything the motion window steers about a gait has a flag**, because
+//!   the window that reaches the rest is the one `--shot` deliberately never
+//!   opens — so without them a captured frame could only show one pattern, at
+//!   one cadence, at one pace. `--gait`, `--cadence`, `--pace` and `--phase`
+//!   close that, and `--phase` holds both a gait and a clip at a chosen point
+//!   in the cycle.
+//! - **A run is `--gait running`**, the procedural gait rather than a baked
+//!   `Jog` or `Sprint` clip standing in for one.
 //!   `the_viewer_can_select_a_run_and_every_other_gait_is_still_a_walk` holds
 //!   it: exactly one selectable gait leaves the ground.
 //! - `H` hides both windows, and `--shot` never shows them.
@@ -102,13 +98,11 @@ const START_BACK: f32 = 1.9;
 /// rather than the default 45: the head fills the frame at this distance and
 /// the perspective is a portrait's rather than a fisheye's.
 ///
-/// **A face is judged at conversational range and this instrument could only
-/// stand across the room** (#13). `--shot` takes one frame at whatever the
-/// automatic framing chose, which is the whole body — so every in-app
-/// judgement of a FACE ever made through this viewer was made at about eight
-/// pixels to the centimetre, and symbios-avatar#6's criterion 5 is entirely
-/// about faces. Interactively the answer was always "scroll the wheel"; there
-/// was no answer at all for a captured frame.
+/// **A face is judged at conversational range**, and without this the
+/// instrument could only stand across the room. `--shot` takes one frame at
+/// whatever the automatic framing chose, which is the whole body — about eight
+/// pixels to the centimetre on a face. Interactively the answer is "scroll the
+/// wheel"; for a captured frame there is no answer but this one.
 const FACE_BACK: f32 = 6.5;
 /// Pitch the camera starts at, in radians.
 const START_PITCH: f32 = 0.12;
@@ -118,8 +112,8 @@ const START_PITCH: f32 = 0.12;
 /// left to wait for by then is the GPU catching up: the meshes, the atlas and
 /// its two maps are handed over on one frame and uploaded across the next
 /// few, and a material whose textures have not landed yet does not draw at
-/// all — which is how a capture came back with a body but no hair, eyes or
-/// cloth on it (#24).
+/// all — which is how a capture comes back with a body but no hair, eyes or
+/// cloth on it.
 const SETTLE: u32 = 12;
 /// How many frames to wait on any one thing before giving up on it.
 ///
@@ -208,11 +202,11 @@ struct Floor;
 /// reason the control exists.
 ///
 /// **Derived from the solve's own normal rather than re-expressed**, which is
-/// the fix that outlives this particular pair of axes (#252). Written the other
-/// way, as a rotation composed from the slope values, the two drifted apart
-/// twice: #21 found the drawn tilt turning the opposite way to the solved one,
-/// and #252 found it square to it after the solved surface moved from `+x` to
-/// `+z` and this did not follow. Applying the tilt the library publishes
+/// the fix that outlives this particular pair of axes. Written the other way,
+/// as a rotation composed from the slope values, the two drifted apart twice:
+/// once with the drawn tilt turning the opposite way to the solved one, once
+/// square to it after the solved surface moved axis and this did not follow.
+/// Applying the tilt the library publishes
 /// cannot be out of step with a surface built from the same definition,
 /// whatever the axes become.
 fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Floor>>) {
@@ -235,7 +229,7 @@ fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Flo
 /// that is holding its ground looks planted.
 ///
 /// The angle is [`Animator::heading`] rather than one integrated here, for the
-/// reason #252 gave about the floor tilt: a quantity the viewer draws and the
+/// same reason the floor tilt is: a quantity the viewer draws and the
 /// engine walks must have one definition, or the two drift apart and nobody
 /// notices for a release.
 fn turn_body(animator: Res<Animator>, mut bodies: Query<&mut Transform, With<AvatarBody>>) {

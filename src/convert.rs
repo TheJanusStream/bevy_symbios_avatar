@@ -6,7 +6,7 @@
 //!
 //! The engine's [`PolyMesh`] is a polygon soup with per-vertex attributes: faces
 //! are rings of any length, and it carries positions, UVs, normals, bone
-//! influences and linear-space colours. A Bevy [`Mesh`] is a triangle list with
+//! influences and sRGB colours. A Bevy [`Mesh`] is a triangle list with
 //! parallel attribute arrays. The conversion is therefore mechanical except for
 //! two decisions.
 //!
@@ -22,8 +22,8 @@
 //! have to be decoded here, by `linear_of`.
 //!
 //! Getting this wrong does not produce an obvious error, and this crate has
-//! paid for it once already (#14, on the word of an upstream doc comment that
-//! called the vertex colours linear): every vertex-coloured thing on the body
+//! paid for it once already, on the word of a doc comment that called the
+//! vertex colours linear: every vertex-coloured thing on the body
 //! — the iris, the hair, the garment — drew two to four times too bright in
 //! the midtones here and correctly in the software renderer. It was the eyes
 //! that showed it, because a mid-blue iris undecoded is a pale grey-blue bead;
@@ -164,7 +164,7 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
 /// their triangles span no UV area — and mikktspace, unlike the engine
 /// renderer's `tangent_frame`, has no fallback for a frame divided by nothing:
 /// the shipped body came back with four tangents the shader could not light,
-/// and each drew as a flat grey shard on a cheek (#23).
+/// and each drew as a flat grey shard on a cheek.
 ///
 /// Any unit vector perpendicular to the vertex normal is a correct repair,
 /// not merely a safe one: a triangle with no UV area samples one texel
@@ -212,8 +212,8 @@ fn linear_of(colour: symbios_avatar::Vec3) -> [f32; 4] {
 /// Uploads a painted skin atlas's albedo as a texture.
 ///
 /// One of three: [`normal_image`] and [`orm_image`] carry the maps the engine
-/// paints beside it, and since engine #45 both renderers consume all three —
-/// the two instruments are looking at the same picture.
+/// paints beside it, and both renderers consume all three — the two instruments
+/// are looking at the same picture.
 ///
 /// `Rgba8UnormSrgb`, because the engine's albedo is sRGB-encoded and a texture
 /// declared linear renders a body noticeably pale.
@@ -227,7 +227,7 @@ pub fn atlas_image(map: &symbios_avatar::TextureMap) -> Image {
 /// `Rgba8Unorm`, never sRGB: a normal map is data, and running its bytes
 /// through a colour transfer curve skews every slope toward the surface —
 /// relief that quietly weakens is far harder to notice than relief that is
-/// missing (#22).
+/// missing.
 #[must_use]
 pub fn normal_image(map: &symbios_avatar::TextureMap) -> Image {
     image_of(&map.normal, map, TextureFormat::Rgba8Unorm)

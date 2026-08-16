@@ -14,8 +14,8 @@
 //! engine.
 //!
 //! **A judgement image is never a screenshot of a UI.** The panel hides on a
-//! key, and it never draws at all under `--shot`. What is photographed is a
-//! body, a light and a camera, exactly as before.
+//! key, and it never draws at all under the viewer's `--shot`. What is
+//! photographed is a body, a light and a camera, and nothing else.
 //!
 //! ## What it costs, measured rather than assumed
 //!
@@ -32,7 +32,7 @@
 //!
 //! So an axis cannot drive a rebuild per frame, and skipping the atlas is not
 //! enough on its own — two thirds of what is left is the skull being measured
-//! twice, which [`symbios_avatar`] issue #89 covers and this crate must not.
+//! twice, which is the engine's own problem to solve and not this crate's.
 //!
 //! What follows is [`DRAFT_ATLAS`]: while an axis is moving, rebuild at 256 as
 //! often as frames allow, which is about fourteen a second; once nothing has
@@ -49,7 +49,7 @@
 //! in thousandths and has no floats at all, so a slider reading 0.4567 would be
 //! showing a number no record can hold.
 //!
-//! ## Hosting the sections in another app (#231)
+//! ## Hosting the sections in another app
 //!
 //! The panel is composed from public per-section functions, and those — not
 //! the panel — are the reuse surface. A host with its own window, theme, undo
@@ -265,14 +265,13 @@ impl RecordEditor {
 
     /// Whether the body on screen is the finished one this record describes.
     ///
-    /// **What a host must wait for before photographing anything** (#24). A
-    /// body arrives in stages — nothing at all, then a [`DRAFT_ATLAS`]
+    /// **What a host must wait for before photographing anything.** A body
+    /// arrives in stages — nothing at all, then a [`DRAFT_ATLAS`]
     /// stand-in, then the full build — and every stage before the last is a
     /// body somebody would draw the wrong conclusion from: the draft's
     /// complexion is not the complexion that ships, and an empty frame looks
-    /// exactly like a record that failed to build. A `--shot` fired on a frame
-    /// count alone photographed a scene with no hair, eyes or cloth in it,
-    /// which is the bug this answers.
+    /// exactly like a record that failed to build. A capture fired on a frame
+    /// count alone will photograph a scene with no hair, eyes or cloth in it.
     ///
     /// False while an edit is outstanding, while a build is on the pool, while
     /// a draft stands in, and before the first body has ever landed. Note that
@@ -319,7 +318,7 @@ impl Plugin for RecordEditorPlugin {
     }
 }
 
-/// A build in flight on the compute pool (#28).
+/// A build in flight on the compute pool.
 ///
 /// At most one exists at a time: a second build of a record that is still
 /// moving would only be stale sooner. Edits made while it runs mark the editor
@@ -340,12 +339,11 @@ pub struct BuildJob {
 /// about a texture nobody will see.
 ///
 /// **The build itself runs on the compute pool, and the frame never waits for
-/// it** (#28 — the deferred-rebuild idiom the overlands editors settled on:
-/// the panel writes the record, and the expensive consequence lands when it
-/// lands). A draft was 68 ms and the settle build 277 ms of main-thread stall
-/// per edit before this; now the system spawns the build, polls, and swaps the
-/// body in on the frame the task finishes. Timing is measured *inside* the
-/// task so the readout reports the build, not the queue.
+/// it.** The panel writes the record, and the expensive consequence lands when
+/// it lands: on the main thread a draft would be 68 ms of stall per edit and the
+/// settle build 277 ms. The system spawns the build, polls, and swaps the body
+/// in on the frame the task finishes. Timing is measured *inside* the task so
+/// the readout reports the build, not the queue.
 ///
 /// It builds and draws the body itself rather than asking [`SpawnAvatar`] for
 /// one, so the timing instrument stays honest for the same reason it always
@@ -632,11 +630,9 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
 
 /// The name to show a category by.
 ///
-/// Eight since symbios-avatar #53 split the old `features` bit, which had come
-/// to mean head shape, complexion, hair and hand size all at once. The three
-/// that came out of it are the ones a creator most often wants to hold apart —
-/// a face kept while its colouring is rolled — so they read as their own
-/// toggles here rather than as one.
+/// Eight of them, and head shape, complexion and hair are three rather than one
+/// because they are what a creator most often wants to hold apart — a face kept
+/// while its colouring is rolled.
 #[must_use]
 pub fn category_name(category: Category) -> &'static str {
     match category {
@@ -663,7 +659,7 @@ pub fn category_name(category: Category) -> &'static str {
 /// range; `bodyFat` is a real fraction of body mass over its own bounds and
 /// `age` is a count of whole years. Handing either the ±3 treatment would offer
 /// a negative body-fat fraction and a two-hundred-year-old, which is why the
-/// engine does not stretch them (symbios-avatar #162).
+/// engine does not stretch them.
 pub fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     use symbios_avatar::plan::{AGE_RANGE, BODY_FAT_RANGE};
 
@@ -876,7 +872,7 @@ pub fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     changed
 }
 
-/// Hair, which is five regions rather than one head (symbios-avatar #202).
+/// Hair, which is five follicle regions rather than one head.
 ///
 /// **One section per follicle region, each carrying both layers**, because that
 /// is what the record now says: a region has a base style out of its own
@@ -978,21 +974,20 @@ fn tress<S: symbios_avatar::hair::Style>(
 
 /// One hair colour: the engine's own natural ramp, and a free picker beside it.
 ///
-/// **Both, and the pair is the point** (symbios-avatar #202). The melanin ramp
+/// **Both, and the pair is the point.** The melanin ramp
 /// is what a natural head of hair sits on and it is drawn here from the engine's
 /// own function rather than from a palette invented in this crate, so a swatch
 /// cannot drift from the hair it paints — the same argument the complexion row
 /// makes. But the ramp's light end is a warm blonde, so it cannot say grey, and
 /// it cannot say green either; the record stores free sRGB precisely so that it
 /// can, and a panel offering only the ramp would put half the record out of
-/// reach the way the `0..=1` sliders once put half the hair axes out of reach
-/// (#9).
+/// reach the way a `0..=1` slider puts an axis with a wider range out of reach.
 ///
 /// **The picker is sRGB on both sides.** `Color32` is sRGB bytes and the record
 /// is sRGB thousandths, so nothing here converts — which is the whole trap this
-/// crate has already paid for once in the other direction (#14, where copying
-/// the engine's sRGB vertex colours into a linear channel drew dark hair as milk
-/// chocolate). The one loss is precision: a byte is coarser than a thousandth,
+/// crate has already paid for once in the other direction, where copying the
+/// engine's sRGB vertex colours into a linear channel drew dark hair as milk
+/// chocolate. The one loss is precision: a byte is coarser than a thousandth,
 /// so a colour that has been through the picker lands on a 1/255 step. It is
 /// only written back when the picker actually changed, so a colour nobody
 /// touches keeps the value the record was loaded with.
@@ -1008,8 +1003,8 @@ fn hair_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
 
 /// One iris colour: the engine's pigment ramp, and a free picker beside it.
 ///
-/// The same pair [`hair_colour`] offers, for the same two reasons
-/// (symbios-avatar #229): the ramp is drawn from the engine's own
+/// The same pair [`hair_colour`] offers, for the same two reasons: the ramp is
+/// drawn from the engine's own
 /// `iris_pigment` so a swatch cannot drift from the iris a roll paints, and the
 /// free picker reaches the fantasy colours the record's channels deliberately
 /// leave open.
@@ -1271,7 +1266,7 @@ pub fn signed(ui: &mut egui::Ui, name: &str, value: &mut f32) -> bool {
     axis(ui, name, value, -1.0..=1.0)
 }
 
-/// A shape axis over its exploration envelope (symbios-avatar #160).
+/// A shape axis over its exploration envelope.
 ///
 /// The range comes from the engine's own [`explore_range`] over the axis's
 /// default and conservative span, so the sliders and `sanitize` cannot
@@ -1300,12 +1295,12 @@ pub fn explored(
 /// **Two labels here are doing real work, and both name traps this crate has
 /// fallen into more than once.** The radii are the CAGE's, and subdivision
 /// pulls the rendered surface inside them — comparing one of these to a
-/// measured body is the error #106 spent a session on, where a shoulder was
+/// measured body is the error that once cost a session, where a shoulder was
 /// pushed out to clear a ribcage half again wider than the visible one. And the
 /// fractions are of NOMINAL stature, not of the built body's height, because
 /// a fraction of rendered height silently changes whenever anything moves the
-/// head — which is how every band figure on #106 went stale without a
-/// coefficient being touched.
+/// head — which is how a band figure goes stale without a coefficient being
+/// touched.
 ///
 /// Costs nothing while the header is shut: egui only runs the body of an open
 /// one, and the skeleton is rebuilt inside it rather than cached, so what is
