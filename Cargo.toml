@@ -39,7 +39,7 @@ bevy = "0.18"
 # This crate exists to be a *second instrument* on the same body: if the two
 # ever read a different version of the engine they stop being comparable, which
 # is the one thing it is here to do.
-symbios-avatar = { path = "../symbios-avatar" }
+symbios-avatar = "0.1"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body has been a slow loop — change a constant,
