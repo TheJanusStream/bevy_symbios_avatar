@@ -2135,12 +2135,28 @@ mod tests {
         app
     }
 
+    /// How long to wait on the whole ladder before calling it a hang.
+    ///
+    /// Wall clock, not a tick count, and the distinction is the bug this test
+    /// had. What it waits for is two real avatar builds on the compute pool,
+    /// which take seconds; a tick count measures how fast an almost-empty
+    /// schedule spins, which has nothing to do with them. Worse, the two move
+    /// in opposite directions — a loaded machine makes each tick slower and so
+    /// hands the guard MORE real time, so the old count passed under load and
+    /// failed on an idle box.
+    ///
+    /// Sized for the slowest machine this is expected to run on rather than for
+    /// this one: a two-core CI runner is far from the box a developer sees, and
+    /// a stall guard that trips on a slow runner is a flake, not a test. Here it
+    /// finishes in about two seconds.
+    const LADDER_DEADLINE: Duration = Duration::from_mins(2);
+
     #[test]
     fn nothing_settles_until_the_full_body_is_the_one_on_screen() {
-        // The regression behind #24: a `--shot` counted frames from startup and
-        // photographed a scene that was still arriving. Frames are not the unit
-        // — a body lands off the compute pool when it lands — so this walks the
-        // real pipeline and holds `settled` to its word at every stage of it.
+        // A capture that counts frames from startup photographs a scene that is
+        // still arriving. Frames are not the unit — a body lands off the compute
+        // pool when it lands — so this walks the real pipeline and holds
+        // `settled` to its word at every stage of it.
         let mut app = building_app();
         assert!(
             !app.world().resource::<RecordEditor>().settled(),
@@ -2148,11 +2164,10 @@ mod tests {
         );
 
         let full = AvatarConfig::default().atlas;
+        let started = Instant::now();
         let mut saw_draft = false;
-        let mut ticks = 0;
         loop {
             app.update();
-            ticks += 1;
             let editor = app.world().resource::<RecordEditor>();
             let settled = editor.settled();
             let last_build = editor.last_build();
@@ -2178,12 +2193,52 @@ mod tests {
                 }
             }
             // The draft, the 250 ms settle and the full build are all real work
-            // on a real pool; this is a stall guard, not a schedule.
-            assert!(ticks < 100_000, "no full body after {ticks} ticks");
+            // on a real pool; this is a stall guard, not a schedule. It reports
+            // the rung it stopped on, because "no full body" alone cannot tell a
+            // build that hung from a record that never built at all.
+            assert!(
+                started.elapsed() < LADDER_DEADLINE,
+                "no full body after {:?}, stuck on {}",
+                started.elapsed(),
+                match last_build {
+                    None => String::from("no build at all"),
+                    Some((took, atlas)) => format!("a {atlas} build that took {took:?}"),
+                }
+            );
         }
         // Not incidental — it is the whole reason `settled` cannot just ask
         // whether a body exists. If the ladder ever stops going up through a
         // draft, this assertion is the thing that says so.
         assert!(saw_draft, "the draft rung of the ladder never appeared");
+    }
+
+    #[test]
+    fn a_draft_standing_in_is_never_settled() {
+        // The one rung the walk above cannot be counted on to land on, and the
+        // only one where `settled`'s `draft` term is what answers.
+        //
+        // A draft stands in with nothing on the pool for the stretch between it
+        // landing and the settle clock reaching `SETTLE` — in the viewer about
+        // 180 ms, and exactly the window a capture can fire in. Whether the walk
+        // ever observes it depends on whether the draft build outran the settle,
+        // which is a fact about the machine and not about this crate: on the box
+        // this was written on it never does, so every frame the walk sees at the
+        // draft rung is held unsettled by `building` instead. That leaves the
+        // term that matters resting on a coincidence of timing. Set the flags
+        // directly and it rests on nothing.
+        let mut editor = RecordEditor {
+            dirty: false,
+            building: false,
+            draft: true,
+            last_build: Some((Duration::from_millis(68), DRAFT_ATLAS)),
+            ..Default::default()
+        };
+        assert!(!editor.settled(), "settled while a draft stood in");
+
+        // The same editor, one full build later. Only `draft` moved, so only
+        // `draft` can be what changed the answer.
+        editor.draft = false;
+        editor.last_build = Some((Duration::from_millis(277), AvatarConfig::default().atlas));
+        assert!(editor.settled(), "the full body landed and nothing settled");
     }
 }
