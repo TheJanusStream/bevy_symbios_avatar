@@ -742,6 +742,30 @@ pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
                     0.0,
                     (-1.0, 1.0),
                 );
+                // The chest's three (symbios-avatar #273), and they are here
+                // rather than with the composites for `head_breadth`'s reason:
+                // this block is the per-region OFFSETS, and how much chest a
+                // body has by default is `femininity`, `mass` and `bodyFat`'s
+                // to say. **A chest is invisible on a dressed body** — the skin
+                // under the clothes is not emitted — so a creator dragging
+                // these with an outfit on sees nothing until the garment
+                // catches up, which is worth knowing before it is reported as
+                // a bug.
+                changed |= explored(
+                    ui,
+                    "chest volume",
+                    &mut params.chest_volume,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+                changed |= explored(
+                    ui,
+                    "chest projection",
+                    &mut params.chest_projection,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+                changed |= explored(ui, "chest lift", &mut params.chest_lift, 0.0, (-1.0, 1.0));
             }
             Archetype::Quadruped(params) => {
                 let stature = symbios_avatar::QuadrupedParams::height_envelope();
@@ -1607,6 +1631,9 @@ mod tests {
                 ("head_breadth", p.head_breadth),
                 ("face_length", p.face_length),
                 ("extremity_size", p.extremity_size),
+                ("chest_volume", p.chest_volume),
+                ("chest_projection", p.chest_projection),
+                ("chest_lift", p.chest_lift),
             ],
             Archetype::Quadruped(p) => vec![
                 ("height", p.height),
@@ -1867,6 +1894,9 @@ mod tests {
             params.head_breadth = 0.654_32;
             params.face_length = -0.543_21;
             params.extremity_size = -0.999_99;
+            params.chest_volume = 0.234_56;
+            params.chest_projection = -0.876_54;
+            params.chest_lift = 0.432_10;
         }
         record.composites.femininity = 0.371_53;
         record.composites.mass = -0.628_47;
@@ -1963,10 +1993,15 @@ mod tests {
         // guard has caught one — the axis had been dead since the painted hair
         // layer replaced what it drew, and the slider that wrote it went on
         // being drawn.
+        //
+        // **115 -> 118** (symbios-avatar #273): the chest's three. The
+        // addition direction, and the guard caught it the way it is meant to —
+        // the sliders were written and this said so before anything shipped
+        // with a record axis no panel could reach.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 115,
+            listed, 118,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"

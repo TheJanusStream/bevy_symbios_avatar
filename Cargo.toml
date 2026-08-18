@@ -101,3 +101,12 @@ module_name_repetitions = "allow"
 # A Bevy system takes its parameters by value; that is the contract, not an
 # oversight, and there is no way to write one that satisfies this lint.
 needless_pass_by_value = "allow"
+
+# TEMPORARY, and it must not be committed as it stands (symbios-avatar #273).
+# The chest axes this build's editor panel reaches — chestVolume,
+# chestProjection, chestLift — are not in symbios-avatar 0.1.0 on crates.io yet,
+# so the panel cannot compile against the published crate. Replace this with a
+# version bump on the dependency above the moment the engine ships them; leaving
+# it in points a released crate at a directory nobody else has.
+[patch.crates-io]
+symbios-avatar = { path = "../symbios-avatar" }
