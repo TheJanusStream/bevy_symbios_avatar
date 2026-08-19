@@ -112,17 +112,3 @@ module_name_repetitions = "allow"
 # A Bevy system takes its parameters by value; that is the contract, not an
 # oversight, and there is no way to write one that satisfies this lint.
 needless_pass_by_value = "allow"
-
-# **Temporary, and it comes out at the 0.3.0 release** (#36). The editor panel
-# reaches `chestSpacing` and `chestFullness`, which exist in the sibling working
-# tree and in no published version, so this crate does not build against
-# crates.io until that release goes out. It built here and nowhere else last
-# time too (#280) — CI is red for exactly this reason and turning it green is
-# the release, not a fix.
-#
-# **A patch that stops matching the requirement above is IGNORED, silently**,
-# which is how a gate goes green against a stale engine: when `symbios-avatar`
-# is bumped to "0.3" here, check that `cargo tree -p symbios-avatar` still says
-# the path and not a registry version.
-[patch.crates-io]
-symbios-avatar = { path = "../symbios-avatar" }
