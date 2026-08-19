@@ -53,9 +53,12 @@ bevy = "0.18"
 #
 # **0.3 rather than 0.2 since `chestSpacing` and `chestFullness` landed there**
 # (#36), which is the same reason one line up with the axes renamed — and it is
-# breaking for a 0.x crate, so this crate's own version moves with it. Held down
-# by the `[patch.crates-io]` block at the foot of this file until that release is
-# on crates.io; take it out then.
+# breaking for a 0.x crate, so this crate's own version moves with it. It was
+# held down by a `[patch.crates-io]` block again while 0.3.0 was unpublished,
+# and that block is gone: `cargo tree -p symbios-avatar` reads
+# `symbios-avatar v0.3.0` with no path after it, which is the check that
+# matters, because a patch that stops matching its requirement is dropped in
+# SILENCE rather than reported.
 symbios-avatar = "0.3"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
