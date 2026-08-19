@@ -29,8 +29,8 @@ GPU and a frame comes back.
 ```toml
 [dependencies]
 bevy = "0.18"
-bevy_symbios_avatar = "0.2"
-symbios-avatar = "0.2"   # the record and archetype types you build bodies from
+bevy_symbios_avatar = "0.3"
+symbios-avatar = "0.3"   # the record and archetype types you build bodies from
 ```
 
 ### Features

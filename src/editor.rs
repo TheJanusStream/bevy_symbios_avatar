@@ -742,7 +742,7 @@ pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
                     0.0,
                     (-1.0, 1.0),
                 );
-                // The chest's three (symbios-avatar #273), and they are here
+                // The chest's five (symbios-avatar #273 and #289), and they are here
                 // rather than with the composites for `head_breadth`'s reason:
                 // this block is the per-region OFFSETS, and how much chest a
                 // body has by default is `femininity`, `mass` and `bodyFat`'s
@@ -766,6 +766,30 @@ pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
                     (-1.0, 1.0),
                 );
                 changed |= explored(ui, "chest lift", &mut params.chest_lift, 0.0, (-1.0, 1.0));
+                // The two milestone #9 added (symbios-avatar #289): where the
+                // chest's volume sits rather than how much of it there is.
+                // **Both are placements, so both are invisible on a flat
+                // chest** — the engine scales the pair by the projection it
+                // has, which is `femininity`, `mass` and `bodyFat`'s to say —
+                // and `spacing` has a rail that moves with the body: a lobe may
+                // come no closer to the sternum than 1.5 of its own spread, so
+                // on a soft body the slider stops delivering before it stops
+                // moving. That is the engine's `SPACING_FLOOR` and not a
+                // clamp this panel can show.
+                changed |= explored(
+                    ui,
+                    "chest spacing",
+                    &mut params.chest_spacing,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+                changed |= explored(
+                    ui,
+                    "chest fullness",
+                    &mut params.chest_fullness,
+                    0.0,
+                    (-1.0, 1.0),
+                );
             }
             Archetype::Quadruped(params) => {
                 let stature = symbios_avatar::QuadrupedParams::height_envelope();
@@ -1634,6 +1658,8 @@ mod tests {
                 ("chest_volume", p.chest_volume),
                 ("chest_projection", p.chest_projection),
                 ("chest_lift", p.chest_lift),
+                ("chest_spacing", p.chest_spacing),
+                ("chest_fullness", p.chest_fullness),
             ],
             Archetype::Quadruped(p) => vec![
                 ("height", p.height),
@@ -1897,6 +1923,8 @@ mod tests {
             params.chest_volume = 0.234_56;
             params.chest_projection = -0.876_54;
             params.chest_lift = 0.432_10;
+            params.chest_spacing = -0.567_89;
+            params.chest_fullness = 0.678_90;
         }
         record.composites.femininity = 0.371_53;
         record.composites.mass = -0.628_47;
@@ -1998,10 +2026,16 @@ mod tests {
         // addition direction, and the guard caught it the way it is meant to —
         // the sliders were written and this said so before anything shipped
         // with a record axis no panel could reach.
+        //
+        // **118 -> 120** (symbios-avatar #289): `chestSpacing` and
+        // `chestFullness`, milestone #9's last two. The addition direction
+        // again, and it is the standing arrangement rather than a catch this
+        // time — every engine record-schema change carries an editor slice by
+        // default, so the count and the sliders moved together.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 118,
+            listed, 120,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"
