@@ -262,7 +262,7 @@ fn stage(
     commands.spawn((
         DirectionalLight {
             illuminance: 9_000.0,
-            shadows_enabled: true,
+            shadow_maps_enabled: true,
             ..default()
         },
         Transform::from_xyz(3.0, 6.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -575,7 +575,7 @@ fn frame_on_body(
 /// - **scroll-zoom stays blocked while a window wants the pointer**, because
 ///   the wheel is how egui scrolls its own panels
 /// - the gate looks at the **previous frame as well as this one**, because
-///   `wants_pointer_input` flips true one frame late on a click into a window —
+///   `egui_wants_pointer_input` flips true one frame late on a click into a window —
 ///   without that, the first frame of every click on a slider also orbits
 fn gate_camera_on_gui(
     mut contexts: Query<&mut bevy_egui::EguiContext>,
@@ -586,7 +586,7 @@ fn gate_camera_on_gui(
     let mut wants = false;
     for mut context in &mut contexts {
         let context = context.get_mut();
-        wants |= context.wants_pointer_input() || context.wants_keyboard_input();
+        wants |= context.egui_wants_pointer_input() || context.egui_wants_keyboard_input();
     }
     let enable = mouse.any_pressed([MouseButton::Right, MouseButton::Middle])
         || (!wants && !*wanted_last_frame);
@@ -682,7 +682,7 @@ fn shortcuts(
 fn typing(contexts: &mut bevy_egui::EguiContexts) -> bool {
     contexts
         .ctx_mut()
-        .is_ok_and(|context| context.wants_keyboard_input())
+        .is_ok_and(|context| context.egui_wants_keyboard_input())
 }
 
 /// Whether a screenshot has been asked for, and how long to wait for it.

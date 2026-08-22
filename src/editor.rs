@@ -472,9 +472,22 @@ pub fn record_editor_panel(
     // not one vertex, and rebuilding for it would spend 68 ms per keystroke.
     let mut rebuild = false;
     let mut restate = false;
-    egui::SidePanel::left("record")
-        .default_width(320.0)
-        .show(ctx, |ui| {
+    // egui 0.35 unified SidePanel/TopBottomPanel into `Panel`, and panels now
+    // show into a `Ui` rather than a `Context`. A top-level panel gets its Ui
+    // from a screen-sized background layer, per bevy_egui 0.41's side_panel
+    // example. `default_size` is the OUTER width (frame margin included) where
+    // `default_width` was inner — 320 is kept; the few pixels of drift are
+    // invisible in a resizable panel.
+    let mut viewport_ui = egui::Ui::new(
+        ctx.clone(),
+        "record_viewport".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
+    egui::Panel::left("record")
+        .default_size(320.0)
+        .show(&mut viewport_ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let (built, noted) = identity(ui, &mut editor.record);
                 rebuild |= built;

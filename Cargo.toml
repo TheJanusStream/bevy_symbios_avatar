@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -39,7 +39,7 @@ name = "viewer"
 required-features = ["editor", "builtin-clips"]
 
 [dependencies]
-bevy = "0.18"
+bevy = "0.19"
 
 # Pinned to one minor line rather than tracked loosely. This crate exists to be
 # a *second instrument* on the same body: if the two ever read a different
@@ -59,7 +59,7 @@ bevy = "0.18"
 # `symbios-avatar v0.3.0` with no path after it, which is the check that
 # matters, because a patch that stops matching its requirement is dropped in
 # SILENCE rather than reported.
-symbios-avatar = "0.3"
+symbios-avatar = "0.4"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
@@ -68,7 +68,7 @@ symbios-avatar = "0.3"
 #
 # Pinned to the pair known to work against Bevy 0.18 rather than to whatever is
 # latest, which is how the sibling project that uses it daily runs.
-bevy_egui = { version = "0.39", optional = true }
+bevy_egui = { version = "0.41", optional = true }
 # Emitting the record is the half that makes the panel worth more than a set of
 # sliders, and JSON is what a PDS holds. The engine already depends on this at
 # the same version, so it is not a new crate in the tree.
@@ -85,7 +85,7 @@ serde_json = { version = "1.0", optional = true }
 # privately scheduled, so a right-drag died the moment it crossed a GUI window.
 # `gate_camera_on_gui` in the example owns the equivalent, with a held-button
 # override.
-bevy_panorbit_camera = "0.34"
+bevy_panorbit_camera = "0.35"
 
 # The engine and the maths under it at full optimisation even in a debug build.
 # Building a body is real numeric work — subdivision, skinning, a megapixel atlas

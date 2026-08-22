@@ -24,15 +24,6 @@ judged against — one to three skinned draws, thirty thousand triangles, a WebG
 feature set — is a number in a document until something uploads the meshes to a
 GPU and a frame comes back.
 
-## Installing
-
-```toml
-[dependencies]
-bevy = "0.18"
-bevy_symbios_avatar = "0.3"
-symbios-avatar = "0.3"   # the record and archetype types you build bodies from
-```
-
 ### Features
 
 | Feature | Default | What it carries |
@@ -202,11 +193,6 @@ wants the pointer, with one exception: a **held** right or middle button always
 drives the camera, so an orbit never dies because the drag crossed a window. (The
 camera crate ships a `bevy_egui` feature that would do this; it is off on purpose
 — its gate is all-or-nothing and kills exactly that case.)
-
-## Versions
-
-Bevy 0.18, `bevy_egui` 0.39, `symbios-avatar` 0.1 — the set known to work
-together, rather than whatever is latest. Rust edition 2024.
 
 ## Licence
 
