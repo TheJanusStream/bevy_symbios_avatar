@@ -41,6 +41,41 @@
 //! cargo run --release -F builtin-clips --example viewer -- --bare       # no windows at all
 //! ```
 //!
+//! **Strips** — the review unit of the engine's milestone #11 (its #325): one
+//! stitched contact sheet, N frames across one gait cycle from a fixed side
+//! camera, the procedural walk on the top row and a reference clip at the same
+//! phases under it, matched by cycle fraction. One image rather than N files,
+//! because the loop lives on one-glance comparison.
+//!
+//! ```text
+//! cargo run --release -F builtin-clips --example viewer -- --strip walk.png
+//! cargo run --release -F builtin-clips --example viewer -- --strip fast.png --pace 1.8
+//! cargo run --release -F builtin-clips --example viewer -- --strip bare.png --norelevel
+//! cargo run --release -F builtin-clips --example viewer -- --strip step.png --accel 1.0:1.8
+//! cargo run --release -F builtin-clips --example viewer -- --strip run.png --gait running --clip Sprint
+//! ```
+//!
+//! - `--frames N` sets the columns (default 8).
+//! - `--norelevel` adds a row with the head-level bargain off (the engine's
+//!   `Walk::head_level` ablation), so the lean's share of a silhouette can be
+//!   split from the crane's.
+//! - The reference row is the baked `Walk` unless `--clip` names another;
+//!   `--noref` drops it. In strip mode `--clip` names the REFERENCE row and
+//!   the procedural rows still render — unlike the live viewer, where a clip
+//!   replaces the gait.
+//! - `--align F` shifts the reference row's phase origin by `F` of a cycle:
+//!   a clip's frame 0 is whatever its author exported first, and until the two
+//!   origins are matched every column compares two different moments of the
+//!   stride. Found once per clip by eye; **`Walk` wants `--align 0.5`**.
+//! - `--accel from:to` makes it an acceleration strip: columns become wall
+//!   clock (`--span` seconds wide, default 1.0) and the pace steps at the
+//!   middle over `--ramp` seconds (default 0.016, the consuming app's measured
+//!   chassis profile) — because a term that follows pace snaps when pace
+//!   steps, and no steady-cycle frame can show a snap. Gait rows only; `--pace`
+//!   is ignored there.
+//! - `--yaw` overrides the strip's default near-side camera; `--seed`,
+//!   `--gait`, `--cadence`, `--mane` and the rest apply as ever.
+//!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints
 //! a megapixel atlas, and debug spends about half a minute on that.
 //!
@@ -86,7 +121,8 @@ use bevy_egui::EguiPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind, floor_tilt};
 use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
-use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, Clips};
+use bevy_symbios_avatar::strips::{AccelClock, PaceStep, Row, Sample, StripPlan, stitch};
+use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, AvatarSystems, Clips};
 use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
 
 /// How far the camera starts from the body, as a multiple of its longest side.
@@ -124,6 +160,25 @@ const SETTLE: u32 = 12;
 const GIVE_UP: u32 = 600;
 /// How many frames to let a window disappear in before capturing.
 const CLEAR: u32 = 2;
+/// The strip camera's default yaw, in radians: a near-side view.
+///
+/// A stride is almost entirely forward and back, so head-on it reads as
+/// nothing — and the hunch the strips exist to diagnose is a trunk pitch and a
+/// chin jut, which live in the profile. A few degrees short of square keeps
+/// the far side's limbs visible enough to place the phase.
+const STRIP_YAW: f32 = 1.3;
+/// How many frames to let a strip sample's pose render before capturing it.
+///
+/// The animator is written before the crate's animate set runs, so the pose is
+/// on the body the same frame — what is being waited out is the capture
+/// pipeline, which reads back across frames.
+const STRIP_APPLY: u32 = 3;
+/// How many frames after a strip frame's file appears before reading it back.
+///
+/// The file EXISTING is when `--shot` quits; a reader has to care that the
+/// writer may still be mid-write on the task pool, and a truncated PNG fails
+/// the whole sheet.
+const STRIP_SEAL: u32 = 5;
 
 /// Whether a bare flag was passed on the command line.
 fn flag(name: &str) -> bool {
@@ -154,6 +209,15 @@ fn main() {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "symbios avatar".into(),
+                    // A strip cell is one body standing in a portrait frame,
+                    // and the window is the capture unit — so the window IS
+                    // the cell, and a sheet of default-sized windows would be
+                    // mostly floor.
+                    resolution: if word("--strip").is_some() {
+                        (480, 800).into()
+                    } else {
+                        default()
+                    },
                     ..default()
                 }),
                 ..default()
@@ -167,11 +231,16 @@ fn main() {
         .insert_resource(starting_editor())
         .insert_resource(starting_animator())
         .init_resource::<Shot>()
-        .add_systems(Startup, (stage, pick_clip))
+        // Chained: the strip plan needs to know which clip `--clip` resolved
+        // to, so it must build after the picker has run.
+        .add_systems(Startup, (stage, pick_clip, plan_strip).chain())
         .add_systems(
             Update,
             (frame_on_body, shortcuts, shoot, tilt_floor, turn_body),
         )
+        // Before the animate set, so the sample a frame captures is the sample
+        // that was applied this frame rather than last frame's.
+        .add_systems(Update, strip.before(AvatarSystems::Animate))
         .add_systems(
             PostUpdate,
             // Before the crate reads its input for the frame, which is what
@@ -300,7 +369,7 @@ fn stage(
             // reads far stiffer than the software renderer's sheet, which
             // includes a side view. That difference is the camera, not the
             // body.
-            yaw: Some(value("--yaw").unwrap_or(0.0)),
+            yaw: Some(value("--yaw").unwrap_or(if flag("--strip") { STRIP_YAW } else { 0.0 })),
             pitch: Some(START_PITCH),
             // A body is a metre or two across and the ground plane is twelve.
             // Without these the wheel zooms straight through a head, or out
@@ -461,6 +530,18 @@ fn starting_animator() -> Animator {
             })
         });
     animator.layered = flag("--layer");
+    // A strip is a set of stills taken by a machine, so everything stochastic
+    // is held: a blink caught in one cell of a sheet reads as a defect, a
+    // wandering gaze makes two columns incomparable, and a source transition
+    // smoothed by the blend would put the previous sample's pose into this
+    // sample's capture. The plan drives cycle, pace and source per frame.
+    if word("--strip").is_some() {
+        animator.walking = true;
+        animator.scrub = true;
+        animator.blinking = false;
+        animator.tracking = false;
+        animator.blend = 0.0;
+    }
     animator
 }
 
@@ -492,7 +573,7 @@ fn pick_clip(clips: Res<Clips>, mut animator: ResMut<Animator>) {
 /// under `--shot` they never open rather than being hidden at the moment of
 /// capture. `--bare` is the same promise for a live session.
 fn windows_wanted() -> bool {
-    !flag("--bare") && !flag("--shot")
+    !flag("--bare") && !flag("--shot") && !flag("--strip")
 }
 
 /// Frames the camera on the body, once, and again when `F` asks.
@@ -799,4 +880,300 @@ fn shoot(
     commands
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path.clone()));
+}
+
+/// Where the strip capture is, and everything it has decided.
+///
+/// Only inserted under `--strip`, so every strip system is inert in a live
+/// session at the cost of an `Option` in its signature.
+#[derive(Resource)]
+struct StripState {
+    /// Where the stitched sheet goes.
+    out: String,
+    /// Every capture, in order, and the sheet's shape.
+    plan: StripPlan,
+    /// One line per row, printed as the legend beside the finished sheet.
+    legend: Vec<String>,
+    /// The next sample to capture, as an index into the plan.
+    next: usize,
+    /// Where in the capture of one sample the machine is.
+    doing: StripStage,
+    /// Frames spent on the current wait.
+    frames: u32,
+    /// The frame the scene was first seen finished, once it has been.
+    ready: Option<u32>,
+}
+
+/// The strip capture's little machine, one sample at a time.
+enum StripStage {
+    /// Waiting for the body to finish arriving, once, before any capture.
+    Scene,
+    /// A sample has been written onto the animator; letting it render.
+    Apply(u32),
+    /// A screenshot has been asked for; waiting for its file to exist.
+    File,
+    /// The file exists; letting the writer finish before reading it back.
+    Seal(u32),
+}
+
+/// Builds the strip plan from the flags, or does nothing without `--strip`.
+///
+/// A startup system chained after [`pick_clip`], because the reference row is
+/// whatever clip that system resolved. Bad flags are a hard stop with the
+/// reason printed, exactly as an unknown clip is: a strip taken with half the
+/// asked-for rows would be an instrument quietly answering a different
+/// question.
+fn plan_strip(mut commands: Commands, clips: Res<Clips>, animator: Res<Animator>) {
+    let Some(out) = word("--strip") else {
+        return;
+    };
+    if flag("--shot") {
+        eprintln!("--strip and --shot both capture and quit; ask for one");
+        std::process::exit(1);
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a frame count is a small positive integer"
+    )]
+    let frames = value("--frames").unwrap_or(8.0) as usize;
+    if frames < 2 {
+        eprintln!("a strip of {frames} frames cannot show motion; give --frames at least 2");
+        std::process::exit(1);
+    }
+    let ablate = flag("--norelevel");
+
+    let (plan, mut legend) = if let Some(step) = word("--accel") {
+        let Some((from, to)) = step
+            .split_once(':')
+            .and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?)))
+        else {
+            eprintln!("--accel wants from:to, e.g. --accel 1.0:1.8");
+            std::process::exit(1);
+        };
+        if word("--clip").is_some() {
+            eprintln!("an accel strip has no reference row: a baked clip has no pace to step");
+            std::process::exit(1);
+        }
+        let step = PaceStep {
+            from,
+            to,
+            // The consuming app's measured chassis profile: velocity is
+            // assigned, not damped, and a new speed arrives in about 0.016 s.
+            ramp: value("--ramp").unwrap_or(0.016),
+        };
+        let clock = AccelClock {
+            span: value("--span").unwrap_or(1.0),
+            cadence: animator.cadence,
+        };
+        let mut rows = vec![true];
+        if ablate {
+            rows.push(false);
+        }
+        let legend: Vec<String> = rows
+            .iter()
+            .map(|&level| {
+                format!(
+                    "procedural gait, pace {from:.2} stepping to {to:.2} over {:.3}s{}",
+                    step.ramp,
+                    if level {
+                        ""
+                    } else {
+                        ", head-level bargain OFF"
+                    }
+                )
+            })
+            .collect();
+        (StripPlan::accel(&rows, frames, step, clock), legend)
+    } else {
+        let mut rows = vec![Row::Gait { head_level: true }];
+        if ablate {
+            rows.push(Row::Gait { head_level: false });
+        }
+        // The reference row defaults to the baked `Walk` — of the looping
+        // clips it is one of two that close cleanly at the wrap (the engine's
+        // docs/clips.md) — and `--clip` names another. In strip mode a clip is
+        // a REFERENCE ROW rather than the gait's replacement.
+        let reference = (!flag("--noref")).then(|| {
+            animator
+                .clip
+                .or_else(|| clips.0.names().iter().position(|name| *name == "Walk"))
+        });
+        if let Some(Some(index)) = reference {
+            rows.push(Row::Clip {
+                index,
+                // A clip's frame 0 is whatever its author exported first, so
+                // its origin needs shifting onto the gait's own zero — found
+                // once per clip by eye and then passed here.
+                align: value("--align").unwrap_or(0.0),
+            });
+        }
+        let pace = animator.pace;
+        let legend = rows
+            .iter()
+            .map(|row| match *row {
+                Row::Gait { head_level: true } => format!("procedural gait, pace {pace:.2}"),
+                Row::Gait { head_level: false } => {
+                    format!("procedural gait, pace {pace:.2}, head-level bargain OFF")
+                }
+                Row::Clip { index, align } => format!(
+                    "reference clip '{}', origin shifted {align:.2}",
+                    clips.0.names()[index]
+                ),
+            })
+            .collect();
+        (StripPlan::cycle(rows, frames, pace), legend)
+    };
+    legend.insert(0, format!("{} columns, top to bottom:", plan.frames));
+    commands.insert_resource(StripState {
+        out,
+        plan,
+        legend,
+        next: 0,
+        doing: StripStage::Scene,
+        frames: 0,
+        ready: None,
+    });
+}
+
+/// Where sample `at`'s captured frame lives until the sheet is stitched.
+fn strip_frame_path(out: &str, at: usize) -> String {
+    format!("{out}.frame{at:03}.png")
+}
+
+/// Writes one sample of the plan onto the animator.
+///
+/// The plan is the only author of these fields during a strip, which is what
+/// makes a sheet reproducible: nothing a hand could have touched decides what
+/// a cell holds.
+fn hold_sample(animator: &mut Animator, sample: &Sample) {
+    animator.scrub = true;
+    animator.cycle = sample.cycle;
+    animator.pace = sample.pace;
+    animator.head_level = sample.head_level;
+    animator.clip = sample.clip;
+    // A clip row is the clip alone — the honest reference is the import as
+    // baked, not the import fighting the gait. A gait row is the gait alone.
+    animator.walking = sample.clip.is_none();
+    animator.layered = false;
+}
+
+/// Captures every sample of the plan, stitches the sheet, and quits.
+///
+/// The same shape as [`shoot`] — wait for the scene, capture, wait for the
+/// file — run once per sample, with the animator rewritten between captures.
+/// Every capture goes to a fresh path and any leftover file is removed first,
+/// because a capture to a path that already exists may never be written and a
+/// stale frame in a sheet is a lie with a timestamp.
+fn strip(
+    mut commands: Commands,
+    state: Option<ResMut<StripState>>,
+    mut animator: ResMut<Animator>,
+    editor: Res<RecordEditor>,
+    bodies: Query<&AvatarBody>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(mut state) = state else {
+        return;
+    };
+    state.frames += 1;
+    match state.doing {
+        StripStage::Scene => {
+            // The same two conditions `shoot` waits on, for the same reasons:
+            // the editor says the finished body landed, and it is in the world.
+            if state.ready.is_none() && editor.settled() && !bodies.is_empty() {
+                state.ready = Some(state.frames);
+            }
+            let waited = if let Some(at) = state.ready {
+                state.frames - at >= SETTLE
+            } else {
+                if state.frames > GIVE_UP {
+                    eprintln!("no body arrived to take a strip of");
+                    exit.write(AppExit::error());
+                }
+                false
+            };
+            if waited {
+                let sample = state.plan.samples[state.next];
+                hold_sample(&mut animator, &sample);
+                state.doing = StripStage::Apply(STRIP_APPLY);
+            }
+        }
+        StripStage::Apply(left) => {
+            if left > 0 {
+                state.doing = StripStage::Apply(left - 1);
+            } else {
+                let path = strip_frame_path(&state.out, state.next);
+                // A capture quits early on a path that already EXISTS, so a
+                // leftover from a previous run would freeze this sample at
+                // whatever that run held.
+                let _ = std::fs::remove_file(&path);
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(path));
+                state.doing = StripStage::File;
+                state.frames = 0;
+            }
+        }
+        StripStage::File => {
+            if std::path::Path::new(&strip_frame_path(&state.out, state.next)).exists() {
+                state.doing = StripStage::Seal(STRIP_SEAL);
+            } else if state.frames > GIVE_UP {
+                eprintln!("frame {} of the strip never arrived", state.next);
+                exit.write(AppExit::error());
+            }
+        }
+        StripStage::Seal(left) => {
+            if left > 0 {
+                state.doing = StripStage::Seal(left - 1);
+            } else if state.next + 1 == state.plan.samples.len() {
+                match stitch_sheet(&state) {
+                    Ok(()) => {
+                        for line in &state.legend {
+                            println!("{line}");
+                        }
+                        println!("{}", state.out);
+                        exit.write(AppExit::Success);
+                    }
+                    Err(what) => {
+                        eprintln!("could not stitch the sheet: {what}");
+                        exit.write(AppExit::error());
+                    }
+                }
+            } else {
+                state.next += 1;
+                let sample = state.plan.samples[state.next];
+                hold_sample(&mut animator, &sample);
+                state.doing = StripStage::Apply(STRIP_APPLY);
+            }
+        }
+    }
+}
+
+/// Reads every captured frame back, stitches them, writes the sheet, and
+/// removes the frames — which happens only after the write, so a failure
+/// leaves the evidence on disk.
+fn stitch_sheet(state: &StripState) -> Result<(), String> {
+    let frames = (0..state.plan.samples.len())
+        .map(|at| {
+            let path = strip_frame_path(&state.out, at);
+            let decoded = image::open(&path)
+                .map_err(|error| format!("{path}: {error}"))?
+                .to_rgba8();
+            Ok(bevy_symbios_avatar::strips::Frame {
+                width: decoded.width(),
+                height: decoded.height(),
+                pixels: decoded.into_raw(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let sheet = stitch(&frames, state.plan.frames);
+    let out = image::RgbaImage::from_raw(sheet.width, sheet.height, sheet.pixels)
+        .ok_or_else(|| String::from("the stitched buffer does not match its own size"))?;
+    out.save(&state.out)
+        .map_err(|error| format!("{}: {error}", state.out))?;
+    for at in 0..state.plan.samples.len() {
+        let _ = std::fs::remove_file(strip_frame_path(&state.out, at));
+    }
+    Ok(())
 }

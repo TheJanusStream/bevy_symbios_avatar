@@ -235,6 +235,17 @@ pub struct Animator {
     /// what it hides is one answer to one question. A body with neither is the
     /// mannequin a body with neither is.
     pub posture: bool,
+    /// Whether the neck takes the trunk's lean back off to hold the head level.
+    ///
+    /// The engine's own ablation ([`symbios_avatar::Walk::head_level`], its
+    /// #328), surfaced because the strips instrument exists to split the lean's
+    /// contribution to a silhouette from the crane's — the head-level bargain
+    /// bends the neck back by nearly twice the visible lean, and which half of
+    /// the walking hunch lives where cannot be judged while the two are welded
+    /// together. Off is an ablation, not a look; it does nothing while
+    /// [`Animator::posture`] is off, because there is then no lean to bargain
+    /// over.
+    pub head_level: bool,
     /// Whether the feet are solved onto the ground.
     pub footing: bool,
     /// Whether the eyes blink.
@@ -398,6 +409,7 @@ impl Default for Animator {
             leap: None,
             pace: 1.0,
             posture: true,
+            head_level: true,
             footing: true,
             blinking: true,
             closure: 0.0,
@@ -830,6 +842,7 @@ fn walk(
     // and the ankles rolled after that, through `Walk::settle`, further down.
     let walked = Walk {
         posture: animator.posture,
+        head_level: animator.head_level,
         // Only while turning, and only while the postural layer is on. A gaze
         // led down a straight path is a target the head already points at, so
         // switching it on there would cost nothing and say nothing; switching
@@ -1364,8 +1377,7 @@ fn locomotion_section(
         });
     }
     if walking {
-        ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
-        ui.toggle_value(&mut animator.posture, "posture");
+        walking_controls(ui, animator);
     }
     // **The one axis a swim has**, and the whole of what there is to look at:
     // zero treads water and the top of the range is a body swimming flat out.
@@ -1400,6 +1412,28 @@ fn locomotion_section(
                 .fixed_decimals(2),
         );
     }
+}
+
+/// The controls that only mean anything while the gait is walking: its pace,
+/// and the two postural ablations.
+#[cfg(feature = "editor")]
+fn walking_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    ui.add(egui::Slider::new(&mut animator.pace, 0.0..=2.0).text("pace"));
+    ui.horizontal(|ui| {
+        ui.toggle_value(&mut animator.posture, "posture");
+        // The ablation only means anything while the posture layer runs —
+        // with it off there is no lean for the neck to bargain over.
+        ui.add_enabled_ui(animator.posture, |ui| {
+            ui.toggle_value(&mut animator.head_level, "head level")
+                .on_hover_text(
+                    "the neck takes the trunk's lean back off so the body \
+                     looks where it is going; off, the head goes down with \
+                     the trunk — an ablation for judging the hunch, not a \
+                     look",
+                );
+        });
+    });
 }
 
 /// The ground the body meets: the footing solve, its slope, and the readout.

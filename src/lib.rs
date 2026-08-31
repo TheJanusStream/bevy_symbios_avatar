@@ -127,6 +127,7 @@ pub mod convert;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod spawn;
+pub mod strips;
 
 pub use animator::{
     Animator, AnimatorPlugin, Blending, Clips, GaitKind, floor_tilt, ground_normal,

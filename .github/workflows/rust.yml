@@ -15,6 +15,15 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
+            # Reads the pinned version out of rust-toolchain.toml — that file
+            # is the single source of truth, and this action honours it, which
+            # `dtolnay/rust-toolchain@stable` does not: it installs whatever is
+            # newest and ignores the pin. Before this step existed the job ran
+            # the runner's preinstalled stable, so any six-week Rust release
+            # could redden `clippy -D warnings` with no change here.
+            - name: Install Rust Toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+
             # Bevy links against the host's windowing, audio and input
             # libraries, and a bare ubuntu runner carries none of their headers:
             # `wayland-sys` fails in its build script long before any code of
@@ -74,8 +83,12 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            - name: Add the wasm target
-              run: rustup target add wasm32-unknown-unknown
+            # Same pinned toolchain as the build job; the action reads
+            # rust-toolchain.toml and installs the extra target beside it.
+            - name: Install Rust Toolchain
+              uses: actions-rust-lang/setup-rust-toolchain@v1
+              with:
+                  target: wasm32-unknown-unknown
 
             # No system libraries here: `--target wasm32` resolves its own
             # dependency graph, and the windowing and audio crates above are

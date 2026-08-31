@@ -75,6 +75,14 @@ bevy_egui = { version = "0.41", optional = true }
 serde_json = { version = "1.0", optional = true }
 
 [dev-dependencies]
+# The strip capture loop photographs frames through Bevy's own screenshot path
+# and then has to read them back and write one stitched sheet; the stitching
+# itself is pure (`src/strips.rs`), and this is only the PNG in and out of it.
+# Bevy already builds this crate for its own texture loading, so it is not a
+# new crate in the tree; default features off keeps the decoder roster to the
+# one format screenshots come in.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # The viewer example only. The library holds no opinion about the scene a body
 # stands in and that includes the camera, so an orbit camera has no business in
 # its dependency tree — but the example is where a body is actually looked at,
@@ -103,6 +111,20 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.noise]
 opt-level = 3
+
+# **Development block for milestone #11 (Natural walking), deliberately present
+# again.** The strips instrument (#38) needs `Walk::head_level`, an engine
+# ablation added on symbios-avatar #328 and unpublished; the whole milestone
+# iterates on engine gait terms judged through this crate's strips, so the
+# sibling has to be the engine in the build. Remove at the milestone's release
+# cut, after the engine publishes, exactly as #280 and #291 did.
+#
+# THE TRAP, each time: a patch whose version stops matching the requirement
+# above is dropped in SILENCE. The check that matters is `cargo tree -p
+# symbios-avatar` reading `(path)` beside the version while this block exists,
+# and a bare registry version after it is removed.
+[patch.crates-io]
+symbios-avatar = { path = "../symbios-avatar" }
 
 [lints.rust]
 missing_docs = "warn"
