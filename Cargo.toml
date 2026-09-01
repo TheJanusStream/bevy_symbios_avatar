@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -59,7 +59,15 @@ bevy = "0.19"
 # `symbios-avatar v0.3.0` with no path after it, which is the check that
 # matters, because a patch that stops matching its requirement is dropped in
 # SILENCE rather than reported.
-symbios-avatar = "0.4"
+#
+# **0.5 since milestone #11 "Natural walking"** (#41): `Walk::head_level`,
+# `Stride::tuck`, `Walk::settle(&Steps)` (which #40 adopts), `Steps::placed`,
+# `Steps::doubt`, stance-scoped `Steps::straining`, and `Footholds` — breaking
+# again, so this crate's version moves with it again. The milestone's
+# `[patch.crates-io]` block is gone with the cut; the same silence trap
+# applies, and the same check: `cargo tree -p symbios-avatar` must read
+# `v0.5.x` with no `(path)` after it, run AFTER the engine publishes.
+symbios-avatar = "0.5"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
@@ -111,20 +119,6 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.noise]
 opt-level = 3
-
-# **Development block for milestone #11 (Natural walking), deliberately present
-# again.** The strips instrument (#38) needs `Walk::head_level`, an engine
-# ablation added on symbios-avatar #328 and unpublished; the whole milestone
-# iterates on engine gait terms judged through this crate's strips, so the
-# sibling has to be the engine in the build. Remove at the milestone's release
-# cut, after the engine publishes, exactly as #280 and #291 did.
-#
-# THE TRAP, each time: a patch whose version stops matching the requirement
-# above is dropped in SILENCE. The check that matters is `cargo tree -p
-# symbios-avatar` reading `(path)` beside the version while this block exists,
-# and a bare registry version after it is removed.
-[patch.crates-io]
-symbios-avatar = { path = "../symbios-avatar" }
 
 [lints.rust]
 missing_docs = "warn"
