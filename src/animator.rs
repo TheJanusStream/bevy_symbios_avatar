@@ -25,7 +25,7 @@
 use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::{
-    GazeConfig, Idle, IdleConfig, Speed, Target, contacts_during, gaze, gesture,
+    GazeConfig, Idle, IdleConfig, Speed, Steps, Target, contacts_during, gaze, gesture,
 };
 use symbios_avatar::{
     Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
@@ -591,14 +591,14 @@ pub fn drive_avatar_animation(
     for (entity, body, blending) in &mut bodies {
         let rig = &body.avatar.rig;
         let mut pose = Pose::rest(rig);
-        let mut stance = Vec::new();
+        let mut steps = Steps::default();
         // Returned rather than kept local so the ankles can roll AFTER the
         // plant: the plant lays every sole flat and a roll applied before it is
         // simply levelled away.
         // A leap replaces the walk rather than layering over it: a body cannot
         // be mid-stride and mid-air at once, and pretending otherwise is how a
         // jump ends up with a walk cycle still running underneath it.
-        let walking = travelling(rig, &animator, gaiting, &mut pose, &mut stance);
+        let walking = travelling(rig, &animator, gaiting, &mut pose, &mut steps);
         // **A body with nothing else to do stands and breathes** (engine #246).
         // Only when nothing else is driving the legs: an idle is what a body
         // does INSTEAD of walking or leaping, not a layer over them, and its
@@ -613,7 +613,7 @@ pub fn drive_avatar_animation(
             && walking.is_none()
             && animator.leap.is_none()
             && animator.swim.is_none())
-        .then(|| standing(rig, &mut animator, &mut pose, delta, &mut stance));
+        .then(|| standing(rig, &mut animator, &mut pose, delta, &mut steps));
 
         let aimed = gesturing(rig, &animator, &mut pose);
         if let Some(clip) = clip {
@@ -635,8 +635,11 @@ pub fn drive_avatar_animation(
             // why it takes the time rather than the pose — the pose above has
             // had its root travel taken out and a planted foot in it is sliding
             // backwards at walking pace.
-            if stance.is_empty() {
-                stance = contacts_during(rig, clip, animator.cycle * clip.duration());
+            if steps.stance.is_empty() {
+                // Only the stance list: a clip owns the legs it moves, so the
+                // tail's swing re-aim (engine #265) must stay out of its way,
+                // and an empty `placed` is exactly how it does.
+                steps.stance = contacts_during(rig, clip, animator.cycle * clip.duration());
             }
         }
 
@@ -649,7 +652,7 @@ pub fn drive_avatar_animation(
         // Runs only when a gait is driving: a clip carries its own ankle motion
         // and rolling on top of authored feet would fight it.
         if let Some((gait, stride)) = &walking {
-            let walked = settle(rig, &animator, &mut pose, gait, stride, &stance);
+            let walked = settle(rig, &animator, &mut pose, gait, stride, &steps);
             // Through `bypass_change_detection`, because these are a readout
             // and not an instruction: writing them through the `ResMut` would
             // mark the resource changed every frame and defeat the still-body
@@ -823,7 +826,7 @@ fn walk(
     rig: &symbios_avatar::Rig,
     animator: &Animator,
     pose: &mut Pose,
-    stance: &mut Vec<symbios_avatar::Limb>,
+    steps: &mut Steps,
 ) -> (Gait, Stride) {
     let gait = animator.gait.of(rig);
     let mut stride =
@@ -859,7 +862,7 @@ fn walk(
         &stride,
         sloping(animator.grade, animator.camber),
     );
-    *stance = walked.steps.stance;
+    *steps = walked.steps;
     // **Both, because the tail needs both.** `Walk::settle` rolls the ankles,
     // and since engine #241 that stage also turns each contact to face where it
     // was planted — which is a property of the stride, not of the gait. Handing
@@ -909,7 +912,7 @@ fn standing(
     animator: &mut Animator,
     pose: &mut Pose,
     delta: f32,
-    stance: &mut Vec<symbios_avatar::Limb>,
+    steps: &mut Steps,
 ) -> symbios_avatar::Idled {
     let config = if animator.talking {
         IdleConfig::talking()
@@ -927,7 +930,7 @@ fn standing(
     // A standing body has every foot down, which is what the footing tail needs
     // told — the idle has already solved and planted them, but the readout the
     // panel shows is taken from this list.
-    *stance = rig.ground_contacts();
+    steps.stance = rig.ground_contacts();
     idled
 }
 
@@ -1003,7 +1006,7 @@ fn travelling(
     animator: &Animator,
     gaiting: bool,
     pose: &mut Pose,
-    stance: &mut Vec<symbios_avatar::Limb>,
+    steps: &mut Steps,
 ) -> Option<(Gait, Stride)> {
     match (animator.swim, animator.leap) {
         // Nothing is added to `stance`: a swimming body has nothing on the
@@ -1018,10 +1021,10 @@ fn travelling(
             None
         }
         (None, Some(leap)) => {
-            leaping(rig, animator, leap, pose, stance);
+            leaping(rig, animator, leap, pose, steps);
             None
         }
-        (None, None) => gaiting.then(|| walk(rig, animator, pose, stance)),
+        (None, None) => gaiting.then(|| walk(rig, animator, pose, steps)),
     }
 }
 
@@ -1030,13 +1033,7 @@ fn travelling(
 /// The cycle runs `0..1` over the whole leap — wind-up, flight and landing —
 /// so `hold` scrubs a jump exactly as it scrubs a gait, which is the only way
 /// to look at one instant of it.
-fn leaping(
-    rig: &Rig,
-    animator: &Animator,
-    leap: Leap,
-    pose: &mut Pose,
-    stance: &mut Vec<symbios_avatar::Limb>,
-) {
+fn leaping(rig: &Rig, animator: &Animator, leap: Leap, pose: &mut Pose, steps: &mut Steps) {
     let leapt = leap.drive(
         rig,
         pose,
@@ -1046,7 +1043,7 @@ fn leaping(
     // The footing tail runs only where the body has feet down; in flight there
     // is nothing to settle and asking would drag them back to the floor.
     if leapt.stage.is_grounded() {
-        *stance = rig.ground_contacts();
+        steps.stance = rig.ground_contacts();
     }
 }
 
@@ -1062,7 +1059,7 @@ fn settle(
     pose: &mut Pose,
     gait: &Gait,
     stride: &Stride,
-    stance: &[symbios_avatar::Limb],
+    steps: &Steps,
 ) -> Walked {
     Walk {
         footing: animator.footing.then(FootingConfig::default),
@@ -1073,7 +1070,7 @@ fn settle(
         pose,
         gait,
         stride,
-        stance,
+        steps,
         sloping(animator.grade, animator.camber),
     )
 }
