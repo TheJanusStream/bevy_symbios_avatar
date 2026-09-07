@@ -69,11 +69,60 @@ these sets rather than in bare `Update`.
 
 ## Moving a body
 
+Two ways, and which one is right depends on what is asking. Either way,
+everything that decides how a body *moves* comes from the engine's own `anim`
+module, so a walk that reads wrong here and right in the software renderer is
+this crate's fault, and one that reads wrong in both is the engine's.
+
+### From its own chassis, one driver per body
+
+What an application wants: a room of avatars, each carried by something
+different, each doing something different. Put an `AvatarDriver` and a `Drive`
+on a body, write the `Drive` each frame from whatever moves it, and
+`AvatarPlugin` does the rest — no resource, no GUI, no clip library.
+
+```rust,no_run
+use bevy::prelude::*;
+use bevy_symbios_avatar::{AvatarDriver, AvatarPlugin, Drive, SpawnAvatar};
+use symbios_avatar::{Archetype, AvatarRecord};
+
+App::new()
+    .add_plugins((DefaultPlugins, AvatarPlugin))
+    .add_systems(Startup, |mut commands: Commands| {
+        commands.spawn((
+            SpawnAvatar::from(AvatarRecord::new("Someone", Archetype::default())),
+            AvatarDriver::seeded(7),
+            Drive::travelling(Vec3::ZERO, Vec3::Z * 1.4),
+        ));
+    })
+    .run();
+```
+
+`Drive` is what the body's owner knows and the engine cannot work out: a world
+velocity, a place, the yaw the body faces, whether it is in deep water, a
+gesture asked for, whether an editor is holding it. Everything else — which of
+walking, standing, leaping, swimming and gesturing is running, the clocks that
+outlive a frame, the blend between two of them, where the feet were planted — is
+the engine's `anim::driver`, and it is the same code the application and this
+crate now both run. `Drive::moved_to` derives a velocity for a body whose motion
+arrives as positions rather than as a speed, which is what a remote peer is.
+
+`Drove` carries back what the frame decided, and `AvatarDriver::new` takes the
+one decision that has no safe default: whether the body's root is moved by
+something else or by the motion itself. A leap carries the root through its own
+parabola, which is right for a body that owns its root and doubles the flight of
+one hanging off a physics capsule.
+
+A body with an `AvatarDriver` and no `Drive` is left alone — that is how a
+consumer that needs real terrain under the feet, or its own layer over the pose,
+opts out and calls the engine's driver itself.
+
+### From one control surface, for a viewer
+
 `AnimatorPlugin` adds an `Animator` resource, ticks the engine's motion every
-frame and writes the result onto components. Everything that decides how a body
-*moves* comes from the engine's own `anim` module, so a walk that reads wrong
-here and right in the software renderer is this crate's fault, and one that reads
-wrong in both is the engine's.
+frame and writes the result onto components. One subject, and the question is
+always "what is it doing now". It stands aside for any body carrying an
+`AvatarDriver`, so both can be added at once.
 
 ```rust,no_run
 use bevy::prelude::*;

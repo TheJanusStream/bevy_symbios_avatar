@@ -58,8 +58,36 @@
 //!
 //! # Moving a body
 //!
-//! [`AnimatorPlugin`] adds an [`Animator`] resource, ticks the engine's motion
-//! every frame and writes the result onto components.
+//! Two ways, and which one is right depends on what is asking.
+//!
+//! **From its own chassis**, which is what an application wants: a room of
+//! avatars, each carried by something different, each doing something
+//! different. Put an [`AvatarDriver`] and a [`Drive`] on a body, write the
+//! [`Drive`] each frame from whatever moves it, and [`AvatarPlugin`] does the
+//! rest — no resource, no GUI, no clip library. [`driver`] has the details.
+//!
+//! ```no_run
+//! use bevy::prelude::*;
+//! use bevy_symbios_avatar::{AvatarDriver, AvatarPlugin, Drive, SpawnAvatar};
+//! use symbios_avatar::{Archetype, AvatarRecord};
+//!
+//! App::new()
+//!     .add_plugins((DefaultPlugins, AvatarPlugin))
+//!     .add_systems(Startup, |mut commands: Commands| {
+//!         commands.spawn((
+//!             SpawnAvatar::from(AvatarRecord::new("Someone", Archetype::default())),
+//!             AvatarDriver::seeded(7),
+//!             Drive::travelling(Vec3::ZERO, Vec3::Z * 1.4),
+//!         ));
+//!     })
+//!     .run();
+//! ```
+//!
+//! **From one control surface**, which is what a viewer wants: one subject, and
+//! the question is always "what is it doing now". [`AnimatorPlugin`] adds an
+//! [`Animator`] resource, ticks the engine's motion every frame and writes the
+//! result onto components. It stands aside for any body carrying an
+//! [`AvatarDriver`], so both can be added at once.
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -124,6 +152,7 @@
 
 pub mod animator;
 pub mod convert;
+pub mod driver;
 #[cfg(feature = "editor")]
 pub mod editor;
 pub mod spawn;
@@ -133,6 +162,7 @@ pub use animator::{
     Animator, AnimatorPlugin, Blending, Clips, GaitKind, floor_tilt, ground_normal,
 };
 pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bevy};
+pub use driver::{AvatarDriver, Drive, Drove, drive_avatar_bodies};
 #[cfg(feature = "editor")]
 pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
 pub use spawn::{AvatarBody, AvatarClosure, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar};
@@ -187,6 +217,14 @@ impl Plugin for AvatarPlugin {
         .add_systems(
             Update,
             spawn::apply_avatar_poses.in_set(AvatarSystems::Apply),
+        )
+        // The per-body driver, which is not a plugin of its own: it needs no
+        // resource, no GUI and no clip library, so a consumer that draws bodies
+        // at all should have it. What opts a body in is carrying a
+        // [`Drive`] — see [`driver`].
+        .add_systems(
+            Update,
+            driver::drive_avatar_bodies.in_set(AvatarSystems::Animate),
         );
     }
 }

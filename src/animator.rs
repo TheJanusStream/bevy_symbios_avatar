@@ -537,12 +537,25 @@ impl Plugin for AnimatorPlugin {
 /// all. Not an optimisation: a viewer that rewrites a resting pose every frame
 /// is one that cannot say what a body doing nothing costs, which is half of
 /// what this crate is for.
+#[expect(
+    clippy::type_complexity,
+    reason = "a Bevy query's data and its filter are one type by construction; \
+              naming half of it elsewhere hides which bodies this system claims"
+)]
 pub fn drive_avatar_animation(
     mut commands: Commands,
     time: Res<Time>,
     clips: Res<Clips>,
     mut animator: ResMut<Animator>,
-    mut bodies: Query<(Entity, Ref<AvatarBody>, Option<&mut Blending>)>,
+    // **Never a body that carries its own driver** (#42). The two ways to move
+    // a body in this crate are a resource and a component, and a body written
+    // by both flickers between whatever each of them thinks it is doing. The
+    // component wins by construction: a consumer that put one on a body has
+    // said which answer it wants.
+    mut bodies: Query<
+        (Entity, Ref<AvatarBody>, Option<&mut Blending>),
+        Without<crate::driver::AvatarDriver>,
+    >,
 ) {
     let asked = animator.is_changed();
     if animator.is_idle() && !asked {
