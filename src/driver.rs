@@ -464,9 +464,14 @@ mod tests {
             Source::Idle,
             "the driver did not run"
         );
-        assert!(
-            app.world().get::<crate::Blending>(body).is_none(),
-            "the animator posed a body that carries its own driver"
+        // And the window never reached it: its cursor is advanced by the first
+        // body it steers, so a cursor still at zero is a window that steered
+        // nothing. (`Blending` used to be the witness; since #43 the animator
+        // has no per-body state left to look for.)
+        assert_eq!(
+            app.world().resource::<crate::Animator>().cycle.to_bits(),
+            0.0_f32.to_bits(),
+            "the animator steered a body that carries a Drive"
         );
     }
 

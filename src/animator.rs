@@ -1,14 +1,21 @@
-//! Driving a body's engine-authored motion, and a window for steering it.
+//! A window for steering a body, and nothing that decides how one moves.
 //!
-//! Every number here that decides how a body *moves* comes from
+//! Every number that decides how a body *moves* comes from
 //! [`symbios_avatar::anim`]: the gait pattern, the stride scaled to the legs
-//! that take it, the footing solve, the gaze chain and the blink timing. This
-//! module ticks a cycle and writes the results onto Bevy components. That
-//! division is the same one the rest of the crate keeps, and for the same
+//! that take it, the footing solve, the gaze chain and the blink timing. Since
+//! #43 that includes the decisions as well as the arithmetic — which source is
+//! carrying the body, the clocks that outlive a frame, the joins between them —
+//! so this module no longer ticks a cycle and poses a body. It **translates**:
+//! the window's switches into one [`Inputs`], the two layers a component cannot
+//! hold into closures, and the drive's answer onto Bevy components.
+//!
+//! That division is the same one the rest of the crate keeps, and for the same
 //! reason: a walk that reads wrong here and right in the software renderer is
 //! this crate's fault, and one that reads wrong in both is the engine's — a
 //! distinction that stops being available the moment this file starts having
-//! opinions about how a leg swings.
+//! opinions about how a leg swings. It is also why the walk this window shows
+//! is now, by construction, the walk an application draws: there is one driver
+//! and both run it.
 //!
 //! ## Why a window rather than more keys
 //!
@@ -24,14 +31,14 @@
 
 use bevy::prelude::*;
 use symbios_avatar::Heading;
-use symbios_avatar::anim::{
-    GazeConfig, Idle, IdleConfig, Speed, Steps, Target, contacts_during, gaze, gesture,
-};
+use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
+use symbios_avatar::anim::{GazeConfig, IdleConfig, Speed, Target, gaze, gesture};
 use symbios_avatar::{
-    Blink, ClipLibrary, Expression, FootingConfig, Gait, Ground, Inertializer, Leap, Pose, Rig,
-    Stride, Swim, Talk, Viseme, Walk, Walked, Zone,
+    ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
+    Viseme, Zone,
 };
 
+use crate::driver::{AvatarDriver, Drive};
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
 
 /// How long a procedural gesture takes, in seconds.
@@ -41,6 +48,19 @@ use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
 /// conversation has moved on. The engine's gestures are written in normalised
 /// time, so this is the only place the real duration is decided.
 const GESTURE_TIME: f32 = 1.5;
+
+/// The seed every body this window adopts is given.
+///
+/// **One fixed number, because a viewer has one subject.** The engine has no
+/// `Default` for a driver on purpose — an idle's seed decides when its settling
+/// weight shift fires and which leg it moves first, so a seed drawn from
+/// somewhere the caller cannot see makes a measurement a function of how many
+/// bodies were built first. A viewer wants the opposite of a room's variety:
+/// the same body, seeded the same way, every run, so two captures a week apart
+/// are of the same schedule. This is the number the idle was seeded with before
+/// the driver owned it; the blink now shares it, which changes when a body
+/// blinks and nothing a capture can see, since every capture holds the lids.
+const VIEWER_SEED: u64 = 0x1de;
 
 /// How wide the motion window opens, in points.
 #[cfg(feature = "editor")]
@@ -149,22 +169,6 @@ impl Clips {
     }
 }
 
-/// A transition in progress on one body, and the two frames it came from.
-///
-/// Per body rather than a resource, because a blend is state about a *body* and
-/// not about what the viewer is asking for. The two poses are the last two
-/// frames of whatever was playing: [`Inertializer::start`] takes their
-/// difference as the velocity to carry through, and without them a switch snaps.
-#[derive(Component)]
-pub struct Blending {
-    /// The transition, once one has been started.
-    running: Option<Inertializer>,
-    /// The frame before last.
-    previous: Pose,
-    /// Last frame.
-    current: Pose,
-}
-
 /// What every body in the world is doing.
 ///
 /// One resource rather than a component per body: this drives a viewer, where
@@ -182,8 +186,24 @@ pub struct Animator {
     pub walking: bool,
     /// Which pattern they move in.
     pub gait: GaitKind,
-    /// Cycles per second.
-    pub cadence: f32,
+    /// Cycles per second, or [`None`] for the one this speed implies.
+    ///
+    /// **[`None`] by default, which is the whole of what the speed axis buys
+    /// here.** A cadence named beside a stride is a second answer to a question
+    /// the speed already answers, and the two disagreed: this window ran the
+    /// cursor at 1.1 cycles a second while drawing the stride of a body going
+    /// 0.67 m/s, which is 0.81 — a body taking one step and being clocked at
+    /// another. Deriving it is what stops that being expressible. `Some` is the
+    /// deliberate mismatch an instrument sometimes wants: slowing the cursor to
+    /// look at a foot plant is a thing to do to a walk, not a claim about it.
+    pub cadence: Option<f32>,
+    /// How fast the body travels, in metres a second, or [`None`] for whatever
+    /// [`Animator::pace`] works out to.
+    ///
+    /// The one number the engine's speed axis wants — stride, duty, cadence,
+    /// foot lift and the walk-run boundary all come off it. See
+    /// [`Animator::pace`] for what the older control means now.
+    pub speed: Option<f32>,
     /// Where in the cycle the body is, `0..1`.
     ///
     /// Public and writable because holding it still is the point: a gait judged
@@ -226,6 +246,17 @@ pub struct Animator {
     /// again.
     pub leap: Option<Leap>,
     /// How long a step is, as a multiple of what the legs would take.
+    ///
+    /// **A route to a speed now rather than a stride of its own** (#43). The
+    /// engine builds a stride from a [`Speed`] and nothing else, so this is
+    /// converted — `Speed::of(rig, gait, Stride::for_body(rig, pace))` — and the
+    /// stride the body walks is the one that speed implies. The two
+    /// derivations are not the same stride and never were: on the default body
+    /// this window shows, `Stride::for_body(1.0)` is 6.2% shorter than the
+    /// stride of the speed it recovers to, and at pace 1.5 it carries a full
+    /// heel tuck where the speed axis puts that body below the walk-run
+    /// transition with no tuck at all. This window is where a walk is judged by
+    /// eye, so the stride it draws has to be the one an application draws.
     pub pace: f32,
     /// Whether the postural layer over the legs runs: the arms swinging against
     /// them, and the trunk leaning into the walk.
@@ -339,16 +370,16 @@ pub struct Animator {
     pub heading: f32,
     /// How long a transition between sources takes, in seconds. Zero snaps.
     pub blend: f32,
-    /// How far the footing solve had to move the feet on the last frame, in
-    /// metres.
+    /// Whether the footing solve could not reach a contact on the last frame.
     ///
-    /// A readout rather than a control, and the number the locomotion question
-    /// should be settled on rather than on taste: a pose whose feet already land
-    /// where the ground is needs no correction, and one whose do not is being
-    /// held together by the solve.
-    pub lift: f32,
-    /// How many contacts the solve could not reach on the last frame.
-    pub straining: usize,
+    /// A readout rather than a control. **One flag rather than the two figures
+    /// this used to show** — how far the solve moved the feet, and how many
+    /// contacts it could not reach — because [`symbios_avatar::anim::Driven`]
+    /// reports a bool and the settle now happens inside the drive. A body that
+    /// strains occasionally is a body on hard ground; one that strains
+    /// constantly is a body whose goals are wrong, and that is the whole of
+    /// what this still answers. Getting the numbers back is an engine ask.
+    pub strained: bool,
     /// The face the body rests in, as picked in the panel.
     ///
     /// The target. What is actually showing eases toward it in EXPRESSION
@@ -368,6 +399,38 @@ pub struct Animator {
     /// The expression currently showing — the cursor easing toward
     /// [`Animator::expression`]. Bypass-written each frame, like `lift`.
     showing: Expression,
+    /// What moves the body's root.
+    ///
+    /// **[`Carriage::Own`] by default, which is this window's whole difference
+    /// from an application.** Nothing else moves this body, so a leap flies and
+    /// a walk derives every stance offset afresh rather than holding world
+    /// points — a foothold ledger on a body walking on the spot would pin a
+    /// treadmill's feet to the floor and tear the walk apart. The synthetic
+    /// chassis in `examples/viewer.rs` is what asks for the other answer, and
+    /// the difference between the two is a whole flight arc rather than a
+    /// detail.
+    pub carriage: Carriage,
+    /// How fast the body is going UP, in metres a second.
+    ///
+    /// **Signed, and it is the whole of the driver's airborne state machine.**
+    /// No instantaneous test can find the moment a body lands — at the apex of
+    /// a jump the vertical speed is zero, which is the most airborne a body
+    /// ever is — so what the driver watches for is a body that HAS been falling
+    /// and has stopped. Written by the synthetic chassis; zero for a body
+    /// walking on the spot, whose jumps are `leap` instead.
+    pub vertical: f32,
+    /// Where the body is in the world, which only [`Carriage::Chassis`] reads.
+    ///
+    /// Written by the synthetic chassis as it integrates a velocity; zero for a
+    /// body walking on the spot, where nothing reads it.
+    pub at: Vec3,
+    /// How long the gait takes to believe a change of speed, in seconds.
+    ///
+    /// The engine's own easing, surfaced because the instrument for it is a
+    /// speed STEP and nothing else: the postural terms are pure functions of the
+    /// pace they are fed, so fed raw they snap, and zero here is what the walk
+    /// looked like before the easing existed.
+    pub pace_response: f32,
     /// Whether a body with nothing else to do stands and breathes.
     ///
     /// **On by default, because a body doing nothing is the state a viewer sees
@@ -383,16 +446,16 @@ pub struct Animator {
     /// speaking is a body whose idle is the speaking one, and two switches for
     /// one fact is how they come to disagree.
     pub listening: bool,
-    /// The engine's idle driver.
-    idler: Idle,
-    /// The engine's blink timer.
-    blink: Blink,
     /// The engine's speech driver.
+    ///
+    /// **The one motion driver still kept here**, because the jaw is not the
+    /// driver's: [`Inputs`] carries a face and a lid closure and nothing that
+    /// opens a mouth, so speech is a pose this window writes over the driver's,
+    /// beside the expression and the viseme. The idle, the blink and the blend
+    /// all moved into [`AvatarDriver`].
     talk: Talk,
     /// How long the body has been alive, for circling the gaze target.
     elapsed: f32,
-    /// What was playing last frame, so a change can start a blend.
-    was: (Option<usize>, bool, bool),
 }
 
 impl Default for Animator {
@@ -401,7 +464,8 @@ impl Default for Animator {
             open: true,
             walking: false,
             gait: GaitKind::default(),
-            cadence: 1.1,
+            cadence: None,
+            speed: None,
             cycle: 0.0,
             scrub: false,
             gesture: None,
@@ -435,18 +499,18 @@ impl Default for Animator {
             // Short enough to be a transition rather than a dissolve, long
             // enough to see. The number worth arguing about is on #141.
             blend: 0.15,
-            lift: 0.0,
-            straining: 0,
+            strained: false,
             expression: Expression::NEUTRAL,
             viseme: None,
             showing: Expression::NEUTRAL,
+            carriage: Carriage::Own,
+            vertical: 0.0,
+            at: Vec3::ZERO,
+            pace_response: DriverConfig::default().pace_response,
             idle: true,
             listening: false,
-            idler: Idle::seeded(0x1de),
-            blink: Blink::seeded(7),
             talk: Talk::seeded(7),
             elapsed: 0.0,
-            was: (None, false, false),
         }
     }
 }
@@ -485,13 +549,29 @@ impl Animator {
             && self.showing == self.expression
     }
 
-    /// What is driving the body, as a value that changes when the source does.
+    /// How fast the body is travelling, in metres a second.
     ///
-    /// A blend has to start on the frame the answer changes, and comparing this
-    /// against last frame's is how that moment is found. Scrubbing and cadence
-    /// are deliberately not in it: moving a phase slider is not a transition.
-    fn source(&self) -> (Option<usize>, bool, bool) {
-        (self.clip, self.layered, self.walking)
+    /// [`Self::speed`] when the caller named one, and otherwise the speed
+    /// [`Self::pace`] works out to through the gait it is walking — see that
+    /// field for why the older control is a route to this one rather than a
+    /// stride of its own.
+    #[must_use]
+    pub fn speed_of(&self, rig: &Rig, gait: &Gait) -> f32 {
+        self.speed.unwrap_or_else(|| {
+            Speed::of(rig, gait, &Stride::for_body(rig, self.pace)).metres_per_second(rig)
+        })
+    }
+
+    /// How fast the cursor runs, in cycles a second.
+    ///
+    /// [`Self::cadence`] when the caller named one, and otherwise the cadence
+    /// this speed implies — which is arithmetic rather than a second fit: a
+    /// body covering one cycle length per cycle at this many metres a second
+    /// takes cycles at the only rate that makes those two agree.
+    #[must_use]
+    pub fn cadence_of(&self, rig: &Rig, gait: &Gait) -> f32 {
+        self.cadence
+            .unwrap_or_else(|| Speed::new(rig, self.speed_of(rig, gait)).cadence(rig))
     }
 }
 
@@ -511,15 +591,63 @@ impl Plugin for AnimatorPlugin {
                 Update,
                 // After bodies are built and destroyed, before poses are applied.
                 // A body rebuilt this frame must be posed this frame, and a body
-                // destroyed this frame must not be posed at all.
-                drive_avatar_animation.in_set(crate::AvatarSystems::Animate),
+                // destroyed this frame must not be posed at all. Chained, so the
+                // driver a body was adopted with exists before the frame that
+                // steers it — a body built and posed in the same frame is the
+                // ordinary case here, not the corner.
+                (adopt_bodies, steer)
+                    .chain()
+                    .in_set(crate::AvatarSystems::Animate),
             );
         #[cfg(feature = "editor")]
         app.add_systems(bevy_egui::EguiPrimaryContextPass, animator_panel);
     }
 }
 
-/// Writes the pose and the lid closure every body should be holding.
+/// Gives a body this window's driver, so the window can steer it.
+///
+/// **Carrying a [`Drive`] is what says a body belongs to something else**, and
+/// that is the whole of how the two ways to move a body in this crate stay out
+/// of each other's way: an application's chassis writes a [`Drive`] every frame
+/// and [`drive_avatar_bodies`](crate::drive_avatar_bodies) runs it; this window
+/// steers the bodies that have a driver and no `Drive`. A body with neither is
+/// this window's to adopt — a consumer that adds [`AnimatorPlugin`] and spawns a
+/// body expects it to move, and a silent nothing is the worst answer to that.
+///
+/// Seeded from one fixed number, because a viewer wants one repeatable subject
+/// rather than a room's variety — see `VIEWER_SEED`.
+#[expect(
+    clippy::type_complexity,
+    reason = "a Bevy query's data and its filter are one type by construction; \
+              naming half of it elsewhere hides which bodies this system claims"
+)]
+pub fn adopt_bodies(
+    mut commands: Commands,
+    orphans: Query<Entity, (With<AvatarBody>, Without<AvatarDriver>, Without<Drive>)>,
+) {
+    for body in &orphans {
+        commands
+            .entity(body)
+            .insert(AvatarDriver::seeded(VIEWER_SEED));
+    }
+}
+
+/// Steers every body this window owns, and writes what the drive produced.
+///
+/// **This used to BE the driver** (#43). The state machine it ran — which
+/// source is carrying the body, the airborne states, the eased pace, the idle,
+/// the blink, the transition between sources — went upstream into
+/// [`symbios_avatar::anim::Driver`] and reaches Bevy as [`AvatarDriver`], so
+/// what is left here is a translation: the window's switches into one
+/// [`Inputs`], and the two layers only this crate can supply.
+///
+/// **Through [`symbios_avatar::anim::Driver::drive`] directly rather than
+/// through [`drive_avatar_bodies`](crate::drive_avatar_bodies)**, and that is
+/// the door the component form leaves open rather than a road around it. This
+/// window needs two things no component can hold: a ground closure, because the
+/// grade and camber sliders put the body on a plane rather than a level floor,
+/// and two overlay closures, because a baked clip, a gesture, a gaze and a face
+/// all ride over the motion. Both are borrows of things a system holds.
 ///
 /// Three cases, and the middle one is the one that is easy to get wrong.
 ///
@@ -537,25 +665,17 @@ impl Plugin for AnimatorPlugin {
 /// all. Not an optimisation: a viewer that rewrites a resting pose every frame
 /// is one that cannot say what a body doing nothing costs, which is half of
 /// what this crate is for.
-#[expect(
-    clippy::type_complexity,
-    reason = "a Bevy query's data and its filter are one type by construction; \
-              naming half of it elsewhere hides which bodies this system claims"
-)]
-pub fn drive_avatar_animation(
+pub fn steer(
     mut commands: Commands,
     time: Res<Time>,
     clips: Res<Clips>,
     mut animator: ResMut<Animator>,
-    // **Never a body that carries its own driver** (#42). The two ways to move
-    // a body in this crate are a resource and a component, and a body written
-    // by both flickers between whatever each of them thinks it is doing. The
-    // component wins by construction: a consumer that put one on a body has
-    // said which answer it wants.
-    mut bodies: Query<
-        (Entity, Ref<AvatarBody>, Option<&mut Blending>),
-        Without<crate::driver::AvatarDriver>,
-    >,
+    // **Never a body that carries a `Drive`** (#42, #43). The two ways to move a
+    // body in this crate are a resource and a component, and a body written by
+    // both flickers between whatever each of them thinks it is doing. The
+    // component wins by construction: a consumer that wrote one has said which
+    // answer it wants.
+    mut bodies: Query<(Entity, Ref<AvatarBody>, &mut AvatarDriver), Without<Drive>>,
 ) {
     let asked = animator.is_changed();
     if animator.is_idle() && !asked {
@@ -563,27 +683,18 @@ pub fn drive_avatar_animation(
     }
 
     let delta = time.delta_secs();
-    advance(&mut animator, delta);
     if animator.tracking {
         animator.elapsed += delta;
     }
-    // The cursor is bypass-written for the same reason `lift` is — it is
+    advance_gesture(&mut animator, delta);
+    // The cursor is bypass-written for the same reason `strained` is — it is
     // this frame's readout, not an instruction.
     let showing = ease_expression(animator.showing, animator.expression, delta, animator.blend);
     animator.bypass_change_detection().showing = showing;
-    // A blink is stochastic, so a single captured frame almost never catches
-    // one. Holding the lids at a chosen point is what makes the geometry path
-    // checkable from a still. Either way the phase runs THROUGH the
-    // expression's `closure_at` — rest + (1 − rest) · phase — because adding
-    // a widened rest to a full blink leaves an eye that never shuts, which is
-    // the hole the engine's guard found (symbios-avatar#217).
-    let closure = showing.closure_at(if animator.blinking {
-        animator.blink.advance(delta)
-    } else {
-        animator.closure
-    });
     // Speech is a pose, not geometry: the mandible region (#152) hangs off the
-    // jaw pivot, so talking costs a rotation where a blink costs a rebuild.
+    // jaw pivot, so talking costs a rotation where a blink costs a rebuild. The
+    // driver carries a face and a lid closure and nothing that opens a mouth,
+    // so this stays the window's and rides in the settled layer below.
     let jaw_angle = if animator.talking {
         animator.talk.advance(delta)
     } else {
@@ -597,100 +708,161 @@ pub fn drive_avatar_animation(
     // A clip replaces the gait unless it is asked to layer over it. Layering is
     // the interesting case and is why this is not simply `walking && clip.is_none()`.
     let gaiting = animator.walking && (clip.is_none() || animator.layered);
-    let source = animator.source();
-    let switched = source != animator.was;
-    animator.was = source;
 
-    for (entity, body, blending) in &mut bodies {
-        let rig = &body.avatar.rig;
-        let mut pose = Pose::rest(rig);
-        let mut steps = Steps::default();
-        // Returned rather than kept local so the ankles can roll AFTER the
-        // plant: the plant lays every sole flat and a roll applied before it is
-        // simply levelled away.
-        // A leap replaces the walk rather than layering over it: a body cannot
-        // be mid-stride and mid-air at once, and pretending otherwise is how a
-        // jump ends up with a walk cycle still running underneath it.
-        let walking = travelling(rig, &animator, gaiting, &mut pose, &mut steps);
-        // **A body with nothing else to do stands and breathes** (engine #246).
-        // Only when nothing else is driving the legs: an idle is what a body
-        // does INSTEAD of walking or leaping, not a layer over them, and its
-        // weight shift moves the pelvis over one foot — which on a walking body
-        // would be a gait fighting a stand.
-        //
-        // The whole layer goes through `Idle::drive`, which advances the
-        // schedule and poses every layer in one call, for the reason
-        // `Walk::drive` does: a stage a caller has to remember is a stage a
-        // caller forgets, and this crate has the scars.
-        let idled = (animator.idle
-            && walking.is_none()
-            && animator.leap.is_none()
-            && animator.swim.is_none())
-        .then(|| standing(rig, &mut animator, &mut pose, delta, &mut steps));
+    // Everything below reads the window; the two readouts are written after the
+    // loop, because the overlay closures borrow it for as long as a drive runs.
+    let mut cursor: Option<f32> = None;
+    let mut strained = false;
+    {
+        let animator: &Animator = &animator;
+        for (entity, body, mut driver) in &mut bodies {
+            let rig = &body.avatar.rig;
+            let picked = animator.gait.of(rig);
+            // **One cursor for every body, advanced once.** `anim::Play` is the
+            // engine's own cursor and this window already has one — the phase
+            // slider, which exists so a gait can be held still at one point in
+            // its cycle, and which the strip plan writes per sample. Two would
+            // disagree the first time somebody scrubbed, and the single thing an
+            // A/B most needs is that the gait and the clip are at the same point
+            // when they are compared. So the driver is handed the cursor rather
+            // than running one: a phase it relabelled under a change of duty
+            // would move the moment a sheet is sampling, and whether it relabels
+            // is the engine's own guard to keep and overlands' to measure.
+            let cycle = *cursor.get_or_insert_with(|| {
+                if animator.scrub {
+                    animator.cycle
+                } else {
+                    (animator.cycle + delta * animator.cadence_of(rig, &picked)).fract()
+                }
+            });
+            let Some(driven) = drive_body(
+                animator,
+                &mut driver,
+                rig,
+                &Frame {
+                    delta,
+                    cycle,
+                    gaiting,
+                    picked: &picked,
+                    clip,
+                    jaw_angle,
+                    showing,
+                    eyes: body.avatar.parts.eyes.as_ref(),
+                },
+            ) else {
+                continue;
+            };
+            strained |= driven.strained;
+            commands.entity(entity).insert(AvatarPose(driven.pose));
+            // Kept as the record of what the lids are holding, for anything that
+            // wants to ask. It no longer drives geometry: writing one used to
+            // rebuild the eye meshes, which is what a blink cost before the lids
+            // had joints.
+            if animator.blinking || asked || body.is_added() {
+                commands
+                    .entity(entity)
+                    .insert(AvatarClosure(driven.closure));
+            }
+        }
+    }
+    // Through `bypass_change_detection`, because these are readouts and not
+    // instructions: writing them through the `ResMut` would mark the resource
+    // changed every frame and defeat the still-body rule above.
+    if let Some(cycle) = cursor {
+        animator.bypass_change_detection().cycle = cycle;
+    }
+    animator.bypass_change_detection().strained = strained;
+}
 
-        let aimed = gesturing(rig, &animator, &mut pose);
+/// What one body's frame is, beside the window that is steering it.
+///
+/// A struct rather than eight arguments, because half of them are decided once
+/// for the whole frame and passing them one at a time is how a caller comes to
+/// hand two bodies different cycles.
+struct Frame<'a> {
+    /// Seconds since the last frame.
+    delta: f32,
+    /// Where in the cycle every body is held this frame.
+    cycle: f32,
+    /// Whether the gait is what is carrying the body.
+    gaiting: bool,
+    /// The gait the picker chose, for this body's rig.
+    picked: &'a Gait,
+    /// The baked clip riding over the motion, if one is playing.
+    clip: Option<&'a symbios_avatar::PoseClip>,
+    /// The jaw's pivot angle this frame, in radians.
+    jaw_angle: f32,
+    /// The face the body is resting in.
+    showing: Expression,
+    /// This body's eyes, if it has any.
+    eyes: Option<&'a symbios_avatar::Eyes>,
+}
+
+/// Drives one body for one frame, with the two layers only this crate supplies.
+///
+/// Split from [`steer`] because the closures below are what make this long: a
+/// gesture, a clip, a gaze and a face all ride over the driver's motion, and
+/// each of them has to say where in the order it goes.
+fn drive_body(
+    animator: &Animator,
+    driver: &mut AvatarDriver,
+    rig: &Rig,
+    frame: &Frame<'_>,
+) -> Option<symbios_avatar::anim::driver::Driven> {
+    let (delta, cycle, clip) = (frame.delta, frame.cycle, frame.clip);
+    let speed = animator.speed_of(rig, frame.picked);
+    // **Both gaze layers stand aside for a gesture that aims the head,
+    // and only for one that does** (#30). Everything in the settled
+    // layer writes the head outright — `look_at` assigns a chest, neck
+    // and head rotation rather than composing one — so a nod applied
+    // under it arrived correct and was put back level a moment later,
+    // which is a gesture this window could not show at all.
+    //
+    // Asked of the clip rather than of the gesture's name, because the
+    // engine already answers it: a clip that aims the head carries a
+    // `Target::Gaze` track and one that does not, does not. So a wave
+    // still lets the body look around while it waves — which is what a
+    // waving body does — and a nod owns the head for as long as it runs.
+    let aimed = animator
+        .gesture
+        .as_ref()
+        .and_then(|(name, _)| gesture::by_name(name))
+        .is_some_and(|clip| clip.tracks.iter().any(|track| track.target == Target::Gaze));
+    // Over the locomotion and before the contacts are settled, which is
+    // where authored motion goes: the legs keep the walk that carries
+    // them, and the feet are planted after whatever was laid on top
+    // (engine #253's order).
+    let over_locomotion = |rig: &Rig, pose: &mut Pose| {
+        gesturing(rig, animator, pose);
         if let Some(clip) = clip {
-            // After the gait, because `PoseClip::apply` writes only the joints
-            // its own tracks name — which is what lets an imported gesture ride
-            // a procedural walk.
-            clip.apply(rig, &mut pose, animator.cycle * clip.duration());
+            // After the gesture, so the two clip forms layer in the
+            // order the engine describes them: goals first, angles over
+            // them. `PoseClip::apply` writes only the joints its own
+            // tracks name, which is what lets an imported gesture ride a
+            // procedural walk.
+            clip.apply(rig, pose, cycle * clip.duration());
             if animator.in_place {
                 pose.translation.x = 0.0;
                 pose.translation.z = 0.0;
             }
-            // A clip does not say which feet are carrying the body, so the clip
-            // is asked instead. A gait does say, and its answer is better.
-            //
-            // `contacts_during` and not `contacts_in`: a walking foot lifts
-            // about 150 mm, so for much of its swing the height test alone calls
-            // it planted, and planting a swinging foot drags it to the floor and
-            // ruins the walk. It reads speed off the TRAVELLING clip, which is
-            // why it takes the time rather than the pose — the pose above has
-            // had its root travel taken out and a planted foot in it is sliding
-            // backwards at walking pace.
-            if steps.stance.is_empty() {
-                // Only the stance list: a clip owns the legs it moves, so the
-                // tail's swing re-aim (engine #265) must stay out of its way,
-                // and an empty `placed` is exactly how it does.
-                steps.stance = contacts_during(rig, clip, animator.cycle * clip.duration());
-            }
         }
-
-        // The tail of the engine's own sequence: settle the contacts, then roll
-        // the ankles, in that order (engine #253). Both used to be this file's
-        // to remember and the roll was simply missing, so the viewer — the
-        // place a walk is judged BY EYE — drew a gait with no heel-strike and
-        // no toe-off for as long as the stage existed (#251).
-        //
-        // Runs only when a gait is driving: a clip carries its own ankle motion
-        // and rolling on top of authored feet would fight it.
-        if let Some((gait, stride)) = &walking {
-            let walked = settle(rig, &animator, &mut pose, gait, stride, &steps);
-            // Through `bypass_change_detection`, because these are a readout
-            // and not an instruction: writing them through the `ResMut` would
-            // mark the resource changed every frame and defeat the still-body
-            // rule this whole system is built on.
-            animator.bypass_change_detection().lift = walked.lift;
-            animator.bypass_change_detection().straining = walked.straining();
-        }
-        // **Both gaze layers stand aside for a gesture that aims the head, and
-        // only for one that does** (#30). Everything below writes the head
-        // outright — `look_at` assigns a chest, neck and head rotation rather
-        // than composing one — so a nod applied above arrived correct and was
-        // put back level a few lines later, which is a gesture the viewer could
-        // not show at all.
-        //
-        // Asked of the clip rather than of the gesture's name, because the
-        // engine already answers it: a clip that aims the head carries a
-        // `Target::Gaze` track and one that does not, does not. So a wave still
-        // lets the body look around while it waves — which is what a waving
-        // body does — and a nod owns the head for as long as it runs. The
-        // gaze slider and the idle's glance both lose to it, and that is the
-        // right way round: a gesture is something the body is doing on purpose.
-        if !aimed {
-            glance(rig, &mut pose, idled);
-            // A target at head height, applied after the gait, because looking
-            // somewhere is a turn added to whatever the spine is already doing.
+    };
+    // Over the settled body and before the blend: a face and a
+    // deliberate gaze cannot fight the footing solve, and a transition
+    // should correct what they produced rather than be overwritten.
+    let over_settled = |rig: &Rig, pose: &mut Pose| {
+        if aimed {
+            // The driver's own glance ran a moment ago and writes the
+            // head outright; it cannot know about a gesture this window
+            // laid on itself, so the aim is put back. Re-applying the
+            // whole gesture rather than its gaze track alone, because
+            // the clip is the only thing that knows which tracks those
+            // are and every other track re-applies to the same value.
+            gesturing(rig, animator, pose);
+        } else {
+            // A target at head height, applied after the gait, because
+            // looking somewhere is a turn added to whatever the spine is
+            // already doing.
             let angle = if animator.tracking {
                 scanned_angle(animator.elapsed, animator.gaze_speed, animator.gaze_limit)
             } else {
@@ -703,7 +875,7 @@ pub fn drive_avatar_animation(
             let target = Vec3::new(angle.sin() * 2.0, head, angle.cos() * 2.0);
             gaze::look_at(
                 rig,
-                &mut pose,
+                pose,
                 target,
                 &GazeConfig {
                     limit: animator.gaze_limit,
@@ -711,45 +883,86 @@ pub fn drive_avatar_animation(
                 },
             );
         }
-        // The face, after the gaze for the same reason the gaze comes after
-        // the gait: everything here is added to wherever the head already is.
-        pose_face(rig, &mut pose, jaw_angle, showing, animator.viseme);
-        // The blend, last, so it corrects whatever the sources produced rather
-        // than being overwritten by them.
-        let posed = if let Some(mut blending) = blending {
-            blend_into(&mut blending, pose, switched, animator.blend, delta)
-        } else {
-            // A body seen for the first time has no two frames to take a
-            // velocity from, so it starts settled rather than blending out of
-            // nothing.
-            commands.entity(entity).insert(Blending {
-                running: None,
-                previous: pose.clone(),
-                current: pose.clone(),
-            });
-            pose
-        };
-        // **The blink, AFTER the blend, and that is deliberate.** A closure is
-        // a pose now (symbios-avatar#118) rather than a rebuild of two meshes,
-        // so it could ride through the inertializer with everything else — and
-        // it should not. A blink is about a tenth of a second from open to shut
-        // and back; smoothed by a gait blend it arrives as a slow heavy-lidded
-        // droop, which reads as a body falling asleep rather than as one
-        // blinking. The jaw goes in before the blend because speech shares the
-        // head's own timing; a lid does not.
-        let mut posed = posed;
-        if let Some(eyes) = body.avatar.parts.eyes.as_ref() {
-            eyes.blink(&mut posed, closure);
-        }
-        commands.entity(entity).insert(AvatarPose(posed));
-        // Kept as the record of what the lids are holding, for anything that
-        // wants to ask. It no longer drives geometry: writing one used to
-        // rebuild the eye meshes, which is what a blink cost before the lids
-        // had joints.
-        if animator.blinking || asked || body.is_added() {
-            commands.entity(entity).insert(AvatarClosure(closure));
-        }
-    }
+        // The face, after the gaze for the same reason the gaze comes
+        // after the gait: everything here is added to wherever the head
+        // already is.
+        pose_face(rig, pose, frame.jaw_angle, frame.showing, animator.viseme);
+    };
+
+    // **`Carriage::Own`, which is the viewer's whole difference from an
+    // application** (engine's own `Carriage`): nothing else moves this
+    // body, so a leap flies and a walk derives every stance offset
+    // afresh rather than holding world points — a foothold ledger on a
+    // body walking on the spot would pin a treadmill's feet to the floor.
+    // The synthetic chassis in `examples/viewer.rs` is what asks for the
+    // other answer, and it is the one flag that changes this.
+    driver.set_config(DriverConfig {
+        carriage: animator.carriage,
+        idle: animator.idle,
+        blend: animator.blend,
+        pace_response: animator.pace_response,
+        ..DriverConfig::default()
+    });
+    // A listener goes stiller than a body alone in a room, and a body
+    // that is speaking is a body whose idle is the speaking one — which
+    // is why the talking variant follows `talking` rather than having a
+    // switch of its own.
+    driver.set_idle_config(if animator.talking {
+        IdleConfig::talking()
+    } else if animator.listening {
+        IdleConfig::listening()
+    } else {
+        IdleConfig::default()
+    });
+    let inputs = Inputs {
+        delta,
+        // The magnitude is what picks the gait and its speed; the
+        // direction the body TRAVELS is `heading`, so this points down
+        // the body's own forward and says only how fast.
+        velocity: Vec3::new(
+            0.0,
+            animator.vertical,
+            if frame.gaiting { speed } else { 0.0 },
+        ),
+        at: animator.at,
+        facing: animator.heading(),
+        heading: Some(Heading::degrees(animator.heading)),
+        // A swim replaces the walk rather than layering over it, for the
+        // same reason a leap does: a body cannot be mid-stride and prone
+        // in the water at once. Both are shown rather than inferred,
+        // because a viewer has no world to infer them from.
+        showing: animator
+            .swim
+            .map(Showing::Swim)
+            .or_else(|| animator.leap.map(Showing::Leap)),
+        cycle: Some(cycle),
+        gait: (animator.gait != GaitKind::Natural).then_some(frame.picked),
+        walk: WalkFlags {
+            posture: animator.posture,
+            head_level: animator.head_level,
+            footing: animator.footing.then(FootingConfig::default),
+            // Only while turning, and only while the postural layer is
+            // on. A gaze led down a straight path is a target the head
+            // already points at, so switching it on there would cost
+            // nothing and say nothing; switching it on with the posture
+            // off would put a head turn on a body deliberately being
+            // shown as bare legs.
+            gaze: (animator.posture && animator.turn != 0.0).then(GazeConfig::default),
+        },
+        turn: animator.turn.to_radians(),
+        // A blink is stochastic, so a single captured frame almost never
+        // catches one; holding the lids at a chosen point is what makes
+        // the geometry path checkable from a still. Either way the phase
+        // runs THROUGH the resting face, because adding a widened rest
+        // to a full blink leaves an eye that never shuts.
+        lids: (!animator.blinking).then_some(animator.closure),
+        face: frame.showing,
+        eyes: frame.eyes,
+        over_locomotion: Some(&over_locomotion),
+        over_settled: Some(&over_settled),
+        ..Inputs::default()
+    };
+    driver.drive(rig, &inputs, sloping(animator.grade, animator.camber))
 }
 
 /// Writes the face's pose layers in their contract order.
@@ -825,151 +1038,19 @@ fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
     }
 }
 
-/// Walks the body one frame and reports what the engine's own drive did.
+/// Moves the gesture's own clock by `delta`.
 ///
-/// **Every stage, through [`Walk::drive`]**, rather than a hand-rolled sequence
-/// that can silently drop one. A consumer that spells the stages out itself is a
-/// consumer that can forget `roll_feet` and go on drawing a gait that is missing
-/// it. The engine's entry point owns the order, the ground given to both the
-/// stride and the plant, and the roll landing after the settle.
+/// **A gesture is the one motion here with a clock of its own.** A greeting
+/// happens once and finishes; running it on [`Animator::cycle`] would loop it
+/// forever and play it at whatever speed the legs happen to be going. It holds
+/// at its end rather than clearing itself, so a body that has waved is left
+/// with its arm back at rest and the picker still says which gesture it made —
+/// which is also why it is not routed through [`Inputs::gesture`], where a
+/// request fires once and clears and a capture could not hold it at a phase.
 ///
-/// The toggles map onto its ablation switches, so turning the posture or the
-/// footing off here takes off exactly that and nothing else.
-fn walk(
-    rig: &symbios_avatar::Rig,
-    animator: &Animator,
-    pose: &mut Pose,
-    steps: &mut Steps,
-) -> (Gait, Stride) {
-    let gait = animator.gait.of(rig);
-    let mut stride =
-        Stride::for_body(rig, animator.pace).toward(rig, Heading::degrees(animator.heading));
-    // A yaw RATE is per second and a stride is per stance, so the cadence joins
-    // them — the body's own, recovered from the stride it is walking through
-    // `Speed::of` rather than named beside it (engine #241). A turn this file
-    // asserted independently of the legs would be a turn the feet were not
-    // taking.
-    let cadence = Speed::of(rig, &gait, &stride).cadence(rig);
-    if cadence > f32::EPSILON {
-        stride.yaw = animator.turn.to_radians() / cadence * gait.duty;
-    }
-    // Footing OFF here: this crate can layer an imported clip over the
-    // procedural walk, and a clip moves the legs — so the contacts are settled
-    // and the ankles rolled after that, through `Walk::settle`, further down.
-    let walked = Walk {
-        posture: animator.posture,
-        head_level: animator.head_level,
-        // Only while turning, and only while the postural layer is on. A gaze
-        // led down a straight path is a target the head already points at, so
-        // switching it on there would cost nothing and say nothing; switching
-        // it on with the posture off would put a head turn on a body that is
-        // deliberately being shown as bare legs.
-        gaze: (animator.posture && animator.turn != 0.0).then(GazeConfig::default),
-        footing: None,
-        ..Walk::at(animator.cycle)
-    }
-    .drive(
-        rig,
-        pose,
-        &gait,
-        &stride,
-        sloping(animator.grade, animator.camber),
-    );
-    *steps = walked.steps;
-    // **Both, because the tail needs both.** `Walk::settle` rolls the ankles,
-    // and since engine #241 that stage also turns each contact to face where it
-    // was planted — which is a property of the stride, not of the gait. Handing
-    // back only the gait left the caller rebuilding a stride and gave this
-    // crate two of them to keep in step.
-    (gait, stride)
-}
-
-/// Aims the head where a fidget just decided to look.
-///
-/// **Through the engine's own gaze layer.** [`symbios_avatar::Idled`] reports a
-/// POINT for exactly this reason, so the spread down the chest, neck and head
-/// and the clamp at a neck's limit all stay in one place — a head turn written
-/// here would be a second answer to a question that already has one.
-///
-/// Applied before the tracked gaze, which is a deliberate aim and outranks a
-/// glance.
-fn glance(rig: &Rig, pose: &mut Pose, idled: Option<symbios_avatar::Idled>) {
-    let Some(target) = idled.and_then(|idled| idled.glance) else {
-        return;
-    };
-    gaze::look_at(
-        rig,
-        pose,
-        target,
-        &symbios_avatar::anim::idle::glance_config(),
-    );
-}
-
-/// Drives one frame of a body that is standing about doing nothing.
-///
-/// **A body with nothing else to do stands and breathes**, and this is the
-/// state a viewer sees longest. Kept out of the main system for the same reason
-/// [`walk`] is: the whole layer is one call into the engine, and
-/// what lives here is only the choice of which parameter set that call gets.
-///
-/// Only ever reached when nothing else is driving the legs. An idle is what a
-/// body does INSTEAD of walking or leaping, not a layer over them — its weight
-/// shift settles the pelvis over one foot, which on a walking body would be a
-/// stand fighting a gait.
-///
-/// The talking variant follows [`Animator::talking`] rather than having a
-/// switch of its own: a body that is speaking is a body whose idle is the
-/// speaking one, and two switches for one fact is how they come to disagree.
-fn standing(
-    rig: &Rig,
-    animator: &mut Animator,
-    pose: &mut Pose,
-    delta: f32,
-    steps: &mut Steps,
-) -> symbios_avatar::Idled {
-    let config = if animator.talking {
-        IdleConfig::talking()
-    } else if animator.listening {
-        IdleConfig::listening()
-    } else {
-        IdleConfig::default()
-    };
-    // The floor is read out before the driver is borrowed, because
-    // `Idle::drive_on` takes the animator mutably and the ground comes off the
-    // same struct.
-    let floor = sloping(animator.grade, animator.camber);
-    animator.idler.set_config(config);
-    let idled = animator.idler.drive_on(rig, pose, delta, floor);
-    // A standing body has every foot down, which is what the footing tail needs
-    // told — the idle has already solved and planted them, but the readout the
-    // panel shows is taken from this list.
-    steps.stance = rig.ground_contacts();
-    idled
-}
-
-/// Moves every clock this window runs on by `delta`.
-///
-/// **One cursor for the gait and the clip, deliberately.** `anim::Play` is the
-/// engine's own cursor and this window already has one — the phase slider,
-/// which exists so a gait can be held still at one point in its cycle. Two
-/// cursors would disagree the first time somebody scrubbed, and the single
-/// thing an A/B most needs is that the gait and the clip are at the same point
-/// when they are compared. So `cycle` runs both, and a clip's time is
-/// `cycle * duration`.
-///
-/// **A gesture is the exception and has its own.** A greeting happens once and
-/// finishes; running it on `cycle` would loop it forever and play it at
-/// whatever speed the legs happen to be going. It holds at its end rather than
-/// clearing itself, so a body that has waved is left with its arm back at rest
-/// and the picker still says which gesture it made.
-///
-/// Every write here is guarded on the thing it advances actually running, which
-/// is what keeps the change-detection signal in the caller from latching on.
-fn advance(animator: &mut Animator, delta: f32) {
-    let running = animator.walking || animator.clip.is_some();
-    if running && !animator.scrub {
-        animator.cycle = (animator.cycle + delta * animator.cadence).fract();
-    }
+/// The write is guarded on the gesture actually running, which is what keeps
+/// the change-detection signal in [`steer`] from latching on.
+fn advance_gesture(animator: &mut Animator, delta: f32) {
     let scrubbing = animator.scrub;
     if let Some((_, through)) = &mut animator.gesture
         && !scrubbing
@@ -987,105 +1068,18 @@ fn advance(animator: &mut Animator, delta: f32) {
 /// walks — and what lets it wave at all on a body that has a hand free, and not
 /// on one that has none.
 ///
-/// **The return is what the gaze layers below need to know.** They write
-/// the head outright, so a gesture that aims it has to be able to say so; the
-/// clip already does, by carrying a [`Target::Gaze`] track, and asking the clip
-/// beats keeping a list of which gestures involve the head — a list that would
-/// be wrong the moment the roster grew.
-fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) -> bool {
+/// Whether it aimed the head is [`steer`]'s to ask, of the clip rather than of
+/// the name — a clip that aims the head carries a [`Target::Gaze`] track, and
+/// asking it beats keeping a list of which gestures involve the head, which
+/// would be wrong the moment the roster grew.
+fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) {
     let Some((name, through)) = &animator.gesture else {
-        return false;
+        return;
     };
     let Some(gesture) = gesture::by_name(name) else {
-        return false;
+        return;
     };
     gesture.apply(rig, pose, *through);
-    gesture
-        .tracks
-        .iter()
-        .any(|track| track.target == Target::Gaze)
-}
-
-/// Drives whichever way of getting about is switched on, and says whether it
-/// was the walk.
-///
-/// **One at a time, and that is the point of gathering them here.** A body
-/// cannot be mid-stride and mid-air, or mid-stride and prone in the water, at
-/// once; pretending otherwise is how a jump ends up with a walk cycle still
-/// running underneath it. Written as one match over the three so that adding a
-/// fourth has to say what it replaces.
-fn travelling(
-    rig: &Rig,
-    animator: &Animator,
-    gaiting: bool,
-    pose: &mut Pose,
-    steps: &mut Steps,
-) -> Option<(Gait, Stride)> {
-    match (animator.swim, animator.leap) {
-        // Nothing is added to `stance`: a swimming body has nothing on the
-        // ground, and handing the footing tail a contact list is what would
-        // drag its feet back down to a floor it is nowhere near.
-        (Some(swim), _) => {
-            Swim {
-                cycle: animator.cycle,
-                ..swim
-            }
-            .drive(rig, pose);
-            None
-        }
-        (None, Some(leap)) => {
-            leaping(rig, animator, leap, pose, steps);
-            None
-        }
-        (None, None) => gaiting.then(|| walk(rig, animator, pose, steps)),
-    }
-}
-
-/// Drives one frame of a leap, on [`Animator::cycle`]'s own clock.
-///
-/// The cycle runs `0..1` over the whole leap — wind-up, flight and landing —
-/// so `hold` scrubs a jump exactly as it scrubs a gait, which is the only way
-/// to look at one instant of it.
-fn leaping(rig: &Rig, animator: &Animator, leap: Leap, pose: &mut Pose, steps: &mut Steps) {
-    let leapt = leap.drive(
-        rig,
-        pose,
-        animator.cycle * leap.duration(rig),
-        sloping(animator.grade, animator.camber),
-    );
-    // The footing tail runs only where the body has feet down; in flight there
-    // is nothing to settle and asking would drag them back to the floor.
-    if leapt.stage.is_grounded() {
-        steps.stance = rig.ground_contacts();
-    }
-}
-
-/// Settles the contacts and rolls the ankles, and records what it cost.
-///
-/// The tail of the engine's own drive sequence, kept apart from
-/// [`walk`] because this crate can layer an imported clip between the two — a
-/// clip moves the legs, so the feet are settled and the ankles rolled after it
-/// rather than before.
-fn settle(
-    rig: &symbios_avatar::Rig,
-    animator: &Animator,
-    pose: &mut Pose,
-    gait: &Gait,
-    stride: &Stride,
-    steps: &Steps,
-) -> Walked {
-    Walk {
-        footing: animator.footing.then(FootingConfig::default),
-        ..Walk::at(animator.cycle)
-    }
-    .settle(
-        rig,
-        pose,
-        gait,
-        stride,
-        steps,
-        sloping(animator.grade, animator.camber),
-    )
 }
 
 /// Which way the sloped ground faces, for a given grade and camber.
@@ -1133,7 +1127,7 @@ pub fn floor_tilt(grade: f32, camber: f32) -> Quat {
 /// whatever ground it is given: handing those two
 /// different floors is exactly what leaves a swing arc at the rest ground height
 /// while the plant settles onto a hill.
-fn sloping(grade: f32, camber: f32) -> impl Fn(Vec3) -> Option<Ground> {
+fn sloping(grade: f32, camber: f32) -> impl Fn(Vec3) -> Option<Ground> + Copy {
     let normal = ground_normal(grade, camber);
     move |foot: Vec3| {
         Some(Ground {
@@ -1141,38 +1135,6 @@ fn sloping(grade: f32, camber: f32) -> impl Fn(Vec3) -> Option<Ground> {
             normal,
         })
     }
-}
-
-/// Carries one body's transition forward, and remembers this frame.
-///
-/// A transition starts on the frame the source changes and decays from there;
-/// [`Inertializer::apply`] on a finished one returns the target unchanged, so a
-/// settled body costs a clone and nothing else.
-fn blend_into(
-    blending: &mut Blending,
-    target: Pose,
-    switched: bool,
-    duration: f32,
-    delta: f32,
-) -> Pose {
-    if switched && duration > 0.0 {
-        let (previous, current) = (blending.previous.clone(), blending.current.clone());
-        blending.running = Some(Inertializer::start(
-            &previous, &current, &target, delta, duration,
-        ));
-    }
-    let posed = match &mut blending.running {
-        Some(running) if !running.finished() => {
-            running.advance(delta);
-            running.apply(&target)
-        }
-        _ => {
-            blending.running = None;
-            target
-        }
-    };
-    blending.previous = std::mem::replace(&mut blending.current, posed.clone());
-    posed
 }
 
 /// The clip picker and the two switches that go with it.
@@ -1376,7 +1338,22 @@ fn locomotion_section(
         });
     }
     if !standing {
-        ui.add(egui::Slider::new(&mut animator.cadence, 0.05..=3.0).text("cadence /s"));
+        // **A checkbox rather than a bare slider**, because the default answer
+        // is now "whatever this speed implies" and a slider alone could not say
+        // that. Ticking it takes the cadence off the speed axis on purpose,
+        // which is a thing to do to a walk — slow the cursor and watch a foot
+        // plant — rather than a claim about one.
+        ui.horizontal(|ui| {
+            let mut naming = animator.cadence.is_some();
+            if ui.toggle_value(&mut naming, "cadence /s").changed() {
+                animator.cadence = naming.then_some(1.1);
+            }
+            if let Some(cadence) = &mut animator.cadence {
+                ui.add(egui::Slider::new(cadence, 0.05..=3.0).text(""));
+            } else {
+                ui.label("from the speed");
+            }
+        });
         ui.horizontal(|ui| {
             ui.add(
                 egui::Slider::new(&mut animator.cycle, 0.0..=1.0)
@@ -1453,19 +1430,16 @@ fn ground_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
     ui.label(egui::RichText::new("ground").strong());
     ui.horizontal(|ui| {
         ui.toggle_value(&mut animator.footing, "footing");
-        // The readout the locomotion question should be settled on. A pose
-        // whose feet already land where the ground is needs no correction; one
-        // whose do not is being held together by the solve, and the difference
-        // between an imported clip and a procedural gait shows here before it
-        // shows in anybody's opinion.
-        ui.label(format!(
-            "lifts {:.0} mm{}",
-            animator.lift * 1000.0,
-            match animator.straining {
-                0 => String::new(),
-                n => format!(", {n} straining"),
-            }
-        ));
+        // The readout the locomotion question should be settled on. A body
+        // that strains occasionally is a body on hard ground; one that strains
+        // constantly is a body whose goals are wrong. It used to say how far
+        // the solve moved the feet as well — see [`Animator::strained`] for
+        // where those figures went.
+        ui.label(if animator.strained {
+            "straining"
+        } else {
+            "reaching"
+        });
     });
     // Two axes, because a plane in 3D has two (#252): the hill the body walks
     // up and the hill it stands across. Both at once is a diagonal, which is
@@ -1609,14 +1583,24 @@ mod tests {
     }
 
     /// A headless app with just enough of Bevy to build and drive a body.
+    ///
+    /// **Without `TimePlugin`, deliberately.** A driven frame is a function of
+    /// how long it was, and left to the real clock a test frame is a few
+    /// microseconds — so a transition asked to take a fifth of a second gets
+    /// through a ten-thousandth of itself per frame and reads, from outside, as
+    /// a blend that never started. That cost a wrong diagnosis once. Disabling
+    /// the plugin leaves `Time` to [`tick`], which is what makes these frames a
+    /// fixed sixtieth of a second and the results the same on a fast machine
+    /// and a slow one.
     fn app() -> App {
         let mut app = App::new();
         app.add_plugins((
-            MinimalPlugins,
+            MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
             AssetPlugin::default(),
             bevy::mesh::MeshPlugin,
             bevy::image::ImagePlugin::default(),
         ))
+        .init_resource::<Time>()
         .init_asset::<StandardMaterial>()
         .init_asset::<SkinnedMeshInverseBindposes>()
         .init_resource::<Animator>()
@@ -1626,19 +1610,22 @@ mod tests {
         .init_resource::<Wrote>()
         .add_systems(
             Update,
-            (
-                build_requested_avatars,
-                drive_avatar_animation,
-                count_writes,
-            )
-                .chain(),
+            (build_requested_avatars, adopt_bodies, steer, count_writes).chain(),
         );
         app.world_mut().spawn(SpawnAvatar::from(AvatarRecord::new(
             "Driven",
             Archetype::default(),
         )));
-        app.update();
+        tick(&mut app);
         app
+    }
+
+    /// One frame, a sixtieth of a second long.
+    fn tick(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
+        app.update();
     }
 
     #[test]
@@ -1652,7 +1639,7 @@ mod tests {
             animator.talking = false;
             animator.opening = 0.25;
         }
-        app.update();
+        tick(&mut app);
         let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarPose)>();
         let (body, pose) = bodies.single(app.world()).expect("a driven body");
         let rig = &body.avatar.rig;
@@ -1684,7 +1671,7 @@ mod tests {
             animator.blend = 0.05;
         }
         for _ in 0..120 {
-            app.update();
+            tick(&mut app);
         }
         let animator = app.world().resource::<Animator>();
         assert_eq!(
@@ -1735,8 +1722,8 @@ mod tests {
             animator.expression = Expression::SURPRISED;
             animator.blend = 0.0;
         }
-        app.update();
-        app.update();
+        tick(&mut app);
+        tick(&mut app);
         let mut closures = app.world_mut().query::<&AvatarClosure>();
         let held = closures.single(app.world()).expect("a driven body").0;
         assert!(
@@ -1747,7 +1734,7 @@ mod tests {
             let mut animator = app.world_mut().resource_mut::<Animator>();
             animator.closure = 1.0;
         }
-        app.update();
+        tick(&mut app);
         let held = closures.single(app.world()).expect("a driven body").0;
         assert!(
             (held - 1.0).abs() < 1e-4,
@@ -1771,8 +1758,8 @@ mod tests {
             animator.viseme = Some(Viseme::Aa);
             animator.blend = 0.0;
         }
-        app.update();
-        app.update();
+        tick(&mut app);
+        tick(&mut app);
         let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarPose)>();
         let (body, pose) = bodies.single(app.world()).expect("a driven body");
         let rig = &body.avatar.rig;
@@ -1797,8 +1784,8 @@ mod tests {
             animator.walking = false;
             animator.talking = true;
         }
-        app.update();
-        app.update();
+        tick(&mut app);
+        tick(&mut app);
         assert!(
             app.world().resource::<Wrote>().0 > 0,
             "a talking body went unwritten"
@@ -1820,7 +1807,7 @@ mod tests {
         );
 
         let at = |app: &mut App| {
-            app.update();
+            tick(app);
             let mut bodies = app.world_mut().query::<&AvatarPose>();
             bodies
                 .iter(app.world())
@@ -1864,97 +1851,88 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builtin-clips")]
     #[test]
-    fn switching_source_starts_a_blend_that_advances() {
-        // What #141 lists as a thing to watch — what it costs to blend out of a
-        // clip — asserted at both ends. A blend that never starts is a snap, and
-        // one that never finishes is a body permanently offset from what it is
-        // being told to do.
-        let mut app = app();
-        app.insert_resource(Clips::builtin());
-        {
-            let mut animator = app.world_mut().resource_mut::<Animator>();
-            animator.walking = true;
-            animator.blinking = false;
-            animator.tracking = false;
-            animator.blend = 0.2;
-        }
-        app.update();
+    fn switching_source_blends_and_a_zero_blend_snaps() {
+        // What #141 lists as a thing to watch — what a transition costs —
+        // asserted at both ends. A blend that never starts is a snap, and a
+        // snap that blends anyway is a slider that does nothing.
+        //
+        // **Read off the drawn pose rather than off a transition object**, and
+        // that is the shape of the change #43 made rather than a weaker test.
+        // The blend belongs to `AvatarDriver` now and it keeps no per-body
+        // component to look inside, so what is asserted is what a viewer can
+        // actually see: one frame after a source switch, a blended body is
+        // still near the pose it is leaving and a snapping one has arrived at
+        // the pose it is going to.
+        //
+        // The switch is walk-to-stand, which is a change of source the driver
+        // owns. A CLIP switch no longer blends: a clip is a layer over the
+        // motion in the new division, and only the thing that owns the motion
+        // can start a transition through it. That is a real loss and it is
+        // written down on #43 rather than hidden here.
+        let leaving = |blend: f32| {
+            let mut app = app();
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.walking = true;
+                animator.blinking = false;
+                animator.tracking = false;
+                animator.blend = blend;
+            }
+            // **Walked in first, and the count is not padding.** The body
+            // leaves rest through a source change of its own, and a transition
+            // still running when the switch under test arrives would put the
+            // first blend into the second's reading. Thirty frames is half a
+            // second against a fifth of one.
+            for _ in 0..30 {
+                tick(&mut app);
+            }
+            let walking = posed(&mut app);
+            app.world_mut().resource_mut::<Animator>().walking = false;
+            tick(&mut app);
+            (walking.clone(), posed(&mut app))
+        };
 
-        app.world_mut().resource_mut::<Animator>().clip = Some(0);
-        app.update();
+        let (walking, blended) = leaving(0.2);
+        let (snapped_from, snapped) = leaving(0.0);
+        // The two runs walk to the same place, so the poses they leave are
+        // comparable — if they were not, the comparison below would be reading
+        // a difference in where the bodies started.
         assert!(
-            blending(&mut app),
-            "switching from the gait to a clip did not start a blend"
+            apart_by(&walking, &snapped_from) < 1e-3,
+            "the two runs did not leave the same pose, so nothing below compares"
         );
-
-        // **Not "it finishes within N frames".** A headless `app.update()` costs
-        // microseconds of wall clock and `Time` reports wall clock, so a loop of
-        // any length advances the transition by almost nothing — the first
-        // version of this asserted a finish and failed for that reason rather
-        // than for a defect. What is this crate's to assert is the WIRING: the
-        // transition moves forward on its own, and finiteness is
-        // `Inertializer`'s own property and is tested where it lives.
-        let started = progress(&mut app);
-        for _ in 0..8 {
-            app.update();
-        }
         assert!(
-            progress(&mut app) > started,
-            "the blend was started and then never advanced"
+            apart_by(&blended, &walking) < apart_by(&snapped, &walking),
+            "a blended switch left the walk no more gently than a snap: \
+             blended moved {:.4} rad, snapped {:.4}",
+            apart_by(&blended, &walking),
+            apart_by(&snapped, &walking)
         );
-
-        // And a zero duration is a snap rather than a transition, which is what
-        // the slider's own bottom end means.
-        let mut snapping = app_with_clips();
-        {
-            let mut animator = snapping.world_mut().resource_mut::<Animator>();
-            animator.walking = true;
-            animator.blend = 0.0;
-        }
-        snapping.update();
-        snapping.world_mut().resource_mut::<Animator>().clip = Some(0);
-        snapping.update();
         assert!(
-            !blending(&mut snapping),
-            "a zero-second blend still started a transition"
+            apart_by(&snapped, &blended) > 1e-4,
+            "the blend slider changed nothing at all"
         );
     }
 
-    /// A headless app whose clips are the ones this build carries.
-    #[cfg(feature = "builtin-clips")]
-    fn app_with_clips() -> App {
-        let mut app = app();
-        app.insert_resource(Clips::builtin());
-        {
-            let mut animator = app.world_mut().resource_mut::<Animator>();
-            animator.blinking = false;
-            animator.tracking = false;
-        }
-        app
-    }
-
-    /// How far through its transition the one body is.
-    #[cfg(feature = "builtin-clips")]
-    fn progress(app: &mut App) -> f32 {
-        let mut bodies = app.world_mut().query::<&Blending>();
+    /// The pose the one body is drawn in.
+    fn posed(app: &mut App) -> Pose {
+        let mut bodies = app.world_mut().query::<&AvatarPose>();
         bodies
             .iter(app.world())
             .next()
-            .and_then(|b| b.running.as_ref())
-            .map_or(1.0, symbios_avatar::Inertializer::progress)
+            .expect("a posed body")
+            .0
+            .clone()
     }
 
-    /// Whether the one body has a transition running.
-    #[cfg(feature = "builtin-clips")]
-    fn blending(app: &mut App) -> bool {
-        let mut bodies = app.world_mut().query::<&Blending>();
-        bodies
-            .iter(app.world())
-            .next()
-            .and_then(|b| b.running.as_ref())
-            .is_some_and(|running| !running.finished())
+    /// The furthest any joint of `a` is turned from the same joint of `b`.
+    fn apart_by(a: &Pose, b: &Pose) -> f32 {
+        a.rotations
+            .iter()
+            .zip(&b.rotations)
+            .map(|(a, b)| a.angle_between(*b))
+            .fold(0.0f32, f32::max)
     }
 
     /// The one body's rig.
@@ -1988,14 +1966,14 @@ mod tests {
             animator.tracking = false;
             animator.closure = 0.0;
         }
-        app.update();
+        tick(&mut app);
         assert_eq!(
             app.world().resource::<Wrote>().0,
             1,
             "the frame a still pose was asked for did not write it"
         );
 
-        app.update();
+        tick(&mut app);
         assert_eq!(
             app.world().resource::<Wrote>().0,
             0,
@@ -2012,8 +1990,8 @@ mod tests {
             let mut animator = app.world_mut().resource_mut::<Animator>();
             animator.walking = true;
         }
-        app.update();
-        app.update();
+        tick(&mut app);
+        tick(&mut app);
         assert_eq!(
             app.world().resource::<Wrote>().0,
             1,
@@ -2034,7 +2012,7 @@ mod tests {
             animator.tracking = false;
             animator.closure = 1.0;
         }
-        app.update();
+        tick(&mut app);
         let mut query = app.world_mut().query::<&AvatarClosure>();
         let shut = query
             .iter(app.world())
@@ -2054,8 +2032,8 @@ mod tests {
             animator.scrub = true;
             animator.cycle = 0.375;
         }
-        app.update();
-        app.update();
+        tick(&mut app);
+        tick(&mut app);
         let held = app.world().resource::<Animator>().cycle;
         assert_eq!(
             held.to_bits(),
@@ -2072,7 +2050,7 @@ mod tests {
             animator.walking = true;
             animator.cycle = 0.0;
         }
-        app.update();
+        tick(&mut app);
         assert!(
             app.world().resource::<Animator>().cycle > 0.0,
             "walking did not advance the cycle"
@@ -2160,7 +2138,16 @@ mod tests {
                 animator.scrub = true;
                 animator.cycle = 0.25;
             }
-            app.update();
+            // **Long enough for the transition to land.** A swim is its own
+            // motion family, so entering one is a source change the driver
+            // blends — it did not before #43, when this window switched
+            // motions with no transition between them and a single frame was
+            // enough to read the new one. Twenty frames is a third of a second
+            // against a blend of 0.15, and the cycle is scrubbed, so nothing
+            // else moves while they pass.
+            for _ in 0..20 {
+                tick(app);
+            }
             let mut posed = app.world_mut().query::<&AvatarPose>();
             let pose = posed.iter(app.world()).next().expect("a pose").0.clone();
             let places = pose.forward(&rig).positions;
@@ -2221,7 +2208,7 @@ mod tests {
                 animator.scrub = true;
                 animator.cycle = cycle;
             }
-            app.update();
+            tick(app);
             let mut posed = app.world_mut().query::<&AvatarPose>();
             let pose = posed.iter(app.world()).next().expect("a pose").0.clone();
             pose.forward(&rig).positions[root].y - rest
@@ -2302,7 +2289,7 @@ mod tests {
             // first one after a switch is part of the way there. What is being
             // asserted is where the head ends up, not how fast it gets there.
             for _ in 0..40 {
-                app.update();
+                tick(app);
             }
             let mut posed = app.world_mut().query::<&AvatarPose>();
             let pose = posed.iter(app.world()).next().expect("a pose").0.clone();

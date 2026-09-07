@@ -67,14 +67,49 @@
 //!   a clip's frame 0 is whatever its author exported first, and until the two
 //!   origins are matched every column compares two different moments of the
 //!   stride. Found once per clip by eye; **`Walk` wants `--align 0.5`**.
-//! - `--accel from:to` makes it an acceleration strip: columns become wall
-//!   clock (`--span` seconds wide, default 1.0) and the pace steps at the
-//!   middle over `--ramp` seconds (default 0.016, the consuming app's measured
-//!   chassis profile) — because a term that follows pace snaps when pace
-//!   steps, and no steady-cycle frame can show a snap. Gait rows only; `--pace`
-//!   is ignored there.
+//! - `--profile from:to` makes it a speed-step strip: columns become wall
+//!   clock (`--span` seconds wide, default 1.0) and the speed steps at the
+//!   middle — because a term that follows speed snaps when speed steps, and no
+//!   steady-cycle frame can show a snap. Gait rows only; `--pace` is ignored
+//!   there. The step is **raw** now: the driver eases the pace itself, so a
+//!   pre-smoothed input would photograph this instrument's own filter instead
+//!   of the engine's. `--ramp` bends the input anyway if you want it, and
+//!   `--pace-response` moves the easing being judged (0 is the snap the walk
+//!   had before there was any). `--accel` is the old name and still works.
 //! - `--yaw` overrides the strip's default near-side camera; `--seed`,
 //!   `--gait`, `--cadence`, `--mane` and the rest apply as ever.
+//!
+//! **The synthetic chassis** — a body that actually travels, which is what
+//! every motion defect since the driver was written needs to be seen on. A stop
+//! that skates, an apex that plants a foot and a trunk that unloads between two
+//! frames are all about a body whose speed CHANGES, and none of them happens to
+//! a body walking on the spot; a still cannot show a sixty-frame skid either.
+//! `--travel` hands the driver `Carriage::Chassis`, integrates a velocity into a
+//! place, walks the body through the world and lets the camera follow it.
+//!
+//! ```text
+//! cargo run --release --example viewer -- --travel --speed 1.4
+//! cargo run --release --example viewer -- --travel --speed 1.4 --stop-at 2.0
+//! cargo run --release --example viewer -- --travel --speed 1.4 --stop-at 2.0 --ramp 0.5
+//! cargo run --release --example viewer -- --travel --jump 5.6
+//! cargo run --release --example viewer -- --travel --profile 1.0:2.4:0.5
+//! ```
+//!
+//! - `--speed M` is metres a second on the axis, and it is the number the
+//!   engine's speed axis actually wants — stride, duty, cadence, foot lift and
+//!   the walk-run boundary all come off it. `--pace` is the older way in and
+//!   converts to one; the two are not the same stride and never were, so a
+//!   sheet taken at a pace and one taken at a speed are different pictures.
+//! - `--stop-at S` stops the body dead at `S` seconds, which is the profile the
+//!   consuming application's own skid instrument measures; `--ramp R` makes it a
+//!   linear stop over `R` seconds instead.
+//! - `--jump V` fires a `V` m/s impulse at `--jump-at` seconds (default 1.0) and
+//!   lets gravity bring it down to the floor it left. Beside `--leap`, which
+//!   shows the same jump on a body that carries its own root, the pair is the
+//!   two carriages' divergence on screen: one flight arc, or two.
+//! - `--profile A:B:R` ramps the raw speed from `A` to `B` over `R` seconds and
+//!   feeds it to the driver unsmoothed, so what is on screen is the engine's
+//!   easing and not the instrument's.
 //!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints
 //! a megapixel atlas, and debug spends about half a minute on that.
@@ -123,6 +158,7 @@ use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind, floor_ti
 use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
 use bevy_symbios_avatar::strips::{AccelClock, PaceStep, Row, Sample, StripPlan, stitch};
 use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, AvatarSystems, Clips};
+use symbios_avatar::anim::driver::Carriage;
 use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
 
 /// How far the camera starts from the body, as a multiple of its longest side.
@@ -160,6 +196,12 @@ const SETTLE: u32 = 12;
 const GIVE_UP: u32 = 600;
 /// How many frames to let a window disappear in before capturing.
 const CLEAR: u32 = 2;
+/// How fast a speed-step strip's cursor runs between its columns, in cycles a
+/// second. The rate this window ran every cursor at before the speed axis
+/// decided it, kept here so a sheet taken today lands on the phases one taken
+/// before #43 did.
+const STRIP_CADENCE: f32 = 1.1;
+
 /// The strip camera's default yaw, in radians: a near-side view.
 ///
 /// A stride is almost entirely forward and back, so head-on it reads as
@@ -204,50 +246,56 @@ fn value(name: &str) -> Option<f32> {
 }
 
 fn main() {
-    App::new()
-        .add_plugins((
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "symbios avatar".into(),
-                    // A strip cell is one body standing in a portrait frame,
-                    // and the window is the capture unit — so the window IS
-                    // the cell, and a sheet of default-sized windows would be
-                    // mostly floor.
-                    resolution: if word("--strip").is_some() {
-                        (480, 800).into()
-                    } else {
-                        default()
-                    },
-                    ..default()
-                }),
+    let mut app = App::new();
+    app.add_plugins((
+        DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(Window {
+                title: "symbios avatar".into(),
+                // A strip cell is one body standing in a portrait frame,
+                // and the window is the capture unit — so the window IS
+                // the cell, and a sheet of default-sized windows would be
+                // mostly floor.
+                resolution: if word("--strip").is_some() {
+                    (480, 800).into()
+                } else {
+                    default()
+                },
                 ..default()
             }),
-            AvatarPlugin,
-            AnimatorPlugin,
-            EguiPlugin::default(),
-            RecordEditorPlugin,
-            PanOrbitCameraPlugin,
-        ))
-        .insert_resource(starting_editor())
-        .insert_resource(starting_animator())
-        .init_resource::<Shot>()
-        // Chained: the strip plan needs to know which clip `--clip` resolved
-        // to, so it must build after the picker has run.
-        .add_systems(Startup, (stage, pick_clip, plan_strip).chain())
-        .add_systems(
-            Update,
-            (frame_on_body, shortcuts, shoot, tilt_floor, turn_body),
-        )
-        // Before the animate set, so the sample a frame captures is the sample
-        // that was applied this frame rather than last frame's.
-        .add_systems(Update, strip.before(AvatarSystems::Animate))
-        .add_systems(
-            PostUpdate,
-            // Before the crate reads its input for the frame, which is what
-            // makes the gate a gate rather than a correction applied late.
-            gate_camera_on_gui.before(PanOrbitCameraSystemSet),
-        )
-        .run();
+            ..default()
+        }),
+        AvatarPlugin,
+        AnimatorPlugin,
+        EguiPlugin::default(),
+        RecordEditorPlugin,
+        PanOrbitCameraPlugin,
+    ))
+    .insert_resource(starting_editor())
+    .insert_resource(starting_animator())
+    .init_resource::<Shot>()
+    // Chained: the strip plan needs to know which clip `--clip` resolved
+    // to, so it must build after the picker has run.
+    .add_systems(Startup, (stage, pick_clip, plan_strip).chain())
+    .add_systems(
+        Update,
+        (frame_on_body, shortcuts, shoot, tilt_floor, turn_body),
+    )
+    // Before the animate set, so the sample a frame captures is the sample
+    // that was applied this frame rather than last frame's — and so is the
+    // place the synthetic chassis has carried the body to.
+    .add_systems(Update, (strip, travel).before(AvatarSystems::Animate))
+    .add_systems(
+        PostUpdate,
+        // Before the crate reads its input for the frame, which is what
+        // makes the gate a gate rather than a correction applied late.
+        gate_camera_on_gui.before(PanOrbitCameraSystemSet),
+    );
+    // Only under `--travel`, so every system that reads it is inert in an
+    // ordinary session and a body walking on the spot carries itself.
+    if let Some(chassis) = Chassis::from_flags() {
+        app.insert_resource(chassis);
+    }
+    app.run();
 }
 
 /// Marks the camera as one a body should be framed in.
@@ -288,6 +336,152 @@ fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Flo
     }
 }
 
+/// Something else carrying the body, exactly as a physics chassis does.
+///
+/// **The instrument this window was missing** (#43). Every motion defect since
+/// the driver was written has been about a body whose speed CHANGES — a stop
+/// that skates, an apex that plants a foot, a trunk that unloads between two
+/// frames — and none of them can be seen on a body walking on the spot. A still
+/// cannot show a sixty-frame skid either. So this integrates a velocity into a
+/// place, moves the body through the world and lets the camera follow, which
+/// turns the flags below into the same experiment an application performs.
+///
+/// Only inserted under `--travel`, so every system that reads it is inert in an
+/// ordinary session.
+#[derive(Resource)]
+struct Chassis {
+    /// Where the body has got to.
+    at: Vec3,
+    /// Seconds since the run began.
+    elapsed: f32,
+    /// How fast it travels along its own forward, before any stop.
+    cruise: f32,
+    /// A raw speed step: from, to, and how long it takes.
+    ///
+    /// **Raw, and that is the point of it.** The driver eases the pace itself
+    /// now, so an instrument that pre-smoothed a step would be measuring its own
+    /// filter — see `--pace-response`, which is the knob the easing is judged
+    /// with.
+    profile: Option<(f32, f32, f32)>,
+    /// When the body stops dead, in seconds, if it does.
+    stop_at: Option<f32>,
+    /// How long the stop takes. Zero is the dead stop.
+    ramp: f32,
+    /// How fast the body is going up, in m/s. A jump is an impulse into this.
+    vertical: f32,
+    /// Whether a jump has been fired yet.
+    jumped: bool,
+}
+
+impl Chassis {
+    /// The chassis this run's flags describe, or [`None`] without `--travel`.
+    fn from_flags() -> Option<Self> {
+        flag("--travel").then(|| Self {
+            at: Vec3::ZERO,
+            elapsed: 0.0,
+            cruise: value("--speed").unwrap_or(1.4),
+            profile: word("--profile").and_then(|spec| {
+                let mut parts = spec.split(':');
+                Some((
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                    parts.next()?.parse().ok()?,
+                ))
+            }),
+            stop_at: value("--stop-at"),
+            ramp: value("--ramp").unwrap_or(0.0),
+            vertical: 0.0,
+            jumped: false,
+        })
+    }
+
+    /// How fast the body should be travelling, `elapsed` seconds in.
+    fn speed(&self) -> f32 {
+        if let Some((from, to, over)) = self.profile {
+            return if over <= 0.0 {
+                to
+            } else {
+                from + (to - from) * (self.elapsed / over).clamp(0.0, 1.0)
+            };
+        }
+        let Some(stop) = self.stop_at else {
+            return self.cruise;
+        };
+        if self.elapsed < stop {
+            return self.cruise;
+        }
+        if self.ramp <= 0.0 {
+            return 0.0;
+        }
+        self.cruise * (1.0 - ((self.elapsed - stop) / self.ramp).clamp(0.0, 1.0))
+    }
+}
+
+/// How hard the world pulls a jumping body down, in m/s².
+const GRAVITY: f32 = 9.81;
+
+/// Carries the body through the world, and tells the driver it is being
+/// carried.
+///
+/// **[`Carriage::Chassis`] is the whole difference and it is a flight arc, not
+/// a detail**: something else is moving the root, so a leap must not carry it
+/// again. Beside `--leap`, which shows the same jump under `Carriage::Own`, the
+/// pair is the divergence on screen.
+///
+/// Runs before the animate set, so the place written here is the place this
+/// frame is driven from rather than last frame's.
+fn travel(
+    time: Res<Time>,
+    chassis: Option<ResMut<Chassis>>,
+    mut animator: ResMut<Animator>,
+    mut bodies: Query<&mut Transform, With<AvatarBody>>,
+    mut cameras: Query<&mut PanOrbitCamera>,
+) {
+    let Some(mut chassis) = chassis else {
+        return;
+    };
+    let delta = time.delta_secs();
+    chassis.elapsed += delta;
+    // The jump: one impulse, then gravity, caught by the floor it left. The
+    // same shape the consuming application's harness drives, so what shows here
+    // is what shows there.
+    if let Some(launch) = value("--jump") {
+        if !chassis.jumped && chassis.elapsed >= value("--jump-at").unwrap_or(1.0) {
+            chassis.vertical = launch;
+            chassis.jumped = true;
+        }
+        if chassis.jumped {
+            chassis.vertical -= GRAVITY * delta;
+        }
+    }
+    let speed = chassis.speed();
+    let rise = chassis.vertical * delta;
+    chassis.at += Vec3::Z * (speed * delta) + Vec3::Y * rise;
+    if chassis.at.y <= 0.0 {
+        chassis.at.y = 0.0;
+        chassis.vertical = 0.0;
+    }
+    // The driver reads the velocity's SIGNED vertical as the whole of its
+    // airborne state machine, so the two are handed over together.
+    animator.carriage = Carriage::Chassis;
+    animator.speed = Some(speed);
+    animator.at = chassis.at;
+    animator.vertical = chassis.vertical;
+    let place = chassis.at;
+    for mut transform in &mut bodies {
+        transform.translation = place;
+    }
+    // **The camera goes with it**, or a travelling body walks out of frame in
+    // two seconds and the instrument shows an empty floor. Tracking the place
+    // rather than re-framing, so the distance and the angle somebody chose stay
+    // exactly where they were put.
+    for mut camera in &mut cameras {
+        camera.target_focus = place + Vec3::Y;
+        camera.focus = camera.target_focus;
+        camera.force_update = true;
+    }
+}
+
 /// Yaws the whole body by the turn the animator is walking.
 ///
 /// **The viewer draws a gait in place, so without this a turn is invisible in
@@ -304,6 +498,9 @@ fn tilt_floor(animator: Res<Animator>, mut floor: Query<&mut Transform, With<Flo
 fn turn_body(animator: Res<Animator>, mut bodies: Query<&mut Transform, With<AvatarBody>>) {
     let heading = Quat::from_rotation_y(animator.heading());
     for mut transform in &mut bodies {
+        // The rotation only: under `--travel` the translation belongs to
+        // [`travel`], and writing a whole transform here would put the body
+        // back at the origin every frame.
         transform.rotation = heading;
     }
 }
@@ -479,8 +676,18 @@ fn starting_animator() -> Animator {
     // Both from the same place the window's sliders write, and both left at the
     // resource's own default when they are not given: a flag that silently
     // re-tuned a gait would make every capture incomparable with every other.
-    animator.cadence = value("--cadence").unwrap_or(animator.cadence);
+    // `--cadence` NAMES a cadence; left off, the cursor runs at the one the
+    // speed implies, which is what makes the stride and the clock agree.
+    animator.cadence = value("--cadence");
     animator.pace = value("--pace").unwrap_or(animator.pace);
+    // **The speed axis's own number, and the one the engine actually wants.**
+    // `--pace` is kept as the older way in and converts to this; naming a speed
+    // says the thing directly, which is what a comparison against an
+    // application — whose bodies travel in metres a second — has to be able to
+    // do. Either way the body has to be told to walk.
+    animator.speed = value("--speed");
+    animator.walking |= animator.speed.is_some() || flag("--travel");
+    animator.pace_response = value("--pace-response").unwrap_or(animator.pace_response);
     // So a captured frame can be placed in the cycle rather than wherever the
     // twelfth frame happened to land. Judging a gait from one arbitrary phase
     // is how a walk gets called stiff when it has only ever been seen at
@@ -943,28 +1150,39 @@ fn plan_strip(mut commands: Commands, clips: Res<Clips>, animator: Res<Animator>
     }
     let ablate = flag("--norelevel");
 
-    let (plan, mut legend) = if let Some(step) = word("--accel") {
+    let (plan, mut legend) = if let Some(step) = word("--profile").or_else(|| word("--accel")) {
         let Some((from, to)) = step
             .split_once(':')
             .and_then(|(a, b)| Some((a.parse::<f32>().ok()?, b.parse::<f32>().ok()?)))
         else {
-            eprintln!("--accel wants from:to, e.g. --accel 1.0:1.8");
+            eprintln!("--profile wants from:to, e.g. --profile 1.0:1.8");
             std::process::exit(1);
         };
         if word("--clip").is_some() {
-            eprintln!("an accel strip has no reference row: a baked clip has no pace to step");
+            eprintln!("a speed-step strip has no reference row: a baked clip has no pace to step");
             std::process::exit(1);
         }
         let step = PaceStep {
             from,
             to,
-            // The consuming app's measured chassis profile: velocity is
-            // assigned, not damped, and a new speed arrives in about 0.016 s.
-            ramp: value("--ramp").unwrap_or(0.016),
+            // **Raw by default since #43, and the old default's premise has
+            // expired.** It used to pre-smooth the step over 0.016 s to imitate
+            // the consuming app's chassis, which assigns velocity rather than
+            // damping it. The driver now eases the pace itself, so a strip that
+            // arrived pre-smoothed would be photographing this instrument's own
+            // filter instead of the engine's. `--ramp` still bends the input for
+            // a caller who wants to; `--pace-response` is the knob that moves
+            // the easing being judged.
+            ramp: value("--ramp").unwrap_or(0.0),
         };
         let clock = AccelClock {
             span: value("--span").unwrap_or(1.0),
-            cadence: animator.cadence,
+            // The PLAN's clock, not the body's. A speed-step strip's columns
+            // are wall-clock samples and the body is held still at each one, so
+            // this only decides how far the cursor has moved between columns —
+            // which is why it stays a plain number where the live cursor now
+            // takes its rate from the speed.
+            cadence: animator.cadence.unwrap_or(STRIP_CADENCE),
         };
         let mut rows = vec![true];
         if ablate {

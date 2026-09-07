@@ -85,9 +85,16 @@
 //!
 //! **From one control surface**, which is what a viewer wants: one subject, and
 //! the question is always "what is it doing now". [`AnimatorPlugin`] adds an
-//! [`Animator`] resource, ticks the engine's motion every frame and writes the
-//! result onto components. It stands aside for any body carrying an
-//! [`AvatarDriver`], so both can be added at once.
+//! [`Animator`] resource — every switch a walk can be judged through, and no
+//! motion of its own. It steers the same [`AvatarDriver`], and what it adds is
+//! the two things a component cannot hold: a sloped ground for the feet, and
+//! the layers a baked clip, a gesture, a gaze and a face ride on.
+//!
+//! **The two never fight, and the rule is one line: a body carrying a [`Drive`]
+//! belongs to whatever writes it.** An application's chassis writes one every
+//! frame and [`drive_avatar_bodies`] runs it; the window steers the bodies with
+//! a driver and no `Drive`, and adopts any body that has neither. So both
+//! plugins can be added at once and each body has exactly one author.
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -159,7 +166,7 @@ pub mod spawn;
 pub mod strips;
 
 pub use animator::{
-    Animator, AnimatorPlugin, Blending, Clips, GaitKind, floor_tilt, ground_normal,
+    Animator, AnimatorPlugin, Clips, GaitKind, adopt_bodies, floor_tilt, ground_normal, steer,
 };
 pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bevy};
 pub use driver::{AvatarDriver, Drive, Drove, drive_avatar_bodies};

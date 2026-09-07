@@ -119,10 +119,23 @@ opts out and calls the engine's driver itself.
 
 ### From one control surface, for a viewer
 
-`AnimatorPlugin` adds an `Animator` resource, ticks the engine's motion every
-frame and writes the result onto components. One subject, and the question is
-always "what is it doing now". It stands aside for any body carrying an
-`AvatarDriver`, so both can be added at once.
+`AnimatorPlugin` adds an `Animator` resource: every switch a walk can be judged
+through — the gait pattern, the phase, the speed, the slope under the feet, the
+gaze, the face — and no motion of its own. One subject, and the question is
+always "what is it doing now".
+
+It steers the same `AvatarDriver`, so the walk a viewer judges is the walk an
+application draws, down to the code that decides it. What it adds is the two
+things a component cannot hold: a **sloped ground** for the feet, and the
+**layers** a baked clip, a procedural gesture, a deliberate gaze and a face ride
+on. That is what `Driver::drive` takes closures for, and this is the consumer
+the door was left open for.
+
+**The two never fight, and the rule is one line: a body carrying a `Drive`
+belongs to whatever writes it.** An application's chassis writes one every frame
+and `drive_avatar_bodies` runs it; the window steers the bodies with a driver
+and no `Drive`, and adopts any body that has neither. So both plugins can be
+added at once and every body has exactly one author.
 
 ```rust,no_run
 use bevy::prelude::*;
