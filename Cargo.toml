@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -67,7 +67,14 @@ bevy = "0.19"
 # `[patch.crates-io]` block is gone with the cut; the same silence trap
 # applies, and the same check: `cargo tree -p symbios-avatar` must read
 # `v0.5.x` with no `(path)` after it, run AFTER the engine publishes.
-symbios-avatar = "0.5"
+#
+# **0.6 because the engine took `symbios-texture` 0.5** (#44). Nothing here
+# reads that crate, and nothing in the engine's public surface moved — but a
+# public dependency's minor move is breaking under 0.x, so the engine cut a
+# minor and this crate follows it. No `[patch.crates-io]` was used to reach
+# it: the engine published first, which is what makes the silence trap above
+# irrelevant this time rather than merely checked.
+symbios-avatar = "0.6"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
