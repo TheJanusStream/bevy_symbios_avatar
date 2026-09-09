@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -74,7 +74,14 @@ bevy = "0.19"
 # minor and this crate follows it. No `[patch.crates-io]` was used to reach
 # it: the engine published first, which is what makes the silence trap above
 # irrelevant this time rather than merely checked.
-symbios-avatar = "0.6"
+#
+# **0.7 because the engine took `symbios-texture` 0.7** (#45) -- the same shape
+# as 0.6 one release earlier, and for the third time nothing here reads that
+# crate. The engine also dropped its wasm `getrandom` shim in that release,
+# which is a removal a consumer can feel: a wasm application that was getting
+# `getrandom`'s `wasm_js` feature through the engine now declares it itself, or
+# does not need it. This crate declares no backend either way.
+symbios-avatar = "0.7"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
