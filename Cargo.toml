@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -81,7 +81,7 @@ bevy = "0.19"
 # which is a removal a consumer can feel: a wasm application that was getting
 # `getrandom`'s `wasm_js` feature through the engine now declares it itself, or
 # does not need it. This crate declares no backend either way.
-symbios-avatar = "0.7"
+symbios-avatar = "0.8"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
