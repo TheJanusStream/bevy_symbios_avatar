@@ -87,7 +87,11 @@ bevy = "0.19"
 # literal or an exhaustive pattern downstream, so the engine cut a minor. This
 # crate builds no `Driven` - it only reads one through `From<&Driven>` - so the
 # bump moved no code here.
-symbios-avatar = "0.8"
+#
+# **0.8.1 because the hair material binds the engine's strand mask** (#47,
+# engine #340). `strand_mask()` first ships in engine 0.8.1, an additive patch
+# release, so the floor moves to it; an 0.8.0 engine does not build this crate.
+symbios-avatar = "0.8.1"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
