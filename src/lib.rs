@@ -8,9 +8,10 @@
 //!
 //! Where it has to make a choice the engine did not — how a material is
 //! parameterised, which colour space a buffer is in — the choice is written
-//! down beside it in [`convert`], because a difference between the two
-//! renderers that is really a difference in those choices is exactly the false
-//! diagnosis this crate is meant to prevent.
+//! down beside it, in [`spawn`] for materials and [`convert`] for buffers,
+//! because a difference between the two renderers that is really a difference
+//! in those choices is exactly the false diagnosis this crate is meant to
+//! prevent.
 //!
 //! # Why it exists
 //!

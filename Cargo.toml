@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -81,6 +81,12 @@ bevy = "0.19"
 # which is a removal a consumer can feel: a wasm application that was getting
 # `getrandom`'s `wasm_js` feature through the engine now declares it itself, or
 # does not need it. This crate declares no backend either way.
+#
+# **0.8 because the engine's `Driven` grew two public fields** (engine 0.8.0,
+# overlands #1323): `straining` and `lift`. A new public field breaks a struct
+# literal or an exhaustive pattern downstream, so the engine cut a minor. This
+# crate builds no `Driven` - it only reads one through `From<&Driven>` - so the
+# bump moved no code here.
 symbios-avatar = "0.8"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather

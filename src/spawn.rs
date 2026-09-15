@@ -21,11 +21,12 @@
 //! root. Setting a transform on the mesh entity and wondering why nothing moved
 //! is the trap here.
 
+use bevy::asset::uuid_handle;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
 use symbios_avatar::{Avatar, AvatarConfig, AvatarRecord, MeshKind, Pose};
 
-use crate::convert::{atlas_image, mesh_of, normal_image, orm_image};
+use crate::convert::{atlas_image, mesh_of, normal_image, orm_image, strand_mask_image};
 
 /// A request to build and draw a body.
 ///
@@ -178,6 +179,13 @@ pub fn spawn_avatar(
         normal: images.add(normal_image(&avatar.skin)),
         orm: images.add(orm_image(&avatar.skin)),
     };
+    // Uploaded by the first body, and every body after it samples that one.
+    if !images.contains(&STRAND_MASK) {
+        let mask = strand_mask_image(avatar.strand_mask());
+        if let Err(error) = images.insert(&STRAND_MASK, mask) {
+            warn!("the strand mask did not upload, so hair draws as whole cards: {error}");
+        }
+    }
     // The body's own meshes, then the eyes, rather than the one list
     // `Avatar::drawn` hands over. Kept as two lists because the globes are
     // built per call rather than merged, not because either half is going to be
@@ -257,13 +265,20 @@ pub fn apply_avatar_poses(
     }
 }
 
-/// How each kind of mesh is shaded.
+/// The engine's strand mask, as the one image every hair material samples
+/// (#47).
 ///
-/// Deliberately plain. The point of this crate is to see what the engine built,
-/// and a material with opinions of its own is a second variable in every
-/// comparison. Skin takes the painted atlas; everything else carries its colour
-/// on its vertices, which is what lets a head of hair be one draw and still
-/// have a shade per lock.
+/// **A fixed handle, filled by the first body to spawn.** The engine paints one
+/// mask for every avatar a process builds, and uploading it per body would put
+/// the same quarter of a megabyte on the GPU again for every body in a scene.
+const STRAND_MASK: Handle<Image> = uuid_handle!("5d0a3c1e-8f47-4b2a-9e6d-7c3f1a9b2e84");
+
+/// The alpha below which a hair card is not drawn.
+///
+/// Half, which is where the engine's own renderer cuts its cards, so the two
+/// instruments draw the same locks.
+const STRAND_CUT: f32 = 0.5;
+
 /// The three textures one painted skin uploads as.
 struct SkinMaps {
     albedo: Handle<Image>,
@@ -271,30 +286,98 @@ struct SkinMaps {
     orm: Handle<Image>,
 }
 
+/// How each kind of mesh is shaded.
+///
+/// Deliberately plain. The point of this crate is to see what the engine built,
+/// and a material with opinions of its own is a second variable in every
+/// comparison. Skin takes the painted atlas; everything else carries its colour
+/// on its vertices, which is what lets a head of hair be one draw and still
+/// have a shade per lock.
+///
+/// **Hair is the one kind drawn from both sides, and that is the engine's
+/// contract rather than an opinion here** (#46). The engine builds a lock as a
+/// single-sided card turned to face outward, and its hair loft says in as many
+/// words that a consumer draws cards with a double-sided material - its own
+/// software renderer is two-sided by construction. Culled, a card seen from
+/// behind or edge-on simply was not there: the inside of a hanging curtain,
+/// the far side of the locks beside a face, the back of a beard's rim.
+///
+/// **And nothing asks for anisotropy**, though hair carries tangents and a
+/// highlight along the strands is what anisotropy is for. Bevy 0.19 builds the
+/// anisotropy frame only under its `pbr_anisotropy_texture` feature. Without
+/// it, a non-zero strength still switches the anisotropic lighting on, through
+/// a zero tangent, and a head of hair renders blown-out white; with it, every
+/// `StandardMaterial` in the consuming app binds one more texture, which is one
+/// past WebGL2's sixteen for an app whose own materials already sit at the
+/// ceiling.
+///
+/// **Hair is also the one kind cut out of an image, and the image is the
+/// engine's** (#47). A card is a rectangle, and a row of card ends is a picket
+/// fence. The engine paints a strand mask - white, so the vertex colour still
+/// carries every tone, with each lock's silhouette in its alpha - and lanes
+/// every card's UVs into it. Masked rather than blended: a mask needs no
+/// sorting, and Bevy's shadow pass honours it, so a card casts its lock's
+/// shadow and not its rectangle's.
 fn material_for(kind: MeshKind, atlas: &SkinMaps) -> StandardMaterial {
-    let (roughness, metallic) = match kind {
+    // Bevy's own values for everything decided here for one kind and not for
+    // the others, and for everything not decided here at all.
+    let plain = StandardMaterial::default();
+    let (roughness, reflectance, metallic) = match kind {
         // 1.0, not a taste: Bevy MULTIPLIES the factor into the roughness
         // texture, so anything less darkens every texel of the finish the
         // engine painted. The per-texel values live in the ORM map (#22).
-        MeshKind::Skin => (1.0, 0.0),
-        MeshKind::Hair => (0.35, 0.0),
-        MeshKind::Cloth => (0.92, 0.0),
+        MeshKind::Skin => (1.0, plain.reflectance, 0.0),
+        // **Roughness is the software renderer's own hair finish** (#46).
+        // 0.35 had no provenance and put a plastic stripe on every flat card.
+        // On a sheet of nine heads each turned through five views, 0.35 read
+        // as plastic and 0.7 as matte grey on black hair; with the reflectance
+        // below, 0.50, 0.55 and 0.60 all read as hair. 0.52 is the engine
+        // renderer's number inside that range, so the two instruments agree
+        // by construction.
+        //
+        // **Reflectance is the half the double-sided material made
+        // necessary.** Bevy's fill light reflects most at a grazing angle, and
+        // a card seen edge-on is nothing but a grazing angle: at the default
+        // 0.5, every card drawn from behind wore a blue-grey veil, which
+        // turning the fill off removed and no roughness up to 0.7 did. Below
+        // an F0 of 2% Bevy extinguishes that reflection (the pre-baked
+        // specular occlusion in its ambient light); 0.25 is an F0 of 1%, which
+        // halves it and quarters the highlight, and is where the veil left the
+        // sheet.
+        MeshKind::Hair => (0.52, 0.25, 0.0),
+        MeshKind::Cloth => (0.92, plain.reflectance, 0.0),
         // A globe is the one wet thing on a body, and a matte eye is the
         // single fastest way to make a face look dead.
-        MeshKind::Eye => (0.08, 0.0),
+        MeshKind::Eye => (0.08, plain.reflectance, 0.0),
     };
     let skin = matches!(kind, MeshKind::Skin);
+    let cards = matches!(kind, MeshKind::Hair);
     StandardMaterial {
         base_color: Color::WHITE,
-        base_color_texture: skin.then(|| atlas.albedo.clone()),
+        base_color_texture: match kind {
+            MeshKind::Skin => Some(atlas.albedo.clone()),
+            MeshKind::Hair => Some(STRAND_MASK),
+            MeshKind::Cloth | MeshKind::Eye => None,
+        },
+        alpha_mode: if cards {
+            AlphaMode::Mask(STRAND_CUT)
+        } else {
+            plain.alpha_mode
+        },
         normal_map_texture: skin.then(|| atlas.normal.clone()),
         // One image, two slots: G/B feed metallic-roughness, R feeds
         // occlusion — which is exactly the ORM layout the engine bakes.
         metallic_roughness_texture: skin.then(|| atlas.orm.clone()),
         occlusion_texture: skin.then(|| atlas.orm.clone()),
         perceptual_roughness: roughness,
+        reflectance,
         metallic,
-        ..default()
+        // Both halves of drawing a card from behind: `double_sided` turns a
+        // back face's normal round to the viewer, and `cull_mode` is what stops
+        // the rasteriser discarding the face before that can matter.
+        double_sided: cards,
+        cull_mode: if cards { None } else { plain.cull_mode },
+        ..plain
     }
 }
 
@@ -464,17 +547,49 @@ mod tests {
             .query::<(&MeshMaterial3d<StandardMaterial>,)>();
         let handles: Vec<_> = query.iter(app.world()).map(|(m,)| m.0.clone()).collect();
         let materials = app.world().resource::<Assets<StandardMaterial>>();
+        // Hair samples an image too since #47, and that image is the strand
+        // mask, which is not the atlas: counted out by its handle.
         let textured = handles
             .iter()
             .filter(|handle| {
-                materials
-                    .get(*handle)
-                    .is_some_and(|material| material.base_color_texture.is_some())
+                materials.get(*handle).is_some_and(|material| {
+                    material
+                        .base_color_texture
+                        .as_ref()
+                        .is_some_and(|texture| *texture != STRAND_MASK)
+                })
             })
             .count();
         assert_eq!(
             textured, expected,
             "{textured} meshes sampled the skin atlas, against {expected} that are skin"
+        );
+    }
+
+    #[test]
+    fn the_strand_mask_is_uploaded_once_for_every_body() {
+        // #47. One image for the app, not one per body: the engine paints a
+        // single mask for every avatar a process builds. Counted as what a
+        // second body adds, because Bevy's image plugin keeps images of its own
+        // in the same store.
+        let mut app = app();
+        spawn(&mut app);
+        let one = app.world().resource::<Assets<Image>>().len();
+        spawn(&mut app);
+        let images = app.world().resource::<Assets<Image>>();
+        assert_eq!(
+            images.len() - one,
+            3,
+            "a second body uploaded {} images, not its skin's three",
+            images.len() - one
+        );
+        let mask = images
+            .get(&STRAND_MASK)
+            .expect("the strand mask was uploaded");
+        assert_eq!(
+            mask.data.as_deref(),
+            Some(symbios_avatar::strand_mask().rgba.as_slice()),
+            "the uploaded mask is not the one the engine painted"
         );
     }
 
@@ -598,5 +713,106 @@ mod tests {
             apart.abs() > 0.1,
             "hair and skin shade {apart} apart, which is not apart"
         );
+    }
+
+    /// Every kind of mesh a body draws, for asking each the same question.
+    const KINDS: [MeshKind; 4] = [
+        MeshKind::Skin,
+        MeshKind::Hair,
+        MeshKind::Cloth,
+        MeshKind::Eye,
+    ];
+
+    /// Maps that point at no image: no question below is about which image a
+    /// material samples.
+    fn unmapped() -> SkinMaps {
+        SkinMaps {
+            albedo: Handle::default(),
+            normal: Handle::default(),
+            orm: Handle::default(),
+        }
+    }
+
+    #[test]
+    fn a_hair_card_is_drawn_from_both_sides_and_nothing_else_is() {
+        // #46. A lock is a single-sided card turned to face outward, and a
+        // culled card vanishes from behind and edge-on: the inside of a
+        // curtain, the far side of a lock beside the face. Both fields,
+        // because each is half of it - `double_sided` turns a back face's
+        // normal round to the viewer, and `cull_mode` is what stops the face
+        // being thrown away first. A material with one and not the other draws
+        // nothing new, or draws it lit from the wrong side.
+        //
+        // And only hair: cards are what the engine documents as single-sided
+        // for a consumer to draw from both sides, and widening it to another
+        // kind would change that kind's look with no sheet to say so.
+        let maps = unmapped();
+        for kind in KINDS {
+            let material = material_for(kind, &maps);
+            let cards = kind == MeshKind::Hair;
+            assert_eq!(material.double_sided, cards, "{kind:?} double_sided");
+            assert_eq!(
+                material.cull_mode,
+                (!cards).then_some(bevy::render::render_resource::Face::Back),
+                "{kind:?} cull_mode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hair_card_is_cut_out_of_the_strand_mask_and_nothing_else_is() {
+        // #47. A card's end is a flat cap and a row of them is a picket fence,
+        // so hair samples the engine's strand mask and is not drawn below half
+        // its alpha. Masked, never blended: a mask needs no sorting, and the
+        // shadow pass honours it. And only hair - skin samples its atlas, and
+        // nothing else on a body has a silhouette of its own to cut.
+        let maps = unmapped();
+        for kind in KINDS {
+            let material = material_for(kind, &maps);
+            let cards = kind == MeshKind::Hair;
+            let cut = match material.alpha_mode {
+                AlphaMode::Mask(at) => (at - 0.5).abs() < 1e-6,
+                _ => false,
+            };
+            assert_eq!(
+                cut, cards,
+                "{kind:?} alpha_mode is {:?}",
+                material.alpha_mode
+            );
+            if !cards {
+                assert!(
+                    matches!(material.alpha_mode, AlphaMode::Opaque),
+                    "{kind:?} alpha_mode is {:?}",
+                    material.alpha_mode
+                );
+            }
+            let masked = material.base_color_texture.as_ref() == Some(&STRAND_MASK);
+            assert_eq!(masked, cards, "{kind:?} samples the strand mask: {masked}");
+        }
+    }
+
+    #[test]
+    fn no_material_asks_for_anisotropy() {
+        // #46, and both ways of turning it on are closed. Bevy 0.19 builds the
+        // anisotropy frame only when bevy_pbr carries its
+        // pbr_anisotropy_texture feature, which this crate does not enable -
+        // yet a non-zero strength still switches the anisotropic lighting on
+        // without it, through a zero tangent, and on the #46 sheet every head
+        // of hair came out blown-out white. Enabling the feature is the other
+        // way, and it binds one more texture on every StandardMaterial in the
+        // consuming app: overlands' terrain material already sits at WebGL2's
+        // sixteen, where one texture more once panicked pipeline creation
+        // (overlands #245).
+        //
+        // Asked the way Bevy asks it: the anisotropic lighting is keyed on a
+        // strength above zero.
+        let maps = unmapped();
+        for kind in KINDS {
+            let strength = material_for(kind, &maps).anisotropy_strength;
+            assert!(
+                strength <= 0.0,
+                "{kind:?} asks for anisotropy at {strength}"
+            );
+        }
     }
 }

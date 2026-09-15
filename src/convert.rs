@@ -104,8 +104,9 @@ pub fn polymesh_to_bevy(source: &PolyMesh) -> Mesh {
 
     if source.colours.len() == vertices {
         // Decoded, not copied: see the module note on colour space. Alpha is 1:
-        // nothing on a body is transparent, and hair is a swept solid precisely
-        // so it need not be.
+        // nothing on a body is see-through, and what cuts a hair card down to
+        // its lock is the strand mask's alpha on the material (#47), never a
+        // vertex's.
         mesh.insert_attribute(
             Mesh::ATTRIBUTE_COLOR,
             source
@@ -243,6 +244,30 @@ pub fn orm_image(map: &symbios_avatar::TextureMap) -> Image {
     image_of(&map.roughness, map, TextureFormat::Rgba8Unorm)
 }
 
+/// Uploads the engine's strand mask, the image every hair card is cut out of
+/// (#47).
+///
+/// One for the whole app rather than one per body: the engine paints a single
+/// mask for every avatar a process builds, and says so by handing out a
+/// `&'static` one.
+///
+/// `Rgba8UnormSrgb`, because it is a base colour: its RGB is white, which is
+/// white under either encoding, and its alpha - the lock - is linear under both.
+#[must_use]
+pub fn strand_mask_image(mask: &symbios_avatar::StrandMask) -> Image {
+    Image::new(
+        Extent3d {
+            width: mask.side,
+            height: mask.side,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        mask.rgba.clone(),
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
+}
+
 /// One of the map's pixel buffers, as a single-level texture.
 fn image_of(pixels: &[u8], map: &symbios_avatar::TextureMap, format: TextureFormat) -> Image {
     let level = (map.width * map.height * 4) as usize;
@@ -277,6 +302,20 @@ mod tests {
 
     fn count(mesh: &Mesh, attribute: MeshVertexAttribute) -> Option<usize> {
         mesh.attribute(attribute).map(VertexAttributeValues::len)
+    }
+
+    #[test]
+    fn the_strand_mask_uploads_as_the_engine_painted_it() {
+        // #47. Every byte, square, as a colour texture: a hair material samples
+        // it as its base colour.
+        let mask = symbios_avatar::strand_mask();
+        let image = strand_mask_image(mask);
+        assert_eq!((image.width(), image.height()), (mask.side, mask.side));
+        assert_eq!(
+            image.texture_descriptor.format,
+            TextureFormat::Rgba8UnormSrgb
+        );
+        assert_eq!(image.data.as_deref(), Some(mask.rgba.as_slice()));
     }
 
     #[test]
