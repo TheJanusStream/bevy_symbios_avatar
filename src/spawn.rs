@@ -20,8 +20,18 @@
 //! the joints — which is what happens anyway, since the joints hang off the
 //! root. Setting a transform on the mesh entity and wondering why nothing moved
 //! is the trap here.
+//!
+//! **A body's hair can have two tiers, and only one draws at a time** (#48).
+//! Asked for with [`AvatarConfig::far_hair`], the engine builds a far tier beside
+//! the near hair - the scalp as one smooth low-poly solid, the facial cards as
+//! they are - and hands it back outside [`Avatar::meshes`]. It becomes one more
+//! entity here, with the near hair's own material and skin, and the two carry a
+//! [`VisibilityRange`] each so the camera's distance picks which one draws: see
+//! [`HairLod`]. A body built without a far tier draws its hair at every distance,
+//! exactly as before.
 
 use bevy::asset::uuid_handle;
+use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
 use symbios_avatar::{Avatar, AvatarConfig, AvatarRecord, MeshKind, Pose};
@@ -38,7 +48,12 @@ use crate::convert::{atlas_image, mesh_of, normal_image, orm_image, strand_mask_
 pub struct SpawnAvatar {
     /// The body to build.
     pub record: AvatarRecord,
-    /// How to build it. The defaults are what the engine's own tools use.
+    /// How to build it.
+    ///
+    /// [`From<AvatarRecord>`] asks for the engine's defaults plus the far hair
+    /// tier ([`AvatarConfig::far_hair`]), which [`spawn_avatar`] draws beyond
+    /// [`HairLod::switch`]. A config built by hand gets a far tier only if it
+    /// asks for one.
     pub config: AvatarConfig,
     /// How shut the eyes start, `0` open and `1` closed.
     ///
@@ -53,8 +68,108 @@ impl From<AvatarRecord> for SpawnAvatar {
     fn from(record: AvatarRecord) -> Self {
         Self {
             record,
-            config: AvatarConfig::default(),
+            config: AvatarConfig {
+                far_hair: true,
+                ..AvatarConfig::default()
+            },
             closure: 0.0,
+        }
+    }
+}
+
+/// Which of a body's two hair tiers an entity draws (#48).
+///
+/// On both hair entities of a body that was built with a far tier, and on
+/// nothing else: a body without one has a single hair entity, no tier and no
+/// [`VisibilityRange`], and draws its hair at every distance.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HairTier {
+    /// The engine's own hair, up to [`HairLod::switch`].
+    Near,
+    /// [`Avatar::far_hair`], from [`HairLod::switch`] out.
+    Far,
+}
+
+/// Where every body's hair changes tier (#48).
+///
+/// **The distance is the camera's from the body's root**, not from its head:
+/// Bevy measures a [`VisibilityRange`] from the entity's origin, and a skinned
+/// mesh's entity sits at the root. Both tiers measure from the same point, which
+/// is what keeps them from drawing together or leaving a gap.
+///
+/// **One value for the app, read at spawn and kept current by
+/// [`crate::AvatarPlugin`].** Change the resource and every tiered body in the
+/// world takes the new ranges on the next frame; a body spawned without the
+/// plugin keeps the defaults it was spawned with. Bevy stores one entry per
+/// distinct range and every body's tiers share the same two, so a crowd costs
+/// two entries - which matters on WebGL2, where the table is a fixed uniform of
+/// 64.
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct HairLod {
+    /// The camera distance, in metres from a body's root, at which the far
+    /// tier takes over.
+    ///
+    /// 12 m by default, where the engine judged its far tier (#350) - on a
+    /// 1080-line, 60-degree camera, about 78 pixels a metre there. A lens with
+    /// more pixels a metre shows the far tier larger at the same distance, and
+    /// wants a longer switch to show it at the size it was judged at.
+    pub switch: f32,
+    /// How wide a band, centred on [`Self::switch`], the tiers crossfade over.
+    ///
+    /// `0` switches in one frame. Anything wider dithers one tier out as the
+    /// other dithers in, and draws BOTH for as long as the camera is inside the
+    /// band: one draw more a body, and a checker of skin wherever the near
+    /// hair covers something the far tier does not.
+    ///
+    /// **Keep it 0 on WebGL2.** In Bevy 0.19.1 the dither shader a non-zero
+    /// margin switches on reads the range table as a 64-entry uniform there,
+    /// while the bind group layout declares room for one entry, so the mesh
+    /// pipeline fails validation and the app quits on the first frame a band
+    /// is drawn - measured in Chromium with this crate (#48). A zero margin
+    /// is abrupt and never compiles that shader.
+    pub margin: f32,
+}
+
+impl Default for HairLod {
+    fn default() -> Self {
+        Self {
+            switch: HAIR_SWITCH,
+            margin: HAIR_MARGIN,
+        }
+    }
+}
+
+/// [`HairLod::switch`]'s default, in metres.
+pub const HAIR_SWITCH: f32 = 12.0;
+
+/// [`HairLod::margin`]'s default, in metres.
+pub const HAIR_MARGIN: f32 = 0.0;
+
+impl HairLod {
+    /// The range a tier draws over.
+    ///
+    /// A zero margin gives Bevy's abrupt ranges, which need no dither in the
+    /// shader. A band does, and then the near tier's own start is not `0..0`:
+    /// the shader divides by the width of the margin the camera is in, and a
+    /// zero width there is an infinity cast to an integer, which a GPU is free
+    /// to get wrong.
+    #[must_use]
+    pub fn range(&self, tier: HairTier) -> VisibilityRange {
+        let switch = self.switch.max(0.0);
+        let half = (self.margin.max(0.0) / 2.0).min(switch);
+        let band = (switch - half)..(switch + half);
+        let abrupt = half == 0.0;
+        match tier {
+            HairTier::Near => VisibilityRange {
+                start_margin: if abrupt { 0.0..0.0 } else { -1.0..0.0 },
+                end_margin: band,
+                use_aabb: false,
+            },
+            HairTier::Far => VisibilityRange {
+                start_margin: band,
+                end_margin: f32::MAX..f32::MAX,
+                use_aabb: false,
+            },
         }
     }
 }
@@ -191,23 +306,46 @@ pub fn spawn_avatar(
     // built per call rather than merged, not because either half is going to be
     // handed back new geometry: since symbios-avatar#118 a blink is a pose.
     let eyes = avatar.eyes_at(closure);
+    let skin = SkinnedMesh {
+        inverse_bindposes: inverse,
+        joints: joints.clone(),
+    };
+    let lod = HairLod::default();
+    let mut hair = None;
     for drawn in avatar.meshes.iter().chain(&eyes) {
         let material = materials.add(material_for(drawn.kind, &atlas));
         let mesh = commands
             .spawn((
                 Mesh3d(meshes.add(mesh_of(drawn))),
-                MeshMaterial3d(material),
+                MeshMaterial3d(material.clone()),
                 // Ignored for a skinned mesh — see the module note — but a mesh
                 // entity still needs one to have a place in the hierarchy.
                 Transform::default(),
-                SkinnedMesh {
-                    inverse_bindposes: inverse.clone(),
-                    joints: joints.clone(),
-                },
+                skin.clone(),
                 ChildOf(root),
             ))
             .id();
-        let _ = mesh;
+        if drawn.kind == MeshKind::Hair {
+            hair = Some((mesh, material));
+        }
+    }
+    // The far tier (#48): one entity more, drawn with the near hair's own
+    // material - the far solid takes the strand mask's solid row, so the cut
+    // keeps it whole - and the same skin, so it poses with the body. Spawned
+    // after every other mesh, so the body's own meshes keep their order.
+    if let (Some(far), Some((near, material))) = (&avatar.far_hair, hair) {
+        commands
+            .entity(near)
+            .insert((HairTier::Near, lod.range(HairTier::Near)));
+        commands.spawn((
+            Mesh3d(meshes.add(mesh_of(far))),
+            MeshMaterial3d(material),
+            Transform::default(),
+            skin,
+            HairTier::Far,
+            lod.range(HairTier::Far),
+            ChildOf(root),
+        ));
     }
     commands.entity(root).insert(AvatarClosure(closure));
 
@@ -233,6 +371,26 @@ fn spawn_joints(commands: &mut Commands, root: Entity, avatar: &Avatar) -> Vec<E
         );
     }
     entities
+}
+
+/// Keeps every tiered hair entity on the app's [`HairLod`].
+///
+/// Only writes a range that differs: every write marks the component changed,
+/// and one changed range makes Bevy rebuild its whole table of them that frame.
+pub fn retune_hair_tiers(
+    lod: Res<HairLod>,
+    mut tiers: Query<(Ref<HairTier>, &mut VisibilityRange)>,
+) {
+    let fresh = lod.is_changed();
+    for (tier, mut range) in &mut tiers {
+        if !fresh && !tier.is_added() {
+            continue;
+        }
+        let wanted = lod.range(*tier);
+        if *range != wanted {
+            *range = wanted;
+        }
+    }
 }
 
 /// Writes a body's pose onto its joints.
@@ -397,9 +555,15 @@ mod tests {
         ))
         .init_asset::<StandardMaterial>()
         .init_asset::<SkinnedMeshInverseBindposes>()
+        .init_resource::<HairLod>()
         .add_systems(
             Update,
-            (build_requested_avatars, apply_avatar_poses).chain(),
+            (
+                build_requested_avatars,
+                apply_avatar_poses,
+                retune_hair_tiers,
+            )
+                .chain(),
         );
         app
     }
@@ -430,13 +594,37 @@ mod tests {
         );
     }
 
+    /// How many of the app's meshes draw with the camera `distance` metres from
+    /// every body's root: Bevy's own rule, a mesh with no range always and one
+    /// with a range when [`VisibilityRange::is_visible_at_all`] says so.
+    fn drawn_at(app: &mut App, distance: f32) -> (usize, usize) {
+        let mut query = app
+            .world_mut()
+            .query::<(&SkinnedMesh, Option<&VisibilityRange>, Option<&HairTier>)>();
+        let mut drawn = 0;
+        let mut hair = 0;
+        for (_, range, tier) in query.iter(app.world()) {
+            if range.is_none_or(|range| range.is_visible_at_all(distance)) {
+                drawn += 1;
+                hair += usize::from(tier.is_some());
+            }
+        }
+        (drawn, hair)
+    }
+
     #[test]
-    fn a_body_costs_one_draw_per_merged_mesh() {
+    fn a_body_costs_one_draw_per_merged_mesh_at_any_distance() {
         // The budget is stated in draws, and this is the only place that number
-        // is real rather than asserted.
+        // is real rather than asserted. **Since #48 a body has one mesh entity
+        // more than it draws**: the far hair tier, which stands in for the near
+        // hair past `HairLod::switch` and never beside it (the owner's margin
+        // is 0). #48's own text asked for "one extra draw and no more"; the
+        // engine put the far tier outside `meshes` (#350) precisely so there is
+        // no extra draw, and this holds it to that at distances either side of
+        // the switch and a hair's breadth from it.
         let mut app = app();
         let root = spawn(&mut app);
-        let drawn = app
+        let budget = app
             .world()
             .get::<AvatarBody>(root)
             .expect("built")
@@ -444,7 +632,205 @@ mod tests {
             .budget
             .meshes;
         let mut query = app.world_mut().query::<(&Mesh3d, &SkinnedMesh)>();
-        assert_eq!(query.iter(app.world()).count(), drawn);
+        assert_eq!(
+            query.iter(app.world()).count(),
+            budget + 1,
+            "a body is its meshes and one far tier"
+        );
+        for distance in [0.0, 1.5, 11.99, 12.0, 12.01, 40.0, 1.0e6] {
+            let (drawn, hair) = drawn_at(&mut app, distance);
+            assert_eq!(
+                (drawn, hair),
+                (budget, 1),
+                "at {distance} m {drawn} meshes drew, {hair} of them hair"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crossfade_band_is_the_only_place_both_tiers_draw() {
+        // The liveness of the test above: the same reading can see two hair
+        // tiers draw, and does, only inside a margin somebody asked for. Set
+        // through the resource, so it also holds the plugin's retune to its
+        // word for a body that is already standing there.
+        let mut app = app();
+        let root = spawn(&mut app);
+        let budget = app
+            .world()
+            .get::<AvatarBody>(root)
+            .expect("built")
+            .avatar
+            .budget
+            .meshes;
+        app.insert_resource(HairLod {
+            switch: 20.0,
+            margin: 2.0,
+        });
+        app.update();
+        assert_eq!(drawn_at(&mut app, 18.5), (budget, 1));
+        assert_eq!(drawn_at(&mut app, 19.5), (budget + 1, 2), "inside the band");
+        assert_eq!(drawn_at(&mut app, 20.5), (budget + 1, 2), "inside the band");
+        assert_eq!(drawn_at(&mut app, 21.5), (budget, 1));
+    }
+
+    #[test]
+    fn the_far_tier_is_the_engines_far_hair_on_the_near_hairs_material_and_skin() {
+        // What #350 asked of a consumer: the same material handle - the far
+        // solid takes the strand mask's solid row, so the one hair material
+        // draws both - and the same joints and bindposes, so the far tier poses
+        // with the body it stands in for. A far tier on its own skin would
+        // stand still while the head turned.
+        let mut app = app();
+        let root = spawn(&mut app);
+        let far_vertices = app
+            .world()
+            .get::<AvatarBody>(root)
+            .expect("built")
+            .avatar
+            .far_hair
+            .as_ref()
+            .expect("SpawnAvatar::from asks for a far tier")
+            .mesh
+            .positions
+            .len();
+        let mut query = app.world_mut().query::<(
+            &HairTier,
+            &Mesh3d,
+            &MeshMaterial3d<StandardMaterial>,
+            &SkinnedMesh,
+        )>();
+        let tiers: Vec<_> = query
+            .iter(app.world())
+            .map(|(tier, mesh, material, skin)| {
+                (*tier, mesh.0.clone(), material.0.clone(), skin.clone())
+            })
+            .collect();
+        let [near, far] = [HairTier::Near, HairTier::Far].map(|want| {
+            let found: Vec<_> = tiers.iter().filter(|(tier, ..)| *tier == want).collect();
+            assert_eq!(found.len(), 1, "one {want:?} tier, found {}", found.len());
+            found[0].clone()
+        });
+        assert_eq!(far.2, near.2, "the far tier has a material of its own");
+        assert_eq!(far.3.inverse_bindposes, near.3.inverse_bindposes);
+        assert_eq!(far.3.joints, near.3.joints);
+        assert_ne!(far.1, near.1, "the far tier draws the near mesh");
+        let meshes = app.world().resource::<Assets<Mesh>>();
+        let drawn = meshes.get(&far.1).expect("the far mesh uploaded");
+        assert_eq!(
+            drawn.count_vertices(),
+            far_vertices,
+            "the far entity does not draw Avatar::far_hair"
+        );
+    }
+
+    #[test]
+    fn a_body_built_without_a_far_tier_draws_its_hair_everywhere_as_before() {
+        // The control, and the promise to a consumer who builds its own config:
+        // no far tier asked for, no tier, no range, one hair entity, drawn at
+        // every distance - byte for byte the entity tree 0.9 spawned.
+        let mut app = app();
+        app.world_mut().spawn(SpawnAvatar {
+            record: AvatarRecord::new("Untiered", Archetype::default()),
+            config: AvatarConfig::default(),
+            closure: 0.0,
+        });
+        app.update();
+        let mut ranges = app.world_mut().query::<&VisibilityRange>();
+        assert_eq!(ranges.iter(app.world()).count(), 0);
+        let mut tiers = app.world_mut().query::<&HairTier>();
+        assert_eq!(tiers.iter(app.world()).count(), 0);
+        let mut body = app.world_mut().query::<&AvatarBody>();
+        let budget = body
+            .single(app.world())
+            .expect("one body")
+            .avatar
+            .budget
+            .meshes;
+        let mut meshes = app.world_mut().query::<&Mesh3d>();
+        assert_eq!(meshes.iter(app.world()).count(), budget);
+    }
+
+    #[test]
+    fn retuning_writes_a_range_only_when_it_moves() {
+        // Every write through a `Mut` stamps the component changed, and ONE
+        // changed range makes Bevy clear and rebuild its whole table of them
+        // that frame - for every body in the world. So a frame with nothing to
+        // retune must stamp nothing. Read the tick, not is_changed, which is
+        // relative to whichever system last looked.
+        let mut app = app();
+        spawn(&mut app);
+        let ticks = |app: &mut App| -> Vec<u32> {
+            let mut query = app.world_mut().query::<(&HairTier, Ref<VisibilityRange>)>();
+            query
+                .iter(app.world())
+                .map(|(_, range)| range.last_changed().get())
+                .collect()
+        };
+        let before = ticks(&mut app);
+        assert_eq!(before.len(), 2, "two tiers");
+        app.update();
+        app.update();
+        assert_eq!(ticks(&mut app), before, "an idle frame stamped a range");
+
+        // The same value written again through the resource moves nothing.
+        app.insert_resource(HairLod::default());
+        app.update();
+        assert_eq!(
+            ticks(&mut app),
+            before,
+            "an unchanged resource stamped a range"
+        );
+
+        // Liveness: a real change is written, and lands where it should.
+        app.insert_resource(HairLod {
+            switch: 30.0,
+            margin: 0.0,
+        });
+        app.update();
+        assert_ne!(ticks(&mut app), before, "a moved switch was not written");
+        let mut query = app.world_mut().query::<(&HairTier, &VisibilityRange)>();
+        for (tier, range) in query.iter(app.world()) {
+            let wanted = HairLod {
+                switch: 30.0,
+                margin: 0.0,
+            }
+            .range(*tier);
+            assert!(
+                *range == wanted,
+                "{tier:?} ranges {:?}..{:?}, wanted {:?}..{:?}",
+                range.start_margin,
+                range.end_margin,
+                wanted.start_margin,
+                wanted.end_margin
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_margin_is_abrupt_and_a_band_never_divides_by_zero() {
+        // Bevy skips the dither shader for abrupt ranges, which is what keeps
+        // the owner's pop from costing a pipeline variant. And inside a band
+        // the shader divides by the width of whichever margin the camera is
+        // in, so no margin a camera can stand inside may be empty: the near
+        // tier's start is the one a default would leave at 0..0.
+        let pop = HairLod::default();
+        assert!(pop.margin <= 0.0, "the owner's margin is 0 (#48)");
+        for tier in [HairTier::Near, HairTier::Far] {
+            assert!(pop.range(tier).is_abrupt(), "{tier:?} dithers at margin 0");
+        }
+        let band = HairLod {
+            switch: 12.0,
+            margin: 2.0,
+        };
+        let near = band.range(HairTier::Near);
+        assert!(near.start_margin.end > near.start_margin.start);
+        assert!(near.end_margin.end > near.end_margin.start);
+        let far = band.range(HairTier::Far);
+        assert!(far.start_margin.end > far.start_margin.start);
+        // The two meet: the near tier fades out over exactly the band the far
+        // one fades in over, which is what makes Bevy's dither patterns
+        // complementary rather than leaving a gap or a double.
+        assert_eq!(near.end_margin, far.start_margin);
     }
 
     #[test]

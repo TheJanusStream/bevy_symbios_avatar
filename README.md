@@ -67,6 +67,45 @@ editor is — so anything that decides what to do with a body has to run after t
 set that could have removed it. Systems of your own that touch avatars belong in
 these sets rather than in bare `Update`.
 
+### Hair: two families, two tiers
+
+The engine grows hair in five regions - scalp, brows, moustache, chin and flanks -
+in **two families**. The card styles are locks cut out of the engine's strand
+mask: crop, bob, long, tied back and curly on the scalp, natural and thick brows,
+chevron, handlebar and pencil moustaches, goatee, full and braided chins,
+sideburns and full-connect flanks. The helmet family (engine 0.9) is one closed
+low-poly solid a region: cap, slick back, bell, bun, crest, afro and braids on the
+scalp, and a sculpted brow, moustache, chin and flanks. Either way a head of hair
+is one mesh and one material, and the editor offers both families side by side.
+
+**Records wearing a helmet or sculpted style do not load on an 0.8 engine.**
+Every one of those style names is new in engine 0.9, and 0.8 refuses a whole
+avatar record when any hair region names a style it does not know. From 0.9 an
+unknown name draws nothing for that region and is kept and written back, and the
+editor says so beside the region.
+
+**A body can carry a far tier of hair, and draws exactly one tier at a time.**
+`SpawnAvatar::from` asks the engine for one (`AvatarConfig::far_hair`): the scalp
+as a coarse smooth solid, the facial cards as they are, built outside
+`Avatar::meshes`. `spawn_avatar` draws it as one more entity with the near hair's
+own material and skin, marks both with `HairTier`, and gives each a
+`VisibilityRange`, so the camera's distance picks which one draws and the draw
+count does not move. A config built by hand gets a far tier only if it asks.
+
+`HairLod` is where the switch happens, for every body in the app: 12 m from the
+body's **root** by default (Bevy measures a range from the entity's origin, and a
+skinned mesh's entity sits at the root), with a margin of 0, so the tiers swap in
+one frame. A wider margin crossfades them by dithering and draws both inside the
+band - and **on WebGL2 a wider margin is a crash** in Bevy 0.19.1: the dither
+shader expects a 64-entry range uniform the bind group layout does not declare,
+so the mesh pipeline fails validation and the app quits. 12 m is where the engine judged its far tier, at about 78 pixels a metre;
+the viewer's default window is 72 there, but a 45-degree camera on a 1080-line
+screen reaches that pixel size only at about 17 m, so set `HairLod::switch` for
+your own lens. Change the resource at any time and `AvatarPlugin` carries it onto
+every tiered body. Bevy stores one entry per distinct range, so a crowd costs two
+entries in its range table - which matters on WebGL2, where that table is a
+64-entry uniform.
+
 ## Moving a body
 
 Two ways, and which one is right depends on what is asking. Either way,
@@ -184,7 +223,7 @@ sources and the clip's root travel taken out so the two stay comparable.
 ## Editing a record
 
 `RecordEditorPlugin` (the `editor` feature) adds a panel holding every axis an
-`AvatarRecord` can carry: 115 of them plus one whole-number count, across
+`AvatarRecord` can carry: 120 of them plus one whole-number count, across
 archetype, composites, skin, eyes, face, five hair regions, outfit, name, seed
 and the per-category locks a re-roll honours. Drag one and the body follows. A
 test pins the exact count, so an axis added to the record cannot quietly miss the
@@ -231,12 +270,13 @@ cargo run --release -F builtin-clips --example viewer
 cargo run --release -F builtin-clips --example viewer -- --seed 7
 cargo run --release -F builtin-clips --example viewer -- --quadruped
 cargo run --release -F builtin-clips --example viewer -- --shot body.png
+cargo run --release -F builtin-clips --example viewer -- --scalp bun 0.8 --chin sculpted
 ```
 
 The example requires `builtin-clips` — its clip picker is not a picker with
 nothing to pick — and the flag is spelled out because the feature is off by
-default. The full flag set — gaits, clips, face framing, held closures, captures
-— is documented at the top of [`examples/viewer.rs`](examples/viewer.rs).
+default. The full flag set — gaits, clips, face framing, held closures, captures,
+a hair style for each region by name — is documented at the top of [`examples/viewer.rs`](examples/viewer.rs).
 
 Right-drag orbits, middle-drag pans, the wheel zooms. `W` walks, `Space`
 re-rolls, `H` hides the windows, `F` frames the camera on the body again, `P`

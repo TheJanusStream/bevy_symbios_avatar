@@ -430,6 +430,10 @@ pub fn rebuild_edited_avatar(
         } else {
             DRAFT_ATLAS
         },
+        // The far hair tier as well (#48), so the body on screen is the one a
+        // peer sees from across a room when the camera is pulled back past
+        // `HairLod::switch`.
+        far_hair: true,
         ..AvatarConfig::default()
     };
     let atlas = config.atlas;
@@ -598,13 +602,18 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
     // it — the engine says so on `GENERATOR_VERSION` and then has no way to
     // tell anybody. This is the reader that should: a record rolled by an
     // older generation still LOADS, and every axis it stores is honoured
-    // exactly, but pressing either seed arrow redraws it under today's rules
-    // and it will not come back the same person.
+    // exactly, but pressing either seed arrow redraws it under today's rules.
+    //
+    // **"May", because a generation does not move every seed** (#48). Engine
+    // generation 6 added a helmet coin that lands on one seed in ten and left
+    // the other nine drawing what they drew under 5, so "will not reproduce"
+    // was false nine times in ten - and this build cannot tell which seed is
+    // which without re-rolling it.
     if record.generator != GENERATOR_VERSION {
         ui.horizontal_wrapped(|ui| {
             ui.small(format!(
-                "⚠ rolled by generator {}, this build draws {} — the stored axes are \
-                 exact, but re-rolling this seed will not reproduce it",
+                "⚠ rolled by generator {}, this build draws {} - the stored axes are \
+                 exact, but re-rolling this seed may draw it differently",
                 record.generator, GENERATOR_VERSION
             ));
         });
@@ -950,6 +959,11 @@ pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("hair").show(ui, |ui| {
         changed |= zone(ui, "scalp", |ui| {
+            kept_unknown(
+                ui,
+                record.hair.scalp.style == symbios_avatar::ScalpStyle::None,
+                record.hair.unrecognised.scalp.as_ref(),
+            );
             let mut changed = scalp_style(ui, &mut record.hair.scalp.style);
             changed |= tress(ui, &mut record.hair.scalp);
             ui.separator();
@@ -964,6 +978,11 @@ pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
             changed
         });
         changed |= zone(ui, "brows", |ui| {
+            kept_unknown(
+                ui,
+                record.hair.brows.style == symbios_avatar::BrowStyle::None,
+                record.hair.unrecognised.brows.as_ref(),
+            );
             let mut changed = brow_style(ui, &mut record.hair.brows.style);
             changed |= tress(ui, &mut record.hair.brows);
             ui.separator();
@@ -974,6 +993,11 @@ pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
             changed
         });
         changed |= zone(ui, "moustache", |ui| {
+            kept_unknown(
+                ui,
+                record.hair.moustache.style == symbios_avatar::MoustacheStyle::None,
+                record.hair.unrecognised.moustache.as_ref(),
+            );
             let mut changed = moustache_style(ui, &mut record.hair.moustache.style);
             changed |= tress(ui, &mut record.hair.moustache);
             ui.separator();
@@ -982,6 +1006,11 @@ pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
             changed
         });
         changed |= zone(ui, "chin", |ui| {
+            kept_unknown(
+                ui,
+                record.hair.chin.style == symbios_avatar::ChinStyle::None,
+                record.hair.unrecognised.chin.as_ref(),
+            );
             let mut changed = chin_style(ui, &mut record.hair.chin.style);
             changed |= tress(ui, &mut record.hair.chin);
             ui.separator();
@@ -991,6 +1020,11 @@ pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
             changed
         });
         changed |= zone(ui, "flanks", |ui| {
+            kept_unknown(
+                ui,
+                record.hair.flanks.style == symbios_avatar::FlankStyle::None,
+                record.hair.unrecognised.flanks.as_ref(),
+            );
             let mut changed = flank_style(ui, &mut record.hair.flanks.style);
             changed |= tress(ui, &mut record.hair.flanks);
             ui.separator();
@@ -1126,41 +1160,164 @@ fn ramped_colour(
     changed
 }
 
-/// A row of base styles, one selectable label each.
+/// A region's styles in two families, each row behind a small label of its
+/// own: the card styles, and the helmet family (#48).
 ///
 /// Picking a style hands back a fresh instance of it rather than trying to carry
 /// an axis across: a bob's fringe and a tail's height are different quantities
 /// that happen to be spelled the same way, and carrying one into the other is
 /// how a panel writes a haircut nobody asked for.
-fn styles<S: Copy + PartialEq>(ui: &mut egui::Ui, current: &mut S, choices: &[(&str, S)]) -> bool {
+///
+/// Two rows rather than one long one, because the families draw differently
+/// enough that a person picking one wants to know which they are in: a card
+/// style is locks with a fringe of their own, a helmet is one closed solid.
+fn families<S: Copy>(
+    ui: &mut egui::Ui,
+    current: &mut S,
+    cards: &[(&str, S)],
+    helmets: &[(&str, S)],
+) -> bool {
     let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        for (name, style) in choices {
-            let picked = current == style;
-            if ui.selectable_label(picked, *name).clicked() && !picked {
-                *current = *style;
-                changed = true;
+    for (family, choices) in [("cards", cards), ("helmet", helmets)] {
+        ui.horizontal_wrapped(|ui| {
+            ui.small(family);
+            for (name, style) in choices {
+                // By variant, not by value: a bob at fringe 0.8 is still the bob,
+                // and comparing whole values left it unmarked and let a click on
+                // it reset the fringe to the middle.
+                let picked = std::mem::discriminant(current) == std::mem::discriminant(style);
+                if ui.selectable_label(picked, *name).clicked() && !picked {
+                    *current = *style;
+                    changed = true;
+                }
             }
-        }
-    });
+        });
+    }
     changed
 }
+
+/// A line saying a region's record names a style this build cannot draw.
+///
+/// **Painted, not hovered** (#48). Since engine 0.9 a record from a newer build
+/// that names a style this one does not know still loads: the region reads as
+/// `none` - which is what the row below shows as picked - and the style object
+/// is kept and written back unchanged for as long as the region stays `none`,
+/// so saving the record does not delete somebody's haircut. Without this line
+/// the panel would show a bald region and say nothing, and picking any style
+/// replaces what was kept, so the person about to do that is the one who needs
+/// telling. Shown only while the region is `none`, because that is the only
+/// time the kept style is written.
+fn kept_unknown(
+    ui: &mut egui::Ui,
+    none: bool,
+    kept: Option<&serde_json::Map<String, serde_json::Value>>,
+) {
+    if let Some(kept) = kept.filter(|_| none) {
+        let name = kept
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unnamed");
+        ui.small(format!(
+            "this record wears a style this build cannot draw ({name}); it is kept as it is \
+             unless you pick another here"
+        ));
+    }
+}
+
+/// The scalp's card styles, each at the middle of its own axis, in the engine's
+/// declaration order.
+const SCALP_CARDS: [(&str, symbios_avatar::ScalpStyle); 6] = {
+    use symbios_avatar::ScalpStyle as S;
+    [
+        ("none", S::None),
+        ("crop", S::Crop),
+        ("bob", S::Bob { fringe: 0.5 }),
+        ("long", S::Long { weight: 0.5 }),
+        ("tied", S::TiedBack { tail: 0.5 }),
+        ("curly", S::Curly { curl: 0.5 }),
+    ]
+};
+
+/// The scalp's helmet family (engine 0.9, #48): closed solids rather than cards.
+const SCALP_HELMETS: [(&str, symbios_avatar::ScalpStyle); 7] = {
+    use symbios_avatar::ScalpStyle as S;
+    [
+        ("cap", S::Cap { fringe: 0.5 }),
+        ("slick back", S::SlickBack { volume: 0.5 }),
+        ("bell", S::Bell { length: 0.5 }),
+        ("bun", S::Bun { height: 0.5 }),
+        ("crest", S::Crest { height: 0.5 }),
+        ("afro", S::Afro { size: 0.5 }),
+        ("braids", S::Braids { rows: 0.5 }),
+    ]
+};
+
+/// The brows' card styles.
+const BROW_CARDS: [(&str, symbios_avatar::BrowStyle); 3] = {
+    use symbios_avatar::BrowStyle as S;
+    [
+        ("none", S::None),
+        ("natural", S::Natural),
+        ("thick", S::Thick),
+    ]
+};
+
+/// The brows' sculpted style.
+const BROW_HELMETS: [(&str, symbios_avatar::BrowStyle); 1] =
+    [("sculpted", symbios_avatar::BrowStyle::Sculpted)];
+
+/// The upper lip's card styles.
+const MOUSTACHE_CARDS: [(&str, symbios_avatar::MoustacheStyle); 4] = {
+    use symbios_avatar::MoustacheStyle as S;
+    [
+        ("none", S::None),
+        ("chevron", S::Chevron),
+        ("handlebar", S::Handlebar { sweep: 0.5 }),
+        ("pencil", S::Pencil { ride: 0.5 }),
+    ]
+};
+
+/// The upper lip's sculpted style.
+const MOUSTACHE_HELMETS: [(&str, symbios_avatar::MoustacheStyle); 1] = [(
+    "sculpted",
+    symbios_avatar::MoustacheStyle::Sculpted { flare: 0.5 },
+)];
+
+/// The chin's card styles.
+const CHIN_CARDS: [(&str, symbios_avatar::ChinStyle); 4] = {
+    use symbios_avatar::ChinStyle as S;
+    [
+        ("none", S::None),
+        ("goatee", S::Goatee { point: 0.5 }),
+        ("full", S::Full),
+        ("braided", S::Braided { twist: 0.5 }),
+    ]
+};
+
+/// The chin's sculpted style.
+const CHIN_HELMETS: [(&str, symbios_avatar::ChinStyle); 1] = [(
+    "sculpted",
+    symbios_avatar::ChinStyle::Sculpted { length: 0.5 },
+)];
+
+/// The jaw flanks' card styles.
+const FLANK_CARDS: [(&str, symbios_avatar::FlankStyle); 3] = {
+    use symbios_avatar::FlankStyle as S;
+    [
+        ("none", S::None),
+        ("sideburns", S::Sideburns { drop: 0.5 }),
+        ("full connect", S::FullConnect { reach: 0.5 }),
+    ]
+};
+
+/// The jaw flanks' sculpted style.
+const FLANK_HELMETS: [(&str, symbios_avatar::FlankStyle); 1] =
+    [("sculpted", symbios_avatar::FlankStyle::Sculpted)];
 
 /// The scalp's catalogue, and whichever axis the picked style carries.
 fn scalp_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ScalpStyle) -> bool {
     use symbios_avatar::ScalpStyle as S;
-    let mut changed = styles(
-        ui,
-        style,
-        &[
-            ("none", S::None),
-            ("crop", S::Crop),
-            ("bob", S::Bob { fringe: 0.5 }),
-            ("long", S::Long { weight: 0.5 }),
-            ("tied", S::TiedBack { tail: 0.5 }),
-            ("curly", S::Curly { curl: 0.5 }),
-        ],
-    );
+    let mut changed = families(ui, style, &SCALP_CARDS, &SCALP_HELMETS);
     // Matched rather than looked up, because the axis's NAME is part of the
     // style: "fringe" and "tail" mean different things and a panel that called
     // both of them "axis" would be a panel nobody can use.
@@ -1170,41 +1327,34 @@ fn scalp_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ScalpStyle) -> boo
         S::Long { weight } => axis(ui, "back weight", weight, 0.0..=1.0),
         S::TiedBack { tail } => axis(ui, "tail height", tail, 0.0..=1.0),
         S::Curly { curl } => axis(ui, "curl", curl, 0.0..=1.0),
+        // The helmet family's axes, each named for what it moves rather than
+        // for its field: "length" is already the cut's slider just below, and a
+        // bell's is where the hem falls.
+        S::Cap { fringe } => axis(ui, "fringe notch", fringe, 0.0..=1.0),
+        S::SlickBack { volume } => axis(ui, "volume", volume, 0.0..=1.0),
+        S::Bell { length } => axis(ui, "hem length", length, 0.0..=1.0),
+        S::Bun { height } => axis(ui, "bun height", height, 0.0..=1.0),
+        S::Crest { height } => axis(ui, "crest height", height, 0.0..=1.0),
+        S::Afro { size } => axis(ui, "size", size, 0.0..=1.0),
+        S::Braids { rows } => axis(ui, "rows", rows, 0.0..=1.0),
     };
     changed
 }
 
 /// The brows' catalogue, which carries no axis of its own.
 fn brow_style(ui: &mut egui::Ui, style: &mut symbios_avatar::BrowStyle) -> bool {
-    use symbios_avatar::BrowStyle as S;
-    styles(
-        ui,
-        style,
-        &[
-            ("none", S::None),
-            ("natural", S::Natural),
-            ("thick", S::Thick),
-        ],
-    )
+    families(ui, style, &BROW_CARDS, &BROW_HELMETS)
 }
 
 /// The upper lip's catalogue.
 fn moustache_style(ui: &mut egui::Ui, style: &mut symbios_avatar::MoustacheStyle) -> bool {
     use symbios_avatar::MoustacheStyle as S;
-    let mut changed = styles(
-        ui,
-        style,
-        &[
-            ("none", S::None),
-            ("chevron", S::Chevron),
-            ("handlebar", S::Handlebar { sweep: 0.5 }),
-            ("pencil", S::Pencil { ride: 0.5 }),
-        ],
-    );
+    let mut changed = families(ui, style, &MOUSTACHE_CARDS, &MOUSTACHE_HELMETS);
     changed |= match style {
         S::None | S::Chevron => false,
         S::Handlebar { sweep } => axis(ui, "sweep", sweep, 0.0..=1.0),
         S::Pencil { ride } => axis(ui, "ride", ride, 0.0..=1.0),
+        S::Sculpted { flare } => axis(ui, "flare", flare, 0.0..=1.0),
     };
     changed
 }
@@ -1212,20 +1362,13 @@ fn moustache_style(ui: &mut egui::Ui, style: &mut symbios_avatar::MoustacheStyle
 /// The chin's catalogue.
 fn chin_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ChinStyle) -> bool {
     use symbios_avatar::ChinStyle as S;
-    let mut changed = styles(
-        ui,
-        style,
-        &[
-            ("none", S::None),
-            ("goatee", S::Goatee { point: 0.5 }),
-            ("full", S::Full),
-            ("braided", S::Braided { twist: 0.5 }),
-        ],
-    );
+    let mut changed = families(ui, style, &CHIN_CARDS, &CHIN_HELMETS);
     changed |= match style {
         S::None | S::Full => false,
         S::Goatee { point } => axis(ui, "point", point, 0.0..=1.0),
         S::Braided { twist } => axis(ui, "twist", twist, 0.0..=1.0),
+        // Named for what it moves: "length" is the cut's slider just below.
+        S::Sculpted { length } => axis(ui, "hang", length, 0.0..=1.0),
     };
     changed
 }
@@ -1233,17 +1376,9 @@ fn chin_style(ui: &mut egui::Ui, style: &mut symbios_avatar::ChinStyle) -> bool 
 /// The jaw flanks' catalogue.
 fn flank_style(ui: &mut egui::Ui, style: &mut symbios_avatar::FlankStyle) -> bool {
     use symbios_avatar::FlankStyle as S;
-    let mut changed = styles(
-        ui,
-        style,
-        &[
-            ("none", S::None),
-            ("sideburns", S::Sideburns { drop: 0.5 }),
-            ("full connect", S::FullConnect { reach: 0.5 }),
-        ],
-    );
+    let mut changed = families(ui, style, &FLANK_CARDS, &FLANK_HELMETS);
     changed |= match style {
-        S::None => false,
+        S::None | S::Sculpted => false,
         S::Sideburns { drop } => axis(ui, "drop", drop, 0.0..=1.0),
         S::FullConnect { reach } => axis(ui, "reach", reach, 0.0..=1.0),
     };
@@ -2198,6 +2333,216 @@ mod tests {
             held.to_bits(),
             still.to_bits(),
             "a locked stature was re-rolled: {held} became {still}"
+        );
+    }
+
+    /// The wire names a region's two picker rows offer, cards then helmets:
+    /// what the engine's `NAMES` lists. A macro because the styles are five
+    /// types and this crate names serde only through `serde_json`.
+    macro_rules! offered {
+        ($cards:expr, $helmets:expr) => {
+            $cards
+                .iter()
+                .chain(&$helmets)
+                .map(|(_, style)| {
+                    serde_json::to_value(style).expect("a style serialises")["name"]
+                        .as_str()
+                        .expect("a style is tagged by name")
+                        .to_owned()
+                })
+                .collect::<Vec<String>>()
+        };
+    }
+
+    #[test]
+    fn every_style_the_engine_names_has_a_picker_in_its_order() {
+        // #48, and the standing rule that every engine schema change carries an
+        // editor slice. Engine 0.9 added seven helmet scalp styles and a
+        // sculpted style to each facial region; a name missing here is a style
+        // nobody can pick, which reads exactly like one that does not exist.
+        // Held to the engine's own NAMES - every name it writes, in declaration
+        // order - so the next name it adds fails this until a row offers it.
+        use symbios_avatar::{BrowStyle, ChinStyle, FlankStyle, MoustacheStyle, ScalpStyle};
+        let expect = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            offered!(SCALP_CARDS, SCALP_HELMETS),
+            expect(ScalpStyle::NAMES)
+        );
+        assert_eq!(offered!(BROW_CARDS, BROW_HELMETS), expect(BrowStyle::NAMES));
+        assert_eq!(
+            offered!(MOUSTACHE_CARDS, MOUSTACHE_HELMETS),
+            expect(MoustacheStyle::NAMES)
+        );
+        assert_eq!(offered!(CHIN_CARDS, CHIN_HELMETS), expect(ChinStyle::NAMES));
+        assert_eq!(
+            offered!(FLANK_CARDS, FLANK_HELMETS),
+            expect(FlankStyle::NAMES)
+        );
+    }
+
+    /// Every label and value a headless pass of `draw` hands AccessKit.
+    ///
+    /// Two passes, because a context's first frame can be a sizing pass; and
+    /// values as well as labels, because egui reports some widgets' shown text
+    /// as a value (a `ComboBox`'s selection, #1337).
+    fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut text = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+            text = output
+                .platform_output
+                .accesskit_update
+                .map(|update| {
+                    update
+                        .nodes
+                        .iter()
+                        .flat_map(|(_, node)| [node.label(), node.value()])
+                        .flatten()
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        text
+    }
+
+    #[test]
+    fn each_picked_style_draws_the_slider_for_its_own_axis_and_no_other() {
+        // The match arms in the region pickers are the one place a new
+        // variant's axis becomes reachable, and nothing else checks that they
+        // are bound: a helmet whose arm returned `false` would compile, pass
+        // the wire tests, and put its axis out of reach. Drawn headless and read
+        // back through AccessKit, one style at a time, with every OTHER axis
+        // label as the control that the reading can tell them apart.
+        use symbios_avatar::{ChinStyle, FlankStyle, MoustacheStyle, ScalpStyle};
+        let scalp: Vec<(ScalpStyle, Option<&str>)> = SCALP_CARDS
+            .iter()
+            .chain(&SCALP_HELMETS)
+            .map(|(_, style)| {
+                let axis = match style {
+                    ScalpStyle::None | ScalpStyle::Crop => None,
+                    ScalpStyle::Bob { .. } => Some("fringe"),
+                    ScalpStyle::Long { .. } => Some("back weight"),
+                    ScalpStyle::TiedBack { .. } => Some("tail height"),
+                    ScalpStyle::Curly { .. } => Some("curl"),
+                    ScalpStyle::Cap { .. } => Some("fringe notch"),
+                    ScalpStyle::SlickBack { .. } => Some("volume"),
+                    ScalpStyle::Bell { .. } => Some("hem length"),
+                    ScalpStyle::Bun { .. } => Some("bun height"),
+                    ScalpStyle::Crest { .. } => Some("crest height"),
+                    ScalpStyle::Afro { .. } => Some("size"),
+                    ScalpStyle::Braids { .. } => Some("rows"),
+                };
+                (*style, axis)
+            })
+            .collect();
+        let every: Vec<&str> = scalp.iter().filter_map(|(_, axis)| *axis).collect();
+        for (style, axis) in &scalp {
+            let mut drawn = *style;
+            let text = drawn_text(|ui| {
+                scalp_style(ui, &mut drawn);
+            });
+            for name in &every {
+                assert_eq!(
+                    text.iter().any(|t| t == name),
+                    Some(*name) == *axis,
+                    "{style:?} drew the {name} slider: {}, with {text:?}",
+                    text.iter().any(|t| t == name)
+                );
+            }
+            // And the style is marked picked: its row's label is on screen.
+            assert!(text.iter().any(|t| t == "helmet") && text.iter().any(|t| t == "cards"));
+        }
+
+        // The facial regions' one new axis each, and a sculpted brow and
+        // flanks draw no slider at all.
+        let mut moustache = MoustacheStyle::Sculpted { flare: 0.3 };
+        let text = drawn_text(|ui| {
+            moustache_style(ui, &mut moustache);
+        });
+        assert!(text.iter().any(|t| t == "flare"), "{text:?}");
+        let mut chin = ChinStyle::Sculpted { length: 0.3 };
+        let text = drawn_text(|ui| {
+            chin_style(ui, &mut chin);
+        });
+        assert!(text.iter().any(|t| t == "hang"), "{text:?}");
+        let mut flanks = FlankStyle::Sculpted;
+        let text = drawn_text(|ui| {
+            flank_style(ui, &mut flanks);
+        });
+        assert!(
+            !text.iter().any(|t| t == "drop" || t == "reach"),
+            "a sculpted flank drew a card style's slider: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_style_off_the_middle_of_its_axis_is_still_the_one_marked_picked() {
+        // The rows used to compare whole values, so a bob at fringe 0.8 matched
+        // no label: nothing was marked, and a click on "bob" reset the fringe to
+        // the row's 0.5. By variant, the bob is the bob wherever its axis is.
+        let mut style = symbios_avatar::ScalpStyle::Bob { fringe: 0.8 };
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut selected = Vec::new();
+        for _ in 0..2 {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                scalp_style(ui, &mut style);
+            });
+            selected = output
+                .platform_output
+                .accesskit_update
+                .map(|update| {
+                    update
+                        .nodes
+                        .iter()
+                        // egui reports a selectable label's state as toggled.
+                        .filter(|(_, node)| node.toggled() == Some(egui::accesskit::Toggled::True))
+                        .filter_map(|(_, node)| node.label().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        assert_eq!(selected, ["bob"], "marked picked: {selected:?}");
+        assert_eq!(
+            style,
+            symbios_avatar::ScalpStyle::Bob { fringe: 0.8 },
+            "drawing moved the axis"
+        );
+    }
+
+    #[test]
+    fn a_style_kept_from_a_newer_build_is_said_on_the_panel_while_the_region_is_none() {
+        // Engine 0.9 keeps a style name it does not know and writes it back
+        // while the region stays none. The panel shows that region as none, so
+        // it has to say what is being kept - painted, since a hover explains
+        // nothing to somebody who does not know to hover. Control: the same
+        // record once a style is picked over it says nothing, because from then
+        // on the kept style is not written.
+        let hair: symbios_avatar::HairRecord =
+            serde_json::from_str(r#"{"scalp":{"style":{"name":"mohawk_2031","spikes":800}}}"#)
+                .expect("an unknown style name loads since engine 0.9");
+        assert!(
+            hair.unrecognised.scalp.is_some(),
+            "the engine did not keep it"
+        );
+        let mut record = AvatarRecord::new("Kept", Archetype::default());
+        record.hair = hair;
+
+        let said = |record: &AvatarRecord| {
+            let kept = record.hair.unrecognised.scalp.clone();
+            let none = record.hair.scalp.style == symbios_avatar::ScalpStyle::None;
+            drawn_text(|ui| kept_unknown(ui, none, kept.as_ref()))
+                .iter()
+                .any(|t| t.contains("mohawk_2031"))
+        };
+        assert!(said(&record), "a kept style went unmentioned");
+        record.hair.scalp.style = symbios_avatar::ScalpStyle::Crop;
+        assert!(
+            !said(&record),
+            "the line stayed after a style was picked over it"
         );
     }
 

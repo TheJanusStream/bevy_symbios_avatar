@@ -39,7 +39,19 @@
 //! cargo run --release -F builtin-clips --example viewer -- --grade 0.2   # a hill to walk up
 //! cargo run --release -F builtin-clips --example viewer -- --camber 0.2  # a hill to stand across
 //! cargo run --release -F builtin-clips --example viewer -- --bare       # no windows at all
+//! cargo run --release -F builtin-clips --example viewer -- --scalp bell 0.8     # a style and its axis
+//! cargo run --release -F builtin-clips --example viewer -- --brow sculpted --chin sculpted 0.3
 //! ```
+//!
+//! **Hair styles by name**, one flag a region, each taking the style's wire name
+//! and, where the style carries one, its axis (default 0.5, the panel's middle):
+//! `--scalp` none, crop, bob, long, `tied_back`, curly, and the helmet family
+//! cap, `slick_back`, bell, bun, crest, afro, braids; `--brow` none, natural,
+//! thick, sculpted; `--moustache` none, chevron, handlebar, pencil, sculpted;
+//! `--chin` none, goatee, full, braided, sculpted; `--flanks` none, sideburns,
+//! `full_connect`, sculpted. The engine's render example's short spellings
+//! (tied, slick, full for the flanks) are taken too. Applied after `--seed` and
+//! `--mane`, so a rolled or shaved body can be given one style to judge.
 //!
 //! **Strips** — the review unit of the engine's milestone #11 (its #325): one
 //! stitched contact sheet, N frames across one gait cycle from a fixed side
@@ -646,9 +658,110 @@ fn starting_editor() -> RecordEditor {
         }
         record.sanitize();
     }
+    if hair_styles(&mut record.hair) {
+        record.sanitize();
+    }
     let mut editor = RecordEditor::new(record);
     editor.open = windows_wanted();
     editor
+}
+
+/// The style named after `flag` and the axis after that, if given.
+///
+/// An unknown name is a mistake in a command, so it stops the run and lists what
+/// the flag takes rather than quietly drawing the default.
+fn style_flag(flag: &str, names: &[&str]) -> Option<(String, f32)> {
+    let args: Vec<String> = std::env::args().collect();
+    let at = args.iter().position(|arg| arg == flag)?;
+    let Some(name) = args.get(at + 1) else {
+        eprintln!("{flag} takes a style: {}", names.join(", "));
+        std::process::exit(1);
+    };
+    let axis = args
+        .get(at + 2)
+        .and_then(|axis| axis.parse::<f32>().ok())
+        .unwrap_or(0.5);
+    Some((name.clone(), axis))
+}
+
+/// Refuses a style name `flag` does not take.
+fn unknown_style(flag: &str, name: &str, names: &[&str]) -> ! {
+    eprintln!(
+        "unknown {flag} style {name}: expected one of {}",
+        names.join(", ")
+    );
+    std::process::exit(1);
+}
+
+/// `--scalp`, `--brow`, `--moustache`, `--chin` and `--flanks`, onto the hair.
+///
+/// Every name the engine writes, from its own `NAMES` in the refusal, so the
+/// message cannot fall behind the catalogue. Returns whether anything was set.
+fn hair_styles(hair: &mut symbios_avatar::HairRecord) -> bool {
+    use symbios_avatar::{BrowStyle, ChinStyle, FlankStyle, MoustacheStyle, ScalpStyle};
+    let mut set = false;
+    if let Some((name, axis)) = style_flag("--scalp", ScalpStyle::NAMES) {
+        hair.scalp.style = match name.as_str() {
+            "none" => ScalpStyle::None,
+            "crop" => ScalpStyle::Crop,
+            "bob" => ScalpStyle::Bob { fringe: axis },
+            "long" => ScalpStyle::Long { weight: axis },
+            "tied_back" | "tied" => ScalpStyle::TiedBack { tail: axis },
+            "curly" => ScalpStyle::Curly { curl: axis },
+            "cap" => ScalpStyle::Cap { fringe: axis },
+            "slick_back" | "slick" => ScalpStyle::SlickBack { volume: axis },
+            "bell" => ScalpStyle::Bell { length: axis },
+            "bun" => ScalpStyle::Bun { height: axis },
+            "crest" => ScalpStyle::Crest { height: axis },
+            "afro" => ScalpStyle::Afro { size: axis },
+            "braids" => ScalpStyle::Braids { rows: axis },
+            other => unknown_style("--scalp", other, ScalpStyle::NAMES),
+        };
+        set = true;
+    }
+    if let Some((name, _)) = style_flag("--brow", BrowStyle::NAMES) {
+        hair.brows.style = match name.as_str() {
+            "none" => BrowStyle::None,
+            "natural" => BrowStyle::Natural,
+            "thick" => BrowStyle::Thick,
+            "sculpted" => BrowStyle::Sculpted,
+            other => unknown_style("--brow", other, BrowStyle::NAMES),
+        };
+        set = true;
+    }
+    if let Some((name, axis)) = style_flag("--moustache", MoustacheStyle::NAMES) {
+        hair.moustache.style = match name.as_str() {
+            "none" => MoustacheStyle::None,
+            "chevron" => MoustacheStyle::Chevron,
+            "handlebar" => MoustacheStyle::Handlebar { sweep: axis },
+            "pencil" => MoustacheStyle::Pencil { ride: axis },
+            "sculpted" => MoustacheStyle::Sculpted { flare: axis },
+            other => unknown_style("--moustache", other, MoustacheStyle::NAMES),
+        };
+        set = true;
+    }
+    if let Some((name, axis)) = style_flag("--chin", ChinStyle::NAMES) {
+        hair.chin.style = match name.as_str() {
+            "none" => ChinStyle::None,
+            "goatee" => ChinStyle::Goatee { point: axis },
+            "full" => ChinStyle::Full,
+            "braided" => ChinStyle::Braided { twist: axis },
+            "sculpted" => ChinStyle::Sculpted { length: axis },
+            other => unknown_style("--chin", other, ChinStyle::NAMES),
+        };
+        set = true;
+    }
+    if let Some((name, axis)) = style_flag("--flanks", FlankStyle::NAMES) {
+        hair.flanks.style = match name.as_str() {
+            "none" => FlankStyle::None,
+            "sideburns" => FlankStyle::Sideburns { drop: axis },
+            "full_connect" | "full" => FlankStyle::FullConnect { reach: axis },
+            "sculpted" => FlankStyle::Sculpted,
+            other => unknown_style("--flanks", other, FlankStyle::NAMES),
+        };
+        set = true;
+    }
+    set
 }
 
 /// What the body starts out doing, from the command line.

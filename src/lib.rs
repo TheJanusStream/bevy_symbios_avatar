@@ -173,7 +173,10 @@ pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bev
 pub use driver::{AvatarDriver, Drive, Drove, drive_avatar_bodies};
 #[cfg(feature = "editor")]
 pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
-pub use spawn::{AvatarBody, AvatarClosure, AvatarJoints, AvatarPose, SpawnAvatar, spawn_avatar};
+pub use spawn::{
+    AvatarBody, AvatarClosure, AvatarJoints, AvatarPose, HAIR_MARGIN, HAIR_SWITCH, HairLod,
+    HairTier, SpawnAvatar, spawn_avatar,
+};
 
 use bevy::prelude::*;
 
@@ -225,6 +228,13 @@ impl Plugin for AvatarPlugin {
         .add_systems(
             Update,
             spawn::apply_avatar_poses.in_set(AvatarSystems::Apply),
+        )
+        // Where hair changes tier (#48): one resource for the app, carried onto
+        // every tiered body when it changes and onto every body as it arrives.
+        .init_resource::<spawn::HairLod>()
+        .add_systems(
+            Update,
+            spawn::retune_hair_tiers.in_set(AvatarSystems::Apply),
         )
         // The per-body driver, which is not a plugin of its own: it needs no
         // resource, no GUI and no clip library, so a consumer that draws bodies

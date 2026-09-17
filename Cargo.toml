@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -91,7 +91,13 @@ bevy = "0.19"
 # **0.8.1 because the hair material binds the engine's strand mask** (#47,
 # engine #340). `strand_mask()` first ships in engine 0.8.1, an additive patch
 # release, so the floor moves to it; an 0.8.0 engine does not build this crate.
-symbios-avatar = "0.8.1"
+#
+# **0.9 for the helmet family** (#48, engine milestone "Hair overhaul 2026-09"):
+# seven helmet scalp styles and sculpted facial hair the editor and the viewer
+# name, and the far hair tier `spawn` draws beside the near one. Breaking twice
+# over for a 0.x crate: `HairRecord` is no longer `Copy`, and a 0.8 engine
+# refuses a whole record wearing a style name it does not know.
+symbios-avatar = "0.9.0"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
