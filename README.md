@@ -106,6 +106,17 @@ every tiered body. Bevy stores one entry per distinct range, so a crowd costs tw
 entries in its range table - which matters on WebGL2, where that table is a
 64-entry uniform.
 
+### Clothes: one draw, textured or not
+
+An outfit is a top and a pair of trousers, each a colour, a length and
+optionally a texture (engine 0.10). A textured outfit arrives with a **cloth
+atlas**, `Avatar::cloth`, laid out like the skin atlas, and `spawn_avatar` binds
+it to the cloth's material with its mip chain - so a woven shirt over printed
+trousers is still one cloth mesh and one draw. An outfit in plain colours
+carries no atlas and draws from its vertex colours, as it always did. The
+editor's outfit section offers every tileable surface symbios-texture
+generates, each with that surface's own panel from `bevy_symbios_texture`.
+
 ## Moving a body
 
 Two ways, and which one is right depends on what is asking. Either way,

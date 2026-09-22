@@ -36,7 +36,9 @@ use bevy::mesh::skinning::{SkinnedMesh, SkinnedMeshInverseBindposes};
 use bevy::prelude::*;
 use symbios_avatar::{Avatar, AvatarConfig, AvatarRecord, MeshKind, Pose};
 
-use crate::convert::{atlas_image, mesh_of, normal_image, orm_image, strand_mask_image};
+use crate::convert::{
+    atlas_image, cloth_images, mesh_of, normal_image, orm_image, strand_mask_image,
+};
 
 /// A request to build and draw a body.
 ///
@@ -289,11 +291,23 @@ pub fn spawn_avatar(
             .collect::<Vec<_>>(),
     ));
 
-    let atlas = SkinMaps {
+    let atlas = AtlasMaps {
         albedo: images.add(atlas_image(&avatar.skin)),
         normal: images.add(normal_image(&avatar.skin)),
         orm: images.add(orm_image(&avatar.skin)),
     };
+    // The cloth's own atlas, when the outfit wears a texture (#50): laid out
+    // like the skin's, with its mip chain, and bound to the cloth's material
+    // the way the skin atlas is bound to the skin's. An outfit in plain
+    // colours paints none and draws from its vertex colours as it always did.
+    let cloth = avatar.cloth.as_ref().map(|map| {
+        let [albedo, normal, orm] = cloth_images(map).map(|image| images.add(image));
+        AtlasMaps {
+            albedo,
+            normal,
+            orm,
+        }
+    });
     // Uploaded by the first body, and every body after it samples that one.
     if !images.contains(&STRAND_MASK) {
         let mask = strand_mask_image(avatar.strand_mask());
@@ -313,7 +327,7 @@ pub fn spawn_avatar(
     let lod = HairLod::default();
     let mut hair = None;
     for drawn in avatar.meshes.iter().chain(&eyes) {
-        let material = materials.add(material_for(drawn.kind, &atlas));
+        let material = materials.add(material_for(drawn.kind, &atlas, cloth.as_ref()));
         let mesh = commands
             .spawn((
                 Mesh3d(meshes.add(mesh_of(drawn))),
@@ -437,8 +451,9 @@ const STRAND_MASK: Handle<Image> = uuid_handle!("5d0a3c1e-8f47-4b2a-9e6d-7c3f1a9
 /// instruments draw the same locks.
 const STRAND_CUT: f32 = 0.5;
 
-/// The three textures one painted skin uploads as.
-struct SkinMaps {
+/// The three textures one painted atlas uploads as: the skin's, and the
+/// cloth's when an outfit wears a texture.
+struct AtlasMaps {
     albedo: Handle<Image>,
     normal: Handle<Image>,
     orm: Handle<Image>,
@@ -476,15 +491,23 @@ struct SkinMaps {
 /// every card's UVs into it. Masked rather than blended: a mask needs no
 /// sorting, and Bevy's shadow pass honours it, so a card casts its lock's
 /// shadow and not its rectangle's.
-fn material_for(kind: MeshKind, atlas: &SkinMaps) -> StandardMaterial {
+fn material_for(kind: MeshKind, atlas: &AtlasMaps, cloth: Option<&AtlasMaps>) -> StandardMaterial {
     // Bevy's own values for everything decided here for one kind and not for
     // the others, and for everything not decided here at all.
     let plain = StandardMaterial::default();
-    let (roughness, reflectance, metallic) = match kind {
+    // The maps a kind is painted from, if it is painted at all: the skin from
+    // its atlas, and the cloth from its own when the outfit wears a texture
+    // (#50). Everything else carries its colour on its vertices.
+    let maps = match kind {
+        MeshKind::Skin => Some(atlas),
+        MeshKind::Cloth => cloth,
+        MeshKind::Hair | MeshKind::Eye => None,
+    };
+    let (roughness, reflectance, metallic) = match (kind, maps) {
         // 1.0, not a taste: Bevy MULTIPLIES the factor into the roughness
         // texture, so anything less darkens every texel of the finish the
         // engine painted. The per-texel values live in the ORM map (#22).
-        MeshKind::Skin => (1.0, plain.reflectance, 0.0),
+        (MeshKind::Skin, _) => (1.0, plain.reflectance, 0.0),
         // **Roughness is the software renderer's own hair finish** (#46).
         // 0.35 had no provenance and put a plastic stripe on every flat card.
         // On a sheet of nine heads each turned through five views, 0.35 read
@@ -502,31 +525,40 @@ fn material_for(kind: MeshKind, atlas: &SkinMaps) -> StandardMaterial {
         // specular occlusion in its ambient light); 0.25 is an F0 of 1%, which
         // halves it and quarters the highlight, and is where the veil left the
         // sheet.
-        MeshKind::Hair => (0.52, 0.25, 0.0),
-        MeshKind::Cloth => (0.92, plain.reflectance, 0.0),
+        (MeshKind::Hair, _) => (0.52, 0.25, 0.0),
+        // A textured outfit's finish is painted per texel, the skin's rule for
+        // the same reason: both factors multiply their map, so both are one.
+        // The metal factor is one too, which is what lets a garment made of
+        // metal be metal — plain cloth paints no metal into the map.
+        (MeshKind::Cloth, Some(_)) => (1.0, plain.reflectance, 1.0),
+        // The engine's own plain-cloth finish, the figure its cloth atlas
+        // paints an untextured garment with.
+        (MeshKind::Cloth, None) => (
+            symbios_avatar::dress::cloth::PLAIN_ROUGHNESS,
+            plain.reflectance,
+            0.0,
+        ),
         // A globe is the one wet thing on a body, and a matte eye is the
         // single fastest way to make a face look dead.
-        MeshKind::Eye => (0.08, plain.reflectance, 0.0),
+        (MeshKind::Eye, _) => (0.08, plain.reflectance, 0.0),
     };
-    let skin = matches!(kind, MeshKind::Skin);
     let cards = matches!(kind, MeshKind::Hair);
     StandardMaterial {
         base_color: Color::WHITE,
         base_color_texture: match kind {
-            MeshKind::Skin => Some(atlas.albedo.clone()),
             MeshKind::Hair => Some(STRAND_MASK),
-            MeshKind::Cloth | MeshKind::Eye => None,
+            _ => maps.map(|maps| maps.albedo.clone()),
         },
         alpha_mode: if cards {
             AlphaMode::Mask(STRAND_CUT)
         } else {
             plain.alpha_mode
         },
-        normal_map_texture: skin.then(|| atlas.normal.clone()),
+        normal_map_texture: maps.map(|maps| maps.normal.clone()),
         // One image, two slots: G/B feed metallic-roughness, R feeds
         // occlusion — which is exactly the ORM layout the engine bakes.
-        metallic_roughness_texture: skin.then(|| atlas.orm.clone()),
-        occlusion_texture: skin.then(|| atlas.orm.clone()),
+        metallic_roughness_texture: maps.map(|maps| maps.orm.clone()),
+        occlusion_texture: maps.map(|maps| maps.orm.clone()),
         perceptual_roughness: roughness,
         reflectance,
         metallic,
@@ -1088,13 +1120,13 @@ mod tests {
             .map(|mesh| mesh.kind)
             .collect();
         assert!(kinds.contains(&MeshKind::Hair) && kinds.contains(&MeshKind::Skin));
-        let atlas = SkinMaps {
+        let atlas = AtlasMaps {
             albedo: Handle::default(),
             normal: Handle::default(),
             orm: Handle::default(),
         };
-        let apart = material_for(MeshKind::Hair, &atlas).perceptual_roughness
-            - material_for(MeshKind::Skin, &atlas).perceptual_roughness;
+        let apart = material_for(MeshKind::Hair, &atlas, None).perceptual_roughness
+            - material_for(MeshKind::Skin, &atlas, None).perceptual_roughness;
         assert!(
             apart.abs() > 0.1,
             "hair and skin shade {apart} apart, which is not apart"
@@ -1111,12 +1143,71 @@ mod tests {
 
     /// Maps that point at no image: no question below is about which image a
     /// material samples.
-    fn unmapped() -> SkinMaps {
-        SkinMaps {
+    fn unmapped() -> AtlasMaps {
+        AtlasMaps {
             albedo: Handle::default(),
             normal: Handle::default(),
             orm: Handle::default(),
         }
+    }
+
+    #[test]
+    fn a_textured_outfit_draws_its_cloth_from_its_own_atlas() {
+        // #50. With a cloth atlas the cloth is painted like the skin: its three
+        // maps bound, and both factors at one because Bevy multiplies them
+        // into the maps — the metal one too, which is what lets a garment
+        // made of metal be metal. Without one it is the plain finish, drawn
+        // from its vertex colours, exactly as before the atlas existed.
+        let skin = unmapped();
+        let cloth = AtlasMaps {
+            albedo: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(1), default()),
+            normal: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(2), default()),
+            orm: Handle::Uuid(bevy::asset::uuid::Uuid::from_u128(3), default()),
+        };
+        let woven = material_for(MeshKind::Cloth, &skin, Some(&cloth));
+        assert_eq!(woven.base_color_texture, Some(cloth.albedo.clone()));
+        assert_eq!(woven.normal_map_texture, Some(cloth.normal.clone()));
+        assert_eq!(woven.metallic_roughness_texture, Some(cloth.orm.clone()));
+        assert_eq!(woven.occlusion_texture, Some(cloth.orm.clone()));
+        assert!((woven.perceptual_roughness - 1.0).abs() < f32::EPSILON);
+        assert!((woven.metallic - 1.0).abs() < f32::EPSILON);
+
+        let plain = material_for(MeshKind::Cloth, &skin, None);
+        assert_eq!(plain.base_color_texture, None);
+        assert_eq!(plain.normal_map_texture, None);
+        assert!(
+            (plain.perceptual_roughness - symbios_avatar::dress::cloth::PLAIN_ROUGHNESS).abs()
+                < f32::EPSILON
+        );
+        assert!(plain.metallic.abs() < f32::EPSILON);
+
+        // And a cloth atlas never leaks onto another kind.
+        for kind in [MeshKind::Skin, MeshKind::Hair, MeshKind::Eye] {
+            let material = material_for(kind, &skin, Some(&cloth));
+            assert_ne!(
+                material.base_color_texture,
+                Some(cloth.albedo.clone()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_textured_body_uploads_three_more_images_than_a_plain_one() {
+        let images = |textured: bool| {
+            let mut app = app();
+            let mut record = AvatarRecord::new("Worn", Archetype::default());
+            if textured {
+                record.outfit.trousers.texture = symbios_avatar::SurfaceConfig::named("Fabric")
+                    .map(symbios_avatar::GarmentTexture::new);
+            }
+            record.sanitize();
+            let root = app.world_mut().spawn(SpawnAvatar::from(record)).id();
+            app.update();
+            assert!(app.world().get::<AvatarBody>(root).is_some(), "built");
+            app.world().resource::<Assets<Image>>().len()
+        };
+        assert_eq!(images(true), images(false) + 3);
     }
 
     #[test]
@@ -1134,7 +1225,7 @@ mod tests {
         // kind would change that kind's look with no sheet to say so.
         let maps = unmapped();
         for kind in KINDS {
-            let material = material_for(kind, &maps);
+            let material = material_for(kind, &maps, None);
             let cards = kind == MeshKind::Hair;
             assert_eq!(material.double_sided, cards, "{kind:?} double_sided");
             assert_eq!(
@@ -1154,7 +1245,7 @@ mod tests {
         // nothing else on a body has a silhouette of its own to cut.
         let maps = unmapped();
         for kind in KINDS {
-            let material = material_for(kind, &maps);
+            let material = material_for(kind, &maps, None);
             let cards = kind == MeshKind::Hair;
             let cut = match material.alpha_mode {
                 AlphaMode::Mask(at) => (at - 0.5).abs() < 1e-6,
@@ -1194,7 +1285,7 @@ mod tests {
         // strength above zero.
         let maps = unmapped();
         for kind in KINDS {
-            let strength = material_for(kind, &maps).anisotropy_strength;
+            let strength = material_for(kind, &maps, None).anisotropy_strength;
             assert!(
                 strength <= 0.0,
                 "{kind:?} asks for anisotropy at {strength}"

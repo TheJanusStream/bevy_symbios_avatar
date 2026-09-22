@@ -94,9 +94,10 @@ use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
+use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
 use symbios_avatar::{
     Archetype, Avatar, AvatarConfig, AvatarRecord, Category, GENERATOR_VERSION, HumanoidParams,
-    Leg, Limb, QuadrupedParams, Rig, Sleeve, Zone,
+    Limb, QuadrupedParams, Rig, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -666,6 +667,7 @@ pub fn category_name(category: Category) -> &'static str {
         Category::Colouring => "colouring",
         Category::Hair => "hair",
         Category::Age => "age",
+        Category::Outfit => "outfit",
     }
 }
 
@@ -1124,39 +1126,68 @@ fn ramped_colour(
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.label(name);
-        for stop in 0..=8u32 {
-            let shade = f32::from(u16::try_from(stop).unwrap_or(0)) / 8.0;
-            let tone = ramp(shade);
-            let picked = tone
-                .iter()
-                .zip(colour.iter())
-                .all(|(a, b)| (a - b).abs() < 0.004);
-            let button = egui::Button::new(if picked { "•" } else { " " })
-                .fill(swatch(symbios_avatar::Vec3::from_array(tone)))
-                .min_size(egui::vec2(18.0, 18.0));
-            if ui
-                .add(button)
-                .on_hover_text(format!("{hover} {shade:.2}"))
-                .clicked()
-            {
-                *colour = tone;
-                changed = true;
-            }
-        }
-        let mut free = swatch(symbios_avatar::Vec3::from_array(*colour));
+        changed |= swatch_row(
+            ui,
+            colour,
+            (0..=8u16).map(|stop| f32::from(stop) / 8.0),
+            ramp,
+            hover,
+        );
+        changed |= free_colour(ui, colour);
+    });
+    changed
+}
+
+/// A row of swatches sampled from `ramp` at `stops`, one click each to wear.
+///
+/// The swatch a colour sits on is marked, within a quarter of a byte, which is
+/// the picker's own precision.
+fn swatch_row(
+    ui: &mut egui::Ui,
+    colour: &mut [f32; 3],
+    stops: impl IntoIterator<Item = f32>,
+    ramp: impl Fn(f32) -> [f32; 3],
+    hover: &str,
+) -> bool {
+    let mut changed = false;
+    for at in stops {
+        let tone = ramp(at);
+        let picked = tone
+            .iter()
+            .zip(colour.iter())
+            .all(|(a, b)| (a - b).abs() < 0.004);
+        let button = egui::Button::new(if picked { "•" } else { " " })
+            .fill(swatch(symbios_avatar::Vec3::from_array(tone)))
+            .min_size(egui::vec2(18.0, 18.0));
         if ui
-            .color_edit_button_srgba(&mut free)
-            .on_hover_text("any colour, sRGB")
-            .changed()
+            .add(button)
+            .on_hover_text(format!("{hover} {at:.2}"))
+            .clicked()
         {
-            *colour = [
-                f32::from(free.r()) / 255.0,
-                f32::from(free.g()) / 255.0,
-                f32::from(free.b()) / 255.0,
-            ];
+            *colour = tone;
             changed = true;
         }
-    });
+    }
+    changed
+}
+
+/// The free sRGB picker beside a row of swatches.
+///
+/// Written back only when the picker changed, so a colour nobody touches keeps
+/// the value the record was loaded with rather than the byte the picker holds.
+fn free_colour(ui: &mut egui::Ui, colour: &mut [f32; 3]) -> bool {
+    let mut free = swatch(symbios_avatar::Vec3::from_array(*colour));
+    let changed = ui
+        .color_edit_button_srgba(&mut free)
+        .on_hover_text("any colour, sRGB")
+        .changed();
+    if changed {
+        *colour = [
+            f32::from(free.r()) / 255.0,
+            f32::from(free.g()) / 255.0,
+            f32::from(free.b()) / 255.0,
+        ];
+    }
     changed
 }
 
@@ -1385,56 +1416,221 @@ fn flank_style(ui: &mut egui::Ui, style: &mut symbios_avatar::FlankStyle) -> boo
     changed
 }
 
-/// What the body is wearing.
+/// What the body is wearing: a top and a pair of trousers, each a colour, a
+/// length and optionally a texture (symbios-avatar #354).
+///
+/// One nested header per garment, the hair section's shape and for its
+/// reason: a texture's own panel is a dozen controls, and two of them open at
+/// once is a wall.
 pub fn outfit_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new("outfit").show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label("sleeve");
-            for cut in [Sleeve::Bare, Sleeve::Forearm, Sleeve::Wrist] {
-                let picked = record.outfit.sleeve == cut;
-                if ui.selectable_label(picked, sleeve_name(&cut)).clicked() && !picked {
-                    record.outfit.sleeve = cut.clone();
-                    changed = true;
-                }
-            }
+        changed |= zone(ui, "top", |ui| {
+            garment(
+                ui,
+                "top",
+                &mut record.outfit.top,
+                dress::SLEEVE_RANGE,
+                &SLEEVE_PRESETS,
+            )
         });
-        ui.horizontal(|ui| {
-            ui.label("leg");
-            for cut in [Leg::Shorts, Leg::Calf, Leg::Ankle] {
-                let picked = record.outfit.leg == cut;
-                if ui.selectable_label(picked, leg_name(&cut)).clicked() && !picked {
-                    record.outfit.leg = cut.clone();
-                    changed = true;
-                }
-            }
+        changed |= zone(ui, "trousers", |ui| {
+            garment(
+                ui,
+                "trousers",
+                &mut record.outfit.trousers,
+                dress::TROUSER_RANGE,
+                &LEG_PRESETS,
+            )
         });
-        changed |= axis(ui, "top hue", &mut record.outfit.top_hue, 0.0..=1.0);
-        changed |= axis(ui, "top shade", &mut record.outfit.top_shade, 0.0..=1.0);
-        changed |= axis(ui, "leg hue", &mut record.outfit.leg_hue, 0.0..=1.0);
-        changed |= axis(ui, "leg shade", &mut record.outfit.leg_shade, 0.0..=1.0);
     });
     changed
 }
 
-/// The name to show a sleeve cut by.
-fn sleeve_name(cut: &Sleeve) -> String {
-    match cut {
-        Sleeve::Bare => String::from("bare"),
-        Sleeve::Forearm => String::from("forearm"),
-        Sleeve::Wrist => String::from("wrist"),
-        Sleeve::Other(other) => other.clone(),
-    }
+/// A top's lengths with names of their own, offered as buttons beside the
+/// slider: the old cuts (symbios-avatar #356) and the two between them a
+/// person names when they talk about a shirt.
+const SLEEVE_PRESETS: [(&str, f32); 5] = [
+    ("sleeveless", 0.0),
+    ("short", 0.25),
+    ("elbow", 0.5),
+    ("forearm", dress::FOREARM),
+    ("wrist", 1.0),
+];
+
+/// Trousers' lengths with names of their own, likewise.
+const LEG_PRESETS: [(&str, f32); 4] = [
+    ("shorts", dress::SHORTS),
+    ("knee", 0.5),
+    ("calf", dress::CALF),
+    ("ankle", 1.0),
+];
+
+/// One garment: its colour, its length, and what it is made of.
+///
+/// **The length is a share of the limb, and the slider says so**: `0.5` is the
+/// elbow or the knee on every body, whatever its proportions, and the hem lands
+/// where the value says rather than on the nearest ring of faces (#356). The
+/// named lengths beside it are the ones a person asks for by name.
+fn garment(
+    ui: &mut egui::Ui,
+    id: &str,
+    worn: &mut GarmentParams,
+    range: (f32, f32),
+    presets: &[(&str, f32)],
+) -> bool {
+    let mut changed = garment_colour(ui, "colour", &mut worn.colour);
+    ui.horizontal_wrapped(|ui| {
+        ui.small("length");
+        for &(name, length) in presets {
+            // Against a thousandth, which is the grid the record holds a length
+            // on: a preset the slider has landed on exactly is that preset.
+            let picked = (worn.length - length).abs() < 5e-4;
+            if ui.selectable_label(picked, name).clicked() && !picked {
+                worn.length = length;
+                changed = true;
+            }
+        }
+    });
+    changed |= axis(ui, "length", &mut worn.length, range.0..=range.1);
+    changed |= garment_texture(ui, id, &mut worn.texture);
+    changed
 }
 
-/// The name to show a trouser cut by.
-fn leg_name(cut: &Leg) -> String {
-    match cut {
-        Leg::Shorts => String::from("shorts"),
-        Leg::Calf => String::from("calf"),
-        Leg::Ankle => String::from("ankle"),
-        Leg::Other(other) => other.clone(),
+/// A garment's colour: quick picks from the engine's own dye wheel and a grey
+/// ramp, and a free picker beside them.
+///
+/// **Free first, the swatches a convenience.** The record stores any sRGB
+/// colour (#355) — the hue-and-shade it replaced could not say black, white or
+/// anything saturated — so the picker is the control and the rows are a start:
+/// the wheel is `dress::dye` at a middle shade, the dyed-cloth colours the old
+/// axes reached, and the ramp is the neutrals a wheel has no room for.
+fn garment_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.label(name);
+        // Eight hues round the wheel — its ninth stop would be its first —
+        // and nine greys from black to white.
+        changed |= swatch_row(
+            ui,
+            colour,
+            (0..8u16).map(|stop| f32::from(stop) / 8.0),
+            |hue| dress::dye(hue, 0.45),
+            "dye",
+        );
+        changed |= swatch_row(
+            ui,
+            colour,
+            (0..=8u16).map(|stop| f32::from(stop) / 8.0),
+            |level| [level; 3],
+            "grey",
+        );
+        changed |= free_colour(ui, colour);
+    });
+    changed
+}
+
+/// What a garment is made of: plain cloth, or one of the tileable surfaces
+/// `symbios-texture` generates, at a tile size and a turn, with the
+/// generator's own panel under it.
+///
+/// **The generator's panel is that crate's, not a copy** (#50): it is
+/// generated from the same per-field registry as the config, so every range it
+/// offers is the envelope the record's `sanitize` clamps to and a slider never
+/// shows a value the record cannot hold.
+fn garment_texture(ui: &mut egui::Ui, id: &str, texture: &mut Option<GarmentTexture>) -> bool {
+    let mut changed = false;
+    let current = texture.as_ref().map_or_else(
+        || String::from("plain"),
+        |worn| worn.surface.name().to_owned(),
+    );
+    egui::ComboBox::from_id_salt(("garment texture", id))
+        .selected_text(format!("made of: {current}"))
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(texture.is_none(), "plain").clicked() && texture.is_some() {
+                *texture = None;
+                changed = true;
+            }
+            for &name in SurfaceConfig::NAMES {
+                let picked = current == name;
+                if ui.selectable_label(picked, name).clicked()
+                    && !picked
+                    && let Some(surface) = SurfaceConfig::named(name)
+                {
+                    // The tile size and the turn carry across a change of
+                    // surface: they are the garment's, not the surface's.
+                    *texture = Some(match texture.take() {
+                        Some(old) => GarmentTexture { surface, ..old },
+                        None => GarmentTexture::new(surface),
+                    });
+                    changed = true;
+                }
+            }
+        });
+    let Some(worn) = texture else {
+        return changed;
+    };
+    if !worn.surface.is_known() {
+        // Painted, not hovered, for the reason `kept_unknown` gives.
+        ui.small(format!(
+            "this garment is made of a surface this build cannot draw ({current}); it is kept as \
+             it is unless you pick another here, and drawn in its plain colour until then"
+        ));
+        return changed;
     }
+    // Logarithmic, and without a step: a range from a two-centimetre tile to a
+    // four-metre one is three decades, and a stepped slider would rewrite a
+    // record's value on sight. The host's `sanitize` puts it on the grid.
+    changed |= ui
+        .add(
+            egui::Slider::new(
+                &mut worn.scale,
+                dress::surface::SCALE_RANGE.0..=dress::surface::SCALE_RANGE.1,
+            )
+            .logarithmic(true)
+            .text("tiles per metre"),
+        )
+        .changed();
+    changed |= axis(
+        ui,
+        "turn",
+        &mut worn.rotation,
+        dress::surface::ROTATION_RANGE.0..=dress::surface::ROTATION_RANGE.1,
+    );
+    if let Some(mut config) = texture_config(&worn.surface) {
+        let (writeback, _) = bevy_symbios_texture::ui::texture_config_editor(
+            ui,
+            &mut config,
+            egui::Id::new(("garment surface", id)),
+        );
+        if writeback && let Some(surface) = surface_config(&config) {
+            worn.surface = surface;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// A garment's surface as the texture crate's own tagged config, for its
+/// panel. Both are the registry's configs under the same `$type` names, so the
+/// native JSON of one is the other.
+fn texture_config(surface: &SurfaceConfig) -> Option<bevy_symbios_texture::TextureConfig> {
+    let mut native = surface.to_native()?;
+    native
+        .as_object_mut()?
+        .insert("$type".into(), serde_json::Value::from(surface.name()));
+    serde_json::from_value(native).ok()
+}
+
+/// And back.
+fn surface_config(config: &bevy_symbios_texture::TextureConfig) -> Option<SurfaceConfig> {
+    let mut native = serde_json::to_value(config).ok()?;
+    let name = native
+        .as_object_mut()?
+        .remove("$type")?
+        .as_str()?
+        .to_owned();
+    SurfaceConfig::from_native(&name, native)
 }
 
 /// A `0..=1`-ish axis on a slider that steps in thousandths.
@@ -1841,11 +2037,44 @@ mod tests {
             ("mouth", record.face.mouth),
             ("mouth width", record.face.mouth_width),
             ("ears", record.face.ears),
-            ("top hue", record.outfit.top_hue),
-            ("top shade", record.outfit.top_shade),
-            ("leg hue", record.outfit.leg_hue),
-            ("leg shade", record.outfit.leg_shade),
+            // The outfit (symbios-avatar #354): two garments of a colour and a
+            // length, where there were four hue and shade axes.
+            ("top red", record.outfit.top.colour[0]),
+            ("top green", record.outfit.top.colour[1]),
+            ("top blue", record.outfit.top.colour[2]),
+            ("top length", record.outfit.top.length),
+            ("trousers red", record.outfit.trousers.colour[0]),
+            ("trousers green", record.outfit.trousers.colour[1]),
+            ("trousers blue", record.outfit.trousers.colour[2]),
+            ("trousers length", record.outfit.trousers.length),
         ]);
+        // A texture's own two axes, where a garment wears one. Its surface's
+        // config rides the wire in ten-thousandths rather than thousandths,
+        // so it is not an axis here; the whole-record equality in the round
+        // trip below is what covers it.
+        for (name, garment) in [
+            ("top", &record.outfit.top),
+            ("trousers", &record.outfit.trousers),
+        ] {
+            if let Some(texture) = &garment.texture {
+                out.push((
+                    if name == "top" {
+                        "top tiles"
+                    } else {
+                        "trousers tiles"
+                    },
+                    texture.scale,
+                ));
+                out.push((
+                    if name == "top" {
+                        "top turn"
+                    } else {
+                        "trousers turn"
+                    },
+                    texture.rotation,
+                ));
+            }
+        }
         // **Five regions of the same shape, pushed rather than listed**
         // (symbios-avatar #202/#209). Hair used to be eight scalars on one
         // struct and they were written out one per line here; it is now five
@@ -2093,10 +2322,15 @@ mod tests {
         record.face.mouth_width = 0.572_91;
         record.face.ears = 0.606_06;
         fiddle_hair(&mut record);
-        record.outfit.top_hue = 0.151_51;
-        record.outfit.top_shade = 0.626_26;
-        record.outfit.leg_hue = 0.373_73;
-        record.outfit.leg_shade = 0.848_48;
+        record.outfit.top.colour = [0.151_51, 0.626_26, 0.373_73];
+        record.outfit.top.length = 0.848_48;
+        record.outfit.trousers.colour = [0.919_19, 0.050_50, 0.444_44];
+        record.outfit.trousers.length = 0.666_66;
+        record.outfit.top.texture = Some(GarmentTexture {
+            surface: SurfaceConfig::named("Fabric").expect("Fabric is a surface"),
+            scale: 3.333_33,
+            rotation: 12.345_67,
+        });
         record
     }
 
@@ -2180,10 +2414,15 @@ mod tests {
         // again, and it is the standing arrangement rather than a catch this
         // time — every engine record-schema change carries an editor slice by
         // default, so the count and the sliders moved together.
+        //
+        // **120 -> 126** (symbios-avatar #354): the outfit's four hue and
+        // shade axes became two garments of an sRGB colour and a length, eight
+        // axes, and a garment wearing a texture carries two more — its tiles
+        // and its turn — which `fiddled` gives the top.
         let record = fiddled();
         let listed = axes(&record).len();
         assert_eq!(
-            listed, 120,
+            listed, 126,
             "the panel's coverage list names {listed} axes; if a record field \
              was added or removed, add it to `axes` and `fiddled` and correct \
              this count"
@@ -2667,5 +2906,30 @@ mod tests {
         editor.draft = false;
         editor.last_build = Some((Duration::from_millis(277), AvatarConfig::default().atlas));
         assert!(editor.settled(), "the full body landed and nothing settled");
+    }
+
+    #[test]
+    fn every_surface_crosses_to_the_texture_panel_and_back_unchanged() {
+        // The texture panel is `bevy_symbios_texture`'s, and it edits that
+        // crate's own tagged config; a garment holds the engine's. The bridge
+        // between them is their shared native JSON, and a surface it dropped a
+        // field of, or renamed, would be edited by a panel that is not showing
+        // the garment's config.
+        for surface in SurfaceConfig::all() {
+            let config = texture_config(&surface)
+                .unwrap_or_else(|| panic!("{} did not reach the panel", surface.name()));
+            assert_eq!(
+                config.label(),
+                surface.name(),
+                "the panel shows another surface"
+            );
+            let back = surface_config(&config)
+                .unwrap_or_else(|| panic!("{} did not come back", surface.name()));
+            assert_eq!(back, surface, "{} changed across the panel", surface.name());
+        }
+        // One this build cannot draw has no panel, rather than a wrong one.
+        let mut unknown = serde_json::Map::new();
+        unknown.insert("$type".into(), serde_json::Value::from("Tartan"));
+        assert!(texture_config(&SurfaceConfig::Unknown(unknown)).is_none());
     }
 }

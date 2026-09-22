@@ -41,6 +41,8 @@
 //! cargo run --release -F builtin-clips --example viewer -- --bare       # no windows at all
 //! cargo run --release -F builtin-clips --example viewer -- --scalp bell 0.8     # a style and its axis
 //! cargo run --release -F builtin-clips --example viewer -- --brow sculpted --chin sculpted 0.3
+//! cargo run --release -F builtin-clips --example viewer -- --sleeve 0.3 --leg calf  # lengths
+//! cargo run --release -F builtin-clips --example viewer -- --top-colour 0.8,0.2,0.2 --trousers-texture Fabric,6
 //! ```
 //!
 //! **Hair styles by name**, one flag a region, each taking the style's wire name
@@ -661,9 +663,105 @@ fn starting_editor() -> RecordEditor {
     if hair_styles(&mut record.hair) {
         record.sanitize();
     }
+    if outfit_flags(&mut record.outfit) {
+        record.sanitize();
+    }
     let mut editor = RecordEditor::new(record);
     editor.open = windows_wanted();
     editor
+}
+
+/// `--sleeve`, `--leg`, `--top-colour`, `--trousers-colour`, `--top-texture`
+/// and `--trousers-texture`, onto the outfit (#50) — the engine's render
+/// example's flags, spelled the same, so one command line asks both
+/// instruments for the same clothes.
+///
+/// A length is a share of the limb or one of the old cut names; a colour is
+/// three sRGB channels, `r,g,b`; a texture is a surface's wire name, then
+/// optionally its tiles per metre and its turn in degrees, `Fabric,6,45`.
+/// Applied after `--seed`, so a rolled body can be given one garment to judge.
+/// Returns whether anything was set.
+fn outfit_flags(outfit: &mut symbios_avatar::OutfitParams) -> bool {
+    use symbios_avatar::dress::{CALF, FOREARM, SHORTS};
+    use symbios_avatar::{GarmentTexture, SurfaceConfig};
+    let length = |flag: &str, names: &[(&str, f32)]| -> Option<f32> {
+        let given = word(flag)?;
+        let named = names
+            .iter()
+            .find(|(name, _)| *name == given)
+            .map(|(_, length)| *length);
+        let Some(length) = named.or_else(|| given.parse::<f32>().ok()) else {
+            let known: Vec<&str> = names.iter().map(|(name, _)| *name).collect();
+            eprintln!("unknown {flag} {given}: expected a length or one of {known:?}");
+            std::process::exit(1);
+        };
+        Some(length)
+    };
+    let colour = |flag: &str| -> Option<[f32; 3]> {
+        let channels: Vec<f32> = word(flag)?
+            .split(',')
+            .filter_map(|channel| channel.trim().parse().ok())
+            .collect();
+        let [r, g, b] = channels[..] else {
+            eprintln!("{flag} takes three sRGB channels, r,g,b");
+            std::process::exit(1);
+        };
+        Some([r, g, b])
+    };
+    let texture = |flag: &str| -> Option<GarmentTexture> {
+        let given = word(flag)?;
+        let mut parts = given.split(',');
+        let name = parts.next().unwrap_or_default().trim();
+        let Some(surface) = SurfaceConfig::named(name) else {
+            eprintln!(
+                "unknown {flag} {name}: expected one of {}",
+                SurfaceConfig::NAMES.join(", ")
+            );
+            std::process::exit(1);
+        };
+        let mut texture = GarmentTexture::new(surface);
+        if let Some(scale) = parts.next().and_then(|s| s.trim().parse().ok()) {
+            texture.scale = scale;
+        }
+        if let Some(turn) = parts.next().and_then(|s| s.trim().parse().ok()) {
+            texture.rotation = turn;
+        }
+        Some(texture)
+    };
+    let mut set = false;
+    if let Some(sleeve) = length(
+        "--sleeve",
+        &[("bare", 0.0), ("forearm", FOREARM), ("wrist", 1.0)],
+    ) {
+        outfit.top.length = sleeve;
+        set = true;
+    }
+    if let Some(leg) = length(
+        "--leg",
+        &[("shorts", SHORTS), ("calf", CALF), ("ankle", 1.0)],
+    ) {
+        outfit.trousers.length = leg;
+        set = true;
+    }
+    for (flag, garment) in [
+        ("--top-colour", &mut outfit.top),
+        ("--trousers-colour", &mut outfit.trousers),
+    ] {
+        if let Some(colour) = colour(flag) {
+            garment.colour = colour;
+            set = true;
+        }
+    }
+    for (flag, garment) in [
+        ("--top-texture", &mut outfit.top),
+        ("--trousers-texture", &mut outfit.trousers),
+    ] {
+        if let Some(texture) = texture(flag) {
+            garment.texture = Some(texture);
+            set = true;
+        }
+    }
+    set
 }
 
 /// The style named after `flag` and the axis after that, if given.

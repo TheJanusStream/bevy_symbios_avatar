@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -22,7 +22,7 @@ default = ["editor"]
 # this tree. It is severable on purpose: a consumer that only wants to *draw* a
 # body should not inherit a GUI toolkit, and `default-features = false` is how
 # they say so.
-editor = ["dep:bevy_egui", "dep:serde_json"]
+editor = ["dep:bevy_egui", "dep:serde_json", "dep:bevy_symbios_texture"]
 # Carries the engine's baked CC0 clip set in the binary.
 #
 # **Off by default, for the same reason it is off upstream.** The artifact is
@@ -97,7 +97,13 @@ bevy = "0.19"
 # name, and the far hair tier `spawn` draws beside the near one. Breaking twice
 # over for a 0.x crate: `HairRecord` is no longer `Copy`, and a 0.8 engine
 # refuses a whole record wearing a style name it does not know.
-symbios-avatar = "0.9.0"
+#
+# **0.10 for the outfit** (#50, engine #354): each garment an sRGB colour, a
+# continuous length and an optional texture, baked into a cloth atlas `spawn`
+# binds, and a re-roll that dresses the body. Breaking for a 0.x crate: the
+# `Sleeve` and `Leg` enums and the hue/shade axes are gone from the record's
+# Rust shape, and `Avatar` grew a public `cloth` field.
+symbios-avatar = "0.10.0"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
@@ -111,6 +117,13 @@ bevy_egui = { version = "0.41", optional = true }
 # sliders, and JSON is what a PDS holds. The engine already depends on this at
 # the same version, so it is not a new crate in the tree.
 serde_json = { version = "1.0", optional = true }
+# The texture picker's per-generator panels (#50), which are that crate's own:
+# a garment wears one of symbios-texture's surfaces, and the widgets that edit a
+# surface's config are generated from the same per-field registry as the
+# config, so this crate draws them rather than a second copy of every range.
+# Editor-only, like the two above. The engine and this crate's own spawn path
+# never read it: the engine bakes the texture into the cloth atlas.
+bevy_symbios_texture = { version = "0.12", features = ["egui"], optional = true }
 
 [dev-dependencies]
 # The strip capture loop photographs frames through Bevy's own screenshot path

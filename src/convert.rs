@@ -41,7 +41,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::color::{LinearRgba, Srgba};
-use bevy::image::Image;
+use bevy::image::{Image, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology, VertexAttributeValues};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use symbios_avatar::{AvatarMesh, PolyMesh};
@@ -266,6 +266,62 @@ pub fn strand_mask_image(mask: &symbios_avatar::StrandMask) -> Image {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::default(),
     )
+}
+
+/// Uploads an outfit's cloth atlas — albedo, relief and finish — each with the
+/// mip chain the engine painted (#50).
+///
+/// The skin's three uploads, in the same formats and for the same reasons,
+/// with one difference: the cloth atlas carries a woven or printed tile at the
+/// pitch of a texel, and without its mips it shimmers from any distance a
+/// chase camera keeps. The chain is the engine's own
+/// (`symbios_avatar::dress::cloth::paint`), filtered per map, so nothing here
+/// averages a normal as if it were a colour. Sampled linearly across levels,
+/// clamped at the atlas's edge like the skin's.
+///
+/// A map that carries no chain — or one shorter than it claims — uploads its
+/// base level alone rather than a texture whose levels lie.
+#[must_use]
+pub fn cloth_images(map: &symbios_avatar::TextureMap) -> [Image; 3] {
+    [
+        chained(&map.albedo, map, TextureFormat::Rgba8UnormSrgb),
+        chained(&map.normal, map, TextureFormat::Rgba8Unorm),
+        chained(&map.roughness, map, TextureFormat::Rgba8Unorm),
+    ]
+}
+
+/// One of the map's pixel buffers as a texture carrying every mip level the
+/// map holds.
+fn chained(pixels: &[u8], map: &symbios_avatar::TextureMap, format: TextureFormat) -> Image {
+    let levels = map.mip_level_count.max(1);
+    let length: usize = (0..levels)
+        .map(|level| {
+            let side = |extent: u32| (extent >> level).max(1) as usize;
+            side(map.width) * side(map.height) * 4
+        })
+        .sum();
+    if levels == 1 || pixels.len() < length {
+        return image_of(pixels, map, format);
+    }
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: map.width,
+            height: map.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        format,
+        RenderAssetUsages::default(),
+    );
+    image.texture_descriptor.mip_level_count = levels;
+    image.data = Some(pixels[..length].to_vec());
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        ..Default::default()
+    });
+    image
 }
 
 /// One of the map's pixel buffers, as a single-level texture.
@@ -582,5 +638,45 @@ mod tests {
             Some((avatar.skin.width * avatar.skin.height * 4) as usize),
             "the atlas uploaded a different number of texels than it has"
         );
+    }
+
+    #[test]
+    fn a_cloth_atlas_uploads_with_its_mip_chain() {
+        // #50: the cloth atlas carries a woven tile at the pitch of a texel,
+        // and a single level of it shimmers from a chase camera's distance.
+        let mut record = symbios_avatar::AvatarRecord::default();
+        record.outfit.top.texture =
+            symbios_avatar::SurfaceConfig::named("Fabric").map(symbios_avatar::GarmentTexture::new);
+        record.sanitize();
+        let avatar = symbios_avatar::Avatar::build_with(
+            &record,
+            &symbios_avatar::AvatarConfig {
+                atlas: 128,
+                ..Default::default()
+            },
+        )
+        .expect("a default body builds");
+        let map = avatar
+            .cloth
+            .as_ref()
+            .expect("a textured outfit paints a cloth atlas");
+        assert!(map.mip_level_count > 1);
+        let [albedo, normal, orm] = cloth_images(map);
+        for (name, image, format) in [
+            ("albedo", &albedo, TextureFormat::Rgba8UnormSrgb),
+            ("normal", &normal, TextureFormat::Rgba8Unorm),
+            ("orm", &orm, TextureFormat::Rgba8Unorm),
+        ] {
+            assert_eq!(
+                image.texture_descriptor.mip_level_count, map.mip_level_count,
+                "{name}"
+            );
+            assert_eq!(image.texture_descriptor.format, format, "{name}");
+            let bytes = image.data.as_ref().map_or(0, Vec::len);
+            let chain: usize = (0..map.mip_level_count)
+                .map(|level| ((map.width >> level).max(1) as usize).pow(2) * 4)
+                .sum();
+            assert_eq!(bytes, chain, "{name} carries every level");
+        }
     }
 }
