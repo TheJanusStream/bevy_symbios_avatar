@@ -532,6 +532,106 @@ pub fn record_editor_panel(
     editor.last_panel = at.elapsed();
 }
 
+/// A whole `i64` seed in a text field as wide as any `i64` (overlands
+/// #1569). What is typed is written when the field lets go of the keyboard -
+/// Enter, Tab or a click elsewhere - if it reads as an `i64` other than
+/// `value`; a text that does not read is shown in the error colour while it
+/// is typed and written nowhere. Whether it wrote `value`.
+///
+/// Not a drag number: egui's `DragValue` carries its value as an `f64`, so a
+/// seed past 2^53 showed rounded, could not be dragged one step, and a click
+/// in and out wrote it back rounded while reporting no change - so a host
+/// marked nothing dirty and recorded no undo. A seed rolled from a hash spans
+/// the whole range, so nearly every body met it. The text is the value's
+/// whenever the field is not being typed into: a draft left unapplied is
+/// dropped, not shown again later as if it were the value, and a value
+/// changed underneath it (an undo, a re-roll) replaces it.
+///
+/// A draft is applied when focus leaves the field - Enter, Tab, a click
+/// anywhere else - and dropped on Escape. A click on a widget drawn ABOVE
+/// the field (the name box) moves focus before the field is drawn, so the
+/// field cannot see itself lose it with the draft still in its text; it
+/// remembers the pass it last held focus in and applies the draft then.
+fn seed_field(ui: &mut egui::Ui, value: &mut i64) -> bool {
+    /// The field's text while it is typed into, the value it was last read
+    /// from, and the pass it last ended holding focus, if it did.
+    #[derive(Clone)]
+    struct SeedText {
+        text: String,
+        synced_to: i64,
+        focused_in_pass: Option<u64>,
+    }
+    /// Write the draft, if it parses and differs; true when it did.
+    fn apply(state: &mut SeedText, value: &mut i64) -> bool {
+        match state.text.trim().parse::<i64>() {
+            Ok(typed) if typed != *value => {
+                *value = typed;
+                state.synced_to = typed;
+                true
+            }
+            _ => false,
+        }
+    }
+    let id = ui.id().with("identity_seed");
+    let edit_id = id.with("edit");
+    let pass = ui.ctx().cumulative_pass_nr();
+    let mut state = ui
+        .data_mut(|d| d.get_temp::<SeedText>(id))
+        .unwrap_or(SeedText {
+            text: value.to_string(),
+            synced_to: *value,
+            focused_in_pass: None,
+        });
+    let focused = ui.memory(|m| m.has_focus(edit_id));
+    // Focus left between the last pass and this one, before the field was
+    // drawn - to a widget above it, or by Escape. Only the last pass counts:
+    // a field hidden mid-draft and shown again later drops the draft.
+    let left = !focused && state.focused_in_pass.is_some_and(|p| p + 1 == pass);
+    let mut wrote =
+        left && !ui.input(|i| i.key_pressed(egui::Key::Escape)) && apply(&mut state, value);
+    if state.synced_to != *value || !focused {
+        state.text = value.to_string();
+        state.synced_to = *value;
+    }
+    let refused = state
+        .text
+        .trim()
+        .parse::<i64>()
+        .is_err()
+        .then(|| ui.visuals().error_fg_color);
+    let width = seed_field_width(ui);
+    let response = ui
+        .add(
+            egui::TextEdit::singleline(&mut state.text)
+                .id(edit_id)
+                .desired_width(width)
+                .text_color_opt(refused),
+        )
+        .on_hover_text("A whole number. Type one and press Enter to apply it.");
+    if response.lost_focus() {
+        wrote |= apply(&mut state, value);
+    }
+    state.focused_in_pass = response.has_focus().then_some(pass);
+    ui.data_mut(|d| d.insert_temp(id, state));
+    wrote
+}
+
+/// Wide enough for the longest `i64`, `i64::MIN`, in the field's own font:
+/// its text, a `TextEdit`'s margin either side (its default,
+/// `Margin::symmetric(4, 2)`), and room past the end for the cursor.
+fn seed_field_width(ui: &egui::Ui) -> f32 {
+    const MARGIN: f32 = 4.0;
+    const CURSOR: f32 = 2.0;
+    let font = egui::FontSelection::default().resolve(ui.style());
+    let text = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(i64::MIN.to_string(), font, egui::Color32::WHITE)
+            .size()
+            .x
+    });
+    text + 2.0 * MARGIN + CURSOR
+}
+
 /// Name, seed, archetype and the locks a re-roll honours.
 ///
 /// Returns whether the body changed, and whether the record changed without
@@ -566,9 +666,7 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         ui.label("seed");
         // Typing a seed records which draw a body came from; it does not
         // re-draw one. That is the button beside it.
-        noted |= ui
-            .add(egui::DragValue::new(&mut record.seed).speed(1.0))
-            .changed();
+        noted |= seed_field(ui, &mut record.seed);
         // **A hunt, not a shuffle** (#122). Deliberately the neighbouring seed
         // rather than one off the clock: this is an instrument, and a seed you
         // cannot go back to is a body you cannot show anybody — the viewer's
@@ -2617,6 +2715,183 @@ mod tests {
             offered!(FLANK_CARDS, FLANK_HELMETS),
             expect(FlankStyle::NAMES)
         );
+    }
+
+    /// Drive [`identity`] for `frames` frames with the input `input` makes of
+    /// the frame's number and the centre of the seed's text field (found on
+    /// the first frame through AccessKit, by the seed it shows), returning
+    /// whether any frame noted the record.
+    fn type_into_seed(
+        record: &mut AvatarRecord,
+        frames: usize,
+        input: impl Fn(usize, Fields) -> Vec<egui::Event>,
+    ) -> bool {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut field = None;
+        let mut noted_any = false;
+        for frame in 0..frames {
+            let events = field.map(|at| input(frame, at)).unwrap_or_default();
+            let shown = record.seed.to_string();
+            let named = record.name.clone();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let (_, noted) = identity(ui, record);
+                    noted_any |= noted;
+                },
+            );
+            if field.is_none() {
+                let update = output
+                    .platform_output
+                    .accesskit_update
+                    .expect("AccessKit is on");
+                let text_input = |value: &str| {
+                    update
+                        .nodes
+                        .iter()
+                        .find(|(_, node)| {
+                            node.role() == egui::accesskit::Role::TextInput
+                                && node.value() == Some(value)
+                        })
+                        .and_then(|(_, node)| node.bounds())
+                        .map(|b| centre(f64::midpoint(b.x0, b.x1), f64::midpoint(b.y0, b.y1)))
+                };
+                field = text_input(&shown)
+                    .zip(text_input(&named))
+                    .map(|(seed, name)| Fields { seed, name });
+            }
+        }
+        assert!(
+            field.is_some(),
+            "fixture: the seed and name fields were found"
+        );
+        noted_any
+    }
+
+    /// Where `type_into_seed` found the two text fields of `identity`.
+    #[derive(Clone, Copy)]
+    struct Fields {
+        seed: egui::Pos2,
+        name: egui::Pos2,
+    }
+
+    /// AccessKit's `f64` point as egui's `f32` one.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "a point on an 800 x 600 test screen fits an f32 exactly enough to click"
+    )]
+    fn centre(x: f64, y: f64) -> egui::Pos2 {
+        egui::pos2(x as f32, y as f32)
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    /// overlands #1569: the identity seed holds every `i64`. Typed past 2^53
+    /// and applied with Enter, it is written to the last digit and the
+    /// record is noted - the host's cue to mark it dirty and record an undo.
+    /// A seed past 2^53 clicked into and out of is kept to the last digit,
+    /// and nothing is noted; a `DragValue`, which carries an `f64`, wrote it
+    /// back rounded and said nothing.
+    #[test]
+    fn the_identity_seed_holds_every_i64() {
+        let exact: i64 = (1 << 53) + 1;
+        let mut typed = AvatarRecord::new("Typed", Archetype::default());
+        let noted = type_into_seed(&mut typed, 6, |frame, at| match frame {
+            1 => vec![egui::Event::PointerMoved(at.seed), press(at.seed, true)],
+            2 => vec![press(at.seed, false)],
+            3 => vec![
+                key(egui::Key::A, true, egui::Modifiers::COMMAND),
+                key(egui::Key::A, false, egui::Modifiers::COMMAND),
+                egui::Event::Text(exact.to_string()),
+                key(egui::Key::Enter, true, egui::Modifiers::NONE),
+                key(egui::Key::Enter, false, egui::Modifiers::NONE),
+            ],
+            _ => Vec::new(),
+        });
+        assert_eq!(typed.seed, exact);
+        assert!(noted, "a typed seed is noted");
+
+        let mut kept = AvatarRecord::new("Kept", Archetype::default());
+        kept.seed = i64::MIN + 1;
+        let empty = egui::pos2(700.0, 500.0);
+        let noted = type_into_seed(&mut kept, 7, |frame, at| match frame {
+            1 => vec![egui::Event::PointerMoved(at.seed), press(at.seed, true)],
+            2 => vec![press(at.seed, false)],
+            4 => vec![egui::Event::PointerMoved(empty), press(empty, true)],
+            5 => vec![press(empty, false)],
+            _ => Vec::new(),
+        });
+        assert_eq!(kept.seed, i64::MIN + 1);
+        assert!(!noted, "a click in and out is no edit");
+    }
+
+    /// A typed seed is applied when focus moves on to a widget drawn ABOVE
+    /// the field - the name box - as it is on Enter, Tab or a click on empty
+    /// space; Escape is the one way out that drops it. That click reached the
+    /// name box before the seed field was drawn, so the field found itself
+    /// unfocused, put the old value back into its text, and then applied
+    /// that (the Group 7 critic's probe: seed 7, "123" typed, the name box
+    /// clicked - the seed stayed 7 and nothing was noted).
+    #[test]
+    fn a_typed_seed_is_applied_when_focus_moves_up_to_the_name() {
+        let typing = |at: Fields| {
+            vec![
+                key(egui::Key::A, true, egui::Modifiers::COMMAND),
+                key(egui::Key::A, false, egui::Modifiers::COMMAND),
+                egui::Event::Text(String::from("123")),
+                egui::Event::PointerMoved(at.seed),
+            ]
+        };
+        let mut moved = AvatarRecord::new("Moved", Archetype::default());
+        moved.seed = 7;
+        let noted = type_into_seed(&mut moved, 8, |frame, at| match frame {
+            1 => vec![egui::Event::PointerMoved(at.seed), press(at.seed, true)],
+            2 => vec![press(at.seed, false)],
+            3 => typing(at),
+            4 => vec![egui::Event::PointerMoved(at.name), press(at.name, true)],
+            5 => vec![press(at.name, false)],
+            _ => Vec::new(),
+        });
+        assert_eq!(moved.seed, 123, "the draft is applied as focus leaves");
+        assert!(noted, "and noted");
+
+        let mut escaped = AvatarRecord::new("Escaped", Archetype::default());
+        escaped.seed = 7;
+        let noted = type_into_seed(&mut escaped, 7, |frame, at| match frame {
+            1 => vec![egui::Event::PointerMoved(at.seed), press(at.seed, true)],
+            2 => vec![press(at.seed, false)],
+            3 => typing(at),
+            4 => vec![
+                key(egui::Key::Escape, true, egui::Modifiers::NONE),
+                key(egui::Key::Escape, false, egui::Modifiers::NONE),
+            ],
+            _ => Vec::new(),
+        });
+        assert_eq!(escaped.seed, 7, "Escape drops the draft");
+        assert!(!noted, "and notes nothing");
     }
 
     /// Every label and value a headless pass of `draw` hands AccessKit.

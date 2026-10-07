@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -103,7 +103,7 @@ bevy = "0.19"
 # binds, and a re-roll that dresses the body. Breaking for a 0.x crate: the
 # `Sleeve` and `Leg` enums and the hue/shade axes are gone from the record's
 # Rust shape, and `Avatar` grew a public `cloth` field.
-symbios-avatar = "0.10.0"
+symbios-avatar = "0.11.0"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
@@ -123,7 +123,7 @@ serde_json = { version = "1.0", optional = true }
 # config, so this crate draws them rather than a second copy of every range.
 # Editor-only, like the two above. The engine and this crate's own spawn path
 # never read it: the engine bakes the texture into the cloth atlas.
-bevy_symbios_texture = { version = "0.12", features = ["egui"], optional = true }
+bevy_symbios_texture = { version = "0.13", features = ["egui"], optional = true }
 
 [dev-dependencies]
 # The strip capture loop photographs frames through Bevy's own screenshot path

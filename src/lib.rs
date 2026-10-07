@@ -156,7 +156,7 @@
 // docs.rs builds with `--cfg docsrs` on nightly, which is what puts the
 // "available on crate feature `editor`" badges on the gated items. Inert
 // everywhere else.
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod animator;
 pub mod convert;
