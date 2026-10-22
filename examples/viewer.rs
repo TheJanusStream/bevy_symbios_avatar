@@ -107,6 +107,8 @@
 //! cargo run --release --example viewer -- --travel --speed 1.4 --stop-at 2.0 --ramp 0.5
 //! cargo run --release --example viewer -- --travel --jump 5.6
 //! cargo run --release --example viewer -- --travel --profile 1.0:2.4:0.5
+//! cargo run --release --example viewer -- --travel --speed 1.4 --heading 90
+//! cargo run --release --example viewer -- --turn 90
 //! ```
 //!
 //! - `--speed M` is metres a second on the axis, and it is the number the
@@ -124,6 +126,11 @@
 //! - `--profile A:B:R` ramps the raw speed from `A` to `B` over `R` seconds and
 //!   feeds it to the driver unsmoothed, so what is on screen is the engine's
 //!   easing and not the instrument's.
+//! - `--heading DEG` sends the body that way against its facing — positive to
+//!   its left, 90 a strafe, 180 a back-up — and `--turn DEG` turns it at that
+//!   many degrees a second. With `--travel` the body crosses the floor along
+//!   its heading; a turn with no travel at all is the engine's pivot, a body
+//!   stepping round where it stands (engine #361, #362).
 //!
 //! **Run it in release.** Building a body subdivides, binds, unwraps and paints
 //! a megapixel atlas, and debug spends about half a minute on that.
@@ -470,7 +477,12 @@ fn travel(
     }
     let speed = chassis.speed();
     let rise = chassis.vertical * delta;
-    chassis.at += Vec3::Z * (speed * delta) + Vec3::Y * rise;
+    // Along the heading, turned by the facing the body is drawn at: a strafe
+    // carried forward would walk its feet across a floor they are not
+    // crossing.
+    let along = Quat::from_rotation_y(animator.heading())
+        * symbios_avatar::Heading::degrees(animator.heading).direction();
+    chassis.at += along * (speed * delta) + Vec3::Y * rise;
     if chassis.at.y <= 0.0 {
         chassis.at.y = 0.0;
         chassis.vertical = 0.0;
@@ -898,6 +910,13 @@ fn starting_animator() -> Animator {
     // do. Either way the body has to be told to walk.
     animator.speed = value("--speed");
     animator.walking |= animator.speed.is_some() || flag("--travel");
+    // **Which way the body travels against its facing, and how fast it
+    // turns** (engine #361, #362) — the window's two sliders, from the command
+    // line so a strip can be taken of a strafe, a back-up or a turn on the
+    // spot. A turn alone walks no gait of its own: the engine steps a body
+    // round where it stands once its turn is fast enough.
+    animator.heading = value("--heading").unwrap_or(animator.heading);
+    animator.turn = value("--turn").unwrap_or(animator.turn);
     animator.pace_response = value("--pace-response").unwrap_or(animator.pace_response);
     // So a captured frame can be placed in the cycle rather than wherever the
     // twelfth frame happened to land. Judging a gait from one arbitrary phase

@@ -32,7 +32,7 @@
 use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
-use symbios_avatar::anim::{GazeConfig, IdleConfig, Speed, Target, gaze, gesture};
+use symbios_avatar::anim::{GazeConfig, IdleConfig, Speed, Target, Turn, gaze, gesture};
 use symbios_avatar::{
     ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
     Viseme, Zone,
@@ -568,10 +568,45 @@ impl Animator {
     /// this speed implies — which is arithmetic rather than a second fit: a
     /// body covering one cycle length per cycle at this many metres a second
     /// takes cycles at the only rate that makes those two agree.
+    ///
+    /// **The legs' cadence, which is not always the speed's.** A turn works the
+    /// outer foot harder than the body and holds each stance inside the hip's
+    /// range ([`Turn::cadence`]), and a heading's shorter stride takes more
+    /// steps for the same travel — its reach's share of the stride, at the
+    /// cadence over that share. A body turning with no walk asked of it is the
+    /// engine's pivot, which steps at its turn's cadence from a standstill.
+    /// Straight ahead and not turning, this is the speed's own cadence to the
+    /// bit.
+    ///
+    /// **The engine's driver's cadence where the viewer's strips are taken,
+    /// and only there**: going straight, along a heading whose stride no
+    /// stance bound shortens — a strafe, a back-up, the forward diagonals —
+    /// and on a pivot turning past
+    /// [`PIVOT_FROM`](symbios_avatar::anim::driver::PIVOT_FROM). The driver
+    /// steps faster where a stance bound shortens the stride (the backward
+    /// diagonals near where a split stance lines its feet up, a four-footed
+    /// body stepping sideways); idles a walk asked for under its
+    /// `idle_below`, or pivots it from a standstill if it turns; idles a turn
+    /// under `PIVOT_FROM` with no walk; and steps the turn eased, where this
+    /// takes it as asked. A cursor running at this while the driver steps
+    /// otherwise holds the cycle somewhere the stride's turn is not, and the
+    /// footholds drift by the difference.
     #[must_use]
     pub fn cadence_of(&self, rig: &Rig, gait: &Gait) -> f32 {
-        self.cadence
-            .unwrap_or_else(|| Speed::new(rig, self.speed_of(rig, gait)).cadence(rig))
+        self.cadence.unwrap_or_else(|| {
+            let speed = if self.walking || self.turn == 0.0 {
+                Speed::new(rig, self.speed_of(rig, gait))
+            } else {
+                Speed::STILL
+            };
+            let turning = Turn::new(self.turn.to_radians()).cadence(rig, speed);
+            let reach = Heading::degrees(self.heading).reach();
+            if reach >= 1.0 {
+                turning
+            } else {
+                turning / reach.max(f32::EPSILON)
+            }
+        })
     }
 }
 
