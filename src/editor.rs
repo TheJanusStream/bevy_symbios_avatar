@@ -75,6 +75,7 @@
 //!     let mut changed = editor::composite_axes(ui, record);
 //!     changed |= editor::body_axes(ui, record);
 //!     changed |= editor::skin_axes(ui, record);
+//!     changed |= editor::coat_axes(ui, record);
 //!     changed |= editor::eye_axes(ui, record);
 //!     changed |= editor::face_axes(ui, record);
 //!     changed |= editor::hair_axes(ui, record);
@@ -95,6 +96,7 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
+use symbios_avatar::plan::{Agouti, Fantasy, Pattern, Pigment, White};
 use symbios_avatar::{
     Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Family, Feet,
     GENERATOR_VERSION, Horn, HumanoidParams, Limb, Nose, Pupil, QuadrupedParams, Rig, Zone,
@@ -509,6 +511,7 @@ pub fn record_editor_panel(
                 ui.separator();
                 rebuild |= body_axes(ui, &mut editor.record);
                 rebuild |= skin_axes(ui, &mut editor.record);
+                rebuild |= coat_axes(ui, &mut editor.record);
                 rebuild |= eye_axes(ui, &mut editor.record);
                 rebuild |= face_axes(ui, &mut editor.record);
                 rebuild |= hair_axes(ui, &mut editor.record);
@@ -1072,7 +1075,8 @@ fn quadruped_head(ui: &mut egui::Ui, params: &mut QuadrupedParams) -> bool {
 
 /// A stored part's choices as a row of labels, the current one selected
 /// (symbios-avatar #367). Writes, and reports a change, only on a click that
-/// picks something other than what is already there.
+/// picks something other than what is already there. The row wraps, since a
+/// coat's pattern has eight (symbios-avatar #368).
 fn chooser<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     label: &str,
@@ -1081,7 +1085,7 @@ fn chooser<T: Copy + PartialEq>(
     name: fn(T) -> &'static str,
 ) -> bool {
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.label(label);
         for &choice in choices {
             if ui
@@ -1204,7 +1208,14 @@ fn swatch(tone: symbios_avatar::Vec3) -> egui::Color32 {
 }
 
 /// Complexion.
+///
+/// Drawn for every body painted from one, which a quadruped is not
+/// (symbios-avatar #368): it wears a coat, [`coat_axes`], and its stored
+/// complexion moves nothing on it.
 pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    if matches!(record.archetype, Archetype::Quadruped(_)) {
+        return false;
+    }
     let mut changed = false;
     egui::CollapsingHeader::new("skin").show(ui, |ui| {
         // **The ramp the engine already has, drawn** (#122). A melanin slider
@@ -1250,6 +1261,78 @@ pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         // there was no way to tell from the panel that it would not.
     });
     changed
+}
+
+/// A quadruped's coat (symbios-avatar #368): its loci, how rich its red
+/// runs, an unnatural palette, and the seed its marks are laid out from.
+///
+/// Drawn only for a quadruped, which wears a coat where a person wears a
+/// complexion. The loci are a row of choices or a box each, as the stored
+/// parts are, because the engine derives the colours from them: a liver dog
+/// is the black dog's coat with one locus turned, and this is where it is
+/// turned. The marks are a seed, thrown again rather than slid, because
+/// neighbouring seeds lay out unrelated marks and a slider over them would
+/// promise a nearness that is not there.
+pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    let Archetype::Quadruped(params) = &mut record.archetype else {
+        return false;
+    };
+    let coat = &mut params.coat;
+    let mut changed = false;
+    egui::CollapsingHeader::new("coat").show(ui, |ui| {
+        changed |= chooser(
+            ui,
+            "pigment",
+            &mut coat.pigment,
+            &Pigment::ALL,
+            Pigment::name,
+        );
+        changed |= ui.checkbox(&mut coat.dilute, "dilute").changed();
+        changed |= chooser(ui, "agouti", &mut coat.agouti, &Agouti::ALL, Agouti::name);
+        changed |= chooser(
+            ui,
+            "pattern",
+            &mut coat.pattern,
+            &Pattern::ALL,
+            Pattern::name,
+        );
+        changed |= chooser(ui, "white", &mut coat.white, &White::ALL, White::name);
+        ui.horizontal_wrapped(|ui| {
+            for (name, locus) in [
+                ("points", &mut coat.points),
+                ("merle", &mut coat.merle),
+                ("roan", &mut coat.roan),
+                ("dun", &mut coat.dun),
+                ("tortie", &mut coat.tortie),
+            ] {
+                changed |= ui.checkbox(locus, name).changed();
+            }
+        });
+        changed |= explored(ui, "intensity", &mut coat.intensity, 0.0, (-1.0, 1.0));
+        changed |= chooser(
+            ui,
+            "palette",
+            &mut coat.fantasy,
+            &Fantasy::ALL,
+            Fantasy::name,
+        );
+        ui.horizontal(|ui| {
+            ui.label(format!("marks {}", coat.marks));
+            if ui.button("throw again").clicked() {
+                coat.marks = next_marks(coat.marks);
+                changed = true;
+            }
+        });
+    });
+    changed
+}
+
+/// The marks seed thrown after `marks`: a step through all 65 536 that
+/// visits every layout before it repeats one.
+fn next_marks(marks: u16) -> u16 {
+    // Full period modulo 2^16: the increment is odd and the multiplier one
+    // more than a multiple of four.
+    marks.wrapping_mul(0x9e35).wrapping_add(0x79b9)
 }
 
 /// How the eyes are shaped and set.
@@ -2348,7 +2431,7 @@ pub fn measure_aperture(body: Option<&AvatarBody>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symbios_avatar::LockSet;
+    use symbios_avatar::{Coat, LockSet};
 
     /// Every axis the panel writes, as a path and the value at it.
     ///
@@ -2399,6 +2482,8 @@ mod tests {
                 ("ear_point", p.ear_point),
                 ("ear_carriage", p.ear_carriage),
                 ("whiskers", p.whiskers),
+                // symbios-avatar #368: the coat's one axis.
+                ("coat intensity", p.coat.intensity),
             ],
             Archetype::Unknown { .. } => Vec::new(),
         };
@@ -3362,6 +3447,22 @@ mod tests {
                 feet: Feet::Pads,
                 whiskers: 0.456_78,
                 horn: Horn::Unicorn,
+                // symbios-avatar #368: every locus off its default.
+                coat: Coat {
+                    pigment: Pigment::Liver,
+                    dilute: true,
+                    agouti: Agouti::TanPoints,
+                    pattern: Pattern::Rosettes,
+                    points: true,
+                    white: White::Irish,
+                    merle: true,
+                    roan: true,
+                    dun: true,
+                    tortie: true,
+                    intensity: 1.345_67,
+                    fantasy: Fantasy::Ocean,
+                    marks: 54_321,
+                },
             }),
         );
         beast.sanitize();
@@ -3381,6 +3482,18 @@ mod tests {
             editor.record, back,
             "the record did not survive its own JSON"
         );
+    }
+
+    #[test]
+    fn throwing_the_marks_again_visits_every_layout_before_one_repeats() {
+        let mut seen = vec![false; 1 << 16];
+        let mut marks = 0u16;
+        for _ in 0..1 << 16 {
+            assert!(!seen[usize::from(marks)], "marks {marks} came round early");
+            seen[usize::from(marks)] = true;
+            marks = next_marks(marks);
+        }
+        assert_eq!(marks, 0, "and the cycle closes");
     }
 
     /// Drive [`identity`] for `frames` frames with the input `input` makes of

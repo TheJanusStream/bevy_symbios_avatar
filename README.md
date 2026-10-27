@@ -234,9 +234,10 @@ sources and the clip's root travel taken out so the two stay comparable.
 ## Editing a record
 
 `RecordEditorPlugin` (the `editor` feature) adds a panel holding every axis an
-`AvatarRecord` can carry: 120 of them plus one whole-number count, across
-archetype, composites, skin, eyes, face, five hair regions, outfit, name, seed
-and the per-category locks a re-roll honours. Drag one and the body follows. A
+`AvatarRecord` can carry: on a person 126 of them plus one whole-number count,
+across archetype, composites, skin, eyes, face, five hair regions, outfit, name,
+seed and the per-category locks a re-roll honours, and on a quadruped its own
+body, face and coat in place of the person's. Drag one and the body follows. A
 test pins the exact count, so an axis added to the record cannot quietly miss the
 panel.
 
@@ -262,12 +263,12 @@ full-size build lands a quarter of a second after it stops, on the compute pool
 rather than on the frame. With the panel open and nothing moving it costs 0.1 ms
 a frame.
 
-The panel is composed from public per-section functions — `identity`,
-`composite_axes`, `body_axes`, `skin_axes`, `eye_axes`, `face_axes`, `hair_axes`,
-`outfit_axes` — and those, not the panel, are the reuse surface. A host with its
-own window, theme, undo and rebuild pipeline calls the sections against its own
-record and owes this module nothing else. See the [`editor`] module docs for the
-contract.
+The panel is composed from public per-section functions - `identity`,
+`composite_axes`, `body_axes`, `skin_axes`, `coat_axes`, `eye_axes`,
+`face_axes`, `hair_axes`, `outfit_axes` - and those, not the panel, are the
+reuse surface. A host with its own window, theme, undo and rebuild pipeline
+calls the sections against its own record and owes this module nothing else. See
+the [`editor`] module docs for the contract.
 
 Both windows draw in `bevy_egui`'s `EguiPrimaryContextPass`, so an app that wants
 them adds `EguiPlugin` alongside these plugins, as the viewer does.
