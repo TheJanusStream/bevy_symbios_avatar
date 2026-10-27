@@ -264,7 +264,7 @@ rather than on the frame. With the panel open and nothing moving it costs 0.1 ms
 a frame.
 
 The panel is composed from public per-section functions - `identity`,
-`composite_axes`, `body_axes`, `skin_axes`, `coat_axes`, `eye_axes`,
+`composite_axes`, `body_axes`, `skin_axes`, `coat_axes`, `fur_axes`, `eye_axes`,
 `face_axes`, `hair_axes`, `outfit_axes` - and those, not the panel, are the
 reuse surface. A host with its own window, theme, undo and rebuild pipeline
 calls the sections against its own record and owes this module nothing else. See

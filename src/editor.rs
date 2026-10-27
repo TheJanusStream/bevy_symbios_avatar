@@ -76,6 +76,7 @@
 //!     changed |= editor::body_axes(ui, record);
 //!     changed |= editor::skin_axes(ui, record);
 //!     changed |= editor::coat_axes(ui, record);
+//!     changed |= editor::fur_axes(ui, record);
 //!     changed |= editor::eye_axes(ui, record);
 //!     changed |= editor::face_axes(ui, record);
 //!     changed |= editor::hair_axes(ui, record);
@@ -512,6 +513,7 @@ pub fn record_editor_panel(
                 rebuild |= body_axes(ui, &mut editor.record);
                 rebuild |= skin_axes(ui, &mut editor.record);
                 rebuild |= coat_axes(ui, &mut editor.record);
+                rebuild |= fur_axes(ui, &mut editor.record);
                 rebuild |= eye_axes(ui, &mut editor.record);
                 rebuild |= face_axes(ui, &mut editor.record);
                 rebuild |= hair_axes(ui, &mut editor.record);
@@ -682,8 +684,15 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         } else {
             format!("{} or {last}", rest.join(", "))
         };
+        // A beast's fur is its own (symbios-avatar #369), and the hair lock
+        // keeps it: said here, or the note and the lock row disagree.
+        let fur = if matches!(record.archetype, Archetype::Quadruped(_)) {
+            " Its fur has a section and a lock of its own."
+        } else {
+            ""
+        };
         ui.small(format!(
-            "This body has no {named} yet: those are a person's."
+            "This body has no {named} yet: those are a person's.{fur}"
         ));
     }
 
@@ -753,13 +762,15 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
 fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let anatomy = record.archetype.anatomy();
     let frame = record.archetype.composite_priors().frame;
+    // A beast rolls its fur under the hair lock (symbios-avatar #369).
+    let furred = matches!(record.archetype, Archetype::Quadruped(_));
     let mut noted = false;
     ui.horizontal_wrapped(|ui| {
         ui.label("locked");
         for category in Category::ALL {
             // A lock on what this body never rolls holds nothing (#365).
             let rolled = match category {
-                Category::Hair => anatomy.human_head(),
+                Category::Hair => anatomy.human_head() || furred,
                 Category::Outfit => anatomy.human_trunk(),
                 _ => true,
             };
@@ -768,7 +779,7 @@ fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
             }
             let mut locked = record.locks.is_locked(category);
             if ui
-                .toggle_value(&mut locked, lock_name(category, frame))
+                .toggle_value(&mut locked, lock_name(category, frame, furred))
                 .changed()
             {
                 // A lock changes nothing about the body until the next
@@ -789,7 +800,7 @@ fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         if !held.is_empty() {
             let names: Vec<&str> = held
                 .into_iter()
-                .map(|category| lock_name(category, frame))
+                .map(|category| lock_name(category, frame, furred))
                 .collect();
             ui.small(format!("hunting, holding {}", names.join(", ")));
         }
@@ -820,10 +831,12 @@ pub fn category_name(category: Category) -> &'static str {
 /// The name to show a lock by: its category's, except that on a body with no
 /// frame axis the frame lock is "family", because what it keeps there is the
 /// kind of animal the body is - its family, its cross, the blend - and its
-/// body length (symbios-avatar #366).
-fn lock_name(category: Category, frame: bool) -> &'static str {
+/// body length (symbios-avatar #366); and on a furred body the hair lock is
+/// "fur", which is what a re-roll draws under it there (symbios-avatar #369).
+fn lock_name(category: Category, frame: bool, furred: bool) -> &'static str {
     match category {
         Category::Frame if !frame => "family",
+        Category::Hair if furred => "fur",
         _ => category_name(category),
     }
 }
@@ -1323,6 +1336,33 @@ pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
                 changed = true;
             }
         });
+    });
+    changed
+}
+
+/// A quadruped's fur (symbios-avatar #369): how long it grows in each zone
+/// where a beast grows long hair, none at zero.
+///
+/// Drawn only for a quadruped. A slider each, over the engine's envelope for
+/// a length: none to long, and past long into the exploration range, where
+/// the engine's own ceiling thins the cards rather than letting the body
+/// past its budget.
+pub fn fur_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    let Archetype::Quadruped(params) = &mut record.archetype else {
+        return false;
+    };
+    let fur = &mut params.fur;
+    let mut changed = false;
+    egui::CollapsingHeader::new("fur").show(ui, |ui| {
+        for (name, length) in [
+            ("mane", &mut fur.mane),
+            ("ruff", &mut fur.ruff),
+            ("tail", &mut fur.tail),
+            ("feathering", &mut fur.feathering),
+            ("ear tufts", &mut fur.tufts),
+        ] {
+            changed |= explored(ui, name, length, 0.0, (0.0, 1.0));
+        }
     });
     changed
 }
@@ -2431,7 +2471,45 @@ pub fn measure_aperture(body: Option<&AvatarBody>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symbios_avatar::{Coat, LockSet};
+    use symbios_avatar::{Coat, Fur, LockSet};
+
+    /// A quadruped's axes, for [`axes`]: its own list, since a beast's
+    /// body, face, coat and fur put [`axes`] past a hundred lines.
+    fn beast_axes(p: &QuadrupedParams) -> Vec<(&'static str, f32)> {
+        vec![
+            ("height", p.height),
+            ("body_length", p.body_length),
+            ("leg_length", p.leg_length),
+            ("neck_length", p.neck_length),
+            ("head_size", p.head_size),
+            ("tail_length", p.tail_length),
+            // symbios-avatar #366: the cross's blend and the six axes
+            // the families brought.
+            ("blend", p.blend),
+            ("muzzle_length", p.muzzle_length),
+            ("stance", p.stance),
+            ("neck_carriage", p.neck_carriage),
+            ("tail_carriage", p.tail_carriage),
+            ("chest_depth", p.chest_depth),
+            ("appeal", p.appeal),
+            // symbios-avatar #367: the face's.
+            ("muzzle_breadth", p.muzzle_breadth),
+            ("stop", p.stop),
+            ("eye_set", p.eye_set),
+            ("ear_size", p.ear_size),
+            ("ear_point", p.ear_point),
+            ("ear_carriage", p.ear_carriage),
+            ("whiskers", p.whiskers),
+            // symbios-avatar #368: the coat's one axis.
+            ("coat intensity", p.coat.intensity),
+            // symbios-avatar #369: the fur's five.
+            ("fur mane", p.fur.mane),
+            ("fur ruff", p.fur.ruff),
+            ("fur tail", p.fur.tail),
+            ("fur feathering", p.fur.feathering),
+            ("fur tufts", p.fur.tufts),
+        ]
+    }
 
     /// Every axis the panel writes, as a path and the value at it.
     ///
@@ -2458,33 +2536,7 @@ mod tests {
                 ("chest_spacing", p.chest_spacing),
                 ("chest_fullness", p.chest_fullness),
             ],
-            Archetype::Quadruped(p) => vec![
-                ("height", p.height),
-                ("body_length", p.body_length),
-                ("leg_length", p.leg_length),
-                ("neck_length", p.neck_length),
-                ("head_size", p.head_size),
-                ("tail_length", p.tail_length),
-                // symbios-avatar #366: the cross's blend and the six axes
-                // the families brought.
-                ("blend", p.blend),
-                ("muzzle_length", p.muzzle_length),
-                ("stance", p.stance),
-                ("neck_carriage", p.neck_carriage),
-                ("tail_carriage", p.tail_carriage),
-                ("chest_depth", p.chest_depth),
-                ("appeal", p.appeal),
-                // symbios-avatar #367: the face's.
-                ("muzzle_breadth", p.muzzle_breadth),
-                ("stop", p.stop),
-                ("eye_set", p.eye_set),
-                ("ear_size", p.ear_size),
-                ("ear_point", p.ear_point),
-                ("ear_carriage", p.ear_carriage),
-                ("whiskers", p.whiskers),
-                // symbios-avatar #368: the coat's one axis.
-                ("coat intensity", p.coat.intensity),
-            ],
+            Archetype::Quadruped(p) => beast_axes(p),
             Archetype::Unknown { .. } => Vec::new(),
         };
         out.extend([
@@ -3094,6 +3146,8 @@ mod tests {
     fn offered(record: &mut AvatarRecord) -> Vec<String> {
         labels(|ui| {
             skin_axes(ui, record);
+            coat_axes(ui, record);
+            fur_axes(ui, record);
             eye_axes(ui, record);
             face_axes(ui, record);
             hair_axes(ui, record);
@@ -3147,6 +3201,20 @@ mod tests {
             beast.iter().any(|label| label == "eyes"),
             "a beast's eyes were not offered: {beast:?}"
         );
+        // A beast wears a coat and fur where a person wears a complexion
+        // (symbios-avatar #368, #369), each offered only where it is worn.
+        for (section, beastly) in [("coat", true), ("fur", true), ("skin", false)] {
+            assert_eq!(
+                beast.iter().any(|label| label == section),
+                beastly,
+                "{section} on a beast: {beast:?}"
+            );
+            assert_eq!(
+                person.iter().any(|label| label == section),
+                !beastly,
+                "{section} on a person: {person:?}"
+            );
+        }
     }
 
     #[test]
@@ -3173,7 +3241,12 @@ mod tests {
                 "a person was not offered a {lock} lock: {person:?}"
             );
         }
-        let note = "This body has no face, hair or outfit yet: those are a person's.";
+        // And a beast's fur is rolled under the hair lock, named for what it
+        // keeps there (symbios-avatar #369).
+        assert!(beast.iter().any(|label| label == "fur"), "{beast:?}");
+        assert!(!person.iter().any(|label| label == "fur"), "{person:?}");
+        let note = "This body has no face, hair or outfit yet: those are a person's. \
+                    Its fur has a section and a lock of its own.";
         assert!(beast.iter().any(|label| label == note), "{beast:?}");
         assert!(!person.iter().any(|label| label == note), "{person:?}");
     }
@@ -3462,6 +3535,14 @@ mod tests {
                     intensity: 1.345_67,
                     fantasy: Fantasy::Ocean,
                     marks: 54_321,
+                },
+                // symbios-avatar #369: every zone off none.
+                fur: Fur {
+                    mane: 0.987_65,
+                    ruff: 1.234_56,
+                    tail: 2.345_67,
+                    feathering: 0.456_78,
+                    tufts: 0.678_91,
                 },
             }),
         );
