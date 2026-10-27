@@ -73,7 +73,7 @@
 //! /// A host's own panel: same sections, its own chrome and rebuild.
 //! fn body_sections(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 //!     let mut changed = editor::composite_axes(ui, record);
-//!     changed |= editor::body_axes(ui, &mut record.archetype);
+//!     changed |= editor::body_axes(ui, record);
 //!     changed |= editor::skin_axes(ui, record);
 //!     changed |= editor::eye_axes(ui, record);
 //!     changed |= editor::face_axes(ui, record);
@@ -96,8 +96,8 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, Category, GENERATOR_VERSION, HumanoidParams,
-    Limb, QuadrupedParams, Rig, Zone,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Family, GENERATOR_VERSION,
+    HumanoidParams, Limb, QuadrupedParams, Rig, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -507,7 +507,7 @@ pub fn record_editor_panel(
                 // one slider up would have given them.
                 rebuild |= composite_axes(ui, &mut editor.record);
                 ui.separator();
-                rebuild |= body_axes(ui, &mut editor.record.archetype);
+                rebuild |= body_axes(ui, &mut editor.record);
                 rebuild |= skin_axes(ui, &mut editor.record);
                 rebuild |= eye_axes(ui, &mut editor.record);
                 rebuild |= face_axes(ui, &mut editor.record);
@@ -661,6 +661,28 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
             changed = true;
         }
     });
+    // Said where the body is chosen, because the sections it hides are
+    // further down and their absence is otherwise a puzzle (#365) - naming
+    // only the ones this body lacks.
+    let anatomy = record.archetype.anatomy();
+    let absent: Vec<&str> = [
+        (!anatomy.human_head()).then_some("face"),
+        (!anatomy.human_head()).then_some("hair"),
+        (!anatomy.human_trunk()).then_some("outfit"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Some((last, rest)) = absent.split_last() {
+        let named = if rest.is_empty() {
+            (*last).to_string()
+        } else {
+            format!("{} or {last}", rest.join(", "))
+        };
+        ui.small(format!(
+            "This body has no {named} yet: those are a person's."
+        ));
+    }
 
     ui.horizontal(|ui| {
         ui.label("seed");
@@ -718,12 +740,32 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         });
     }
 
+    noted |= lock_row(ui, record);
+    (changed, noted)
+}
+
+/// The lock toggles of [`identity`] and what the hunt is holding, returning
+/// whether any lock was toggled. Its own function since the frame lock took a
+/// name per plan (symbios-avatar #366), which took `identity` past its length.
+fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    let anatomy = record.archetype.anatomy();
+    let frame = record.archetype.composite_priors().frame;
+    let mut noted = false;
     ui.horizontal_wrapped(|ui| {
         ui.label("locked");
         for category in Category::ALL {
+            // A lock on what this body never rolls holds nothing (#365).
+            let rolled = match category {
+                Category::Hair => anatomy.human_head(),
+                Category::Outfit => anatomy.human_trunk(),
+                _ => true,
+            };
+            if !rolled {
+                continue;
+            }
             let mut locked = record.locks.is_locked(category);
             if ui
-                .toggle_value(&mut locked, category_name(category))
+                .toggle_value(&mut locked, lock_name(category, frame))
                 .changed()
             {
                 // A lock changes nothing about the body until the next
@@ -742,11 +784,14 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         // part of the body the next step is allowed to touch.
         let held = record.locks.locked();
         if !held.is_empty() {
-            let names: Vec<&str> = held.into_iter().map(category_name).collect();
+            let names: Vec<&str> = held
+                .into_iter()
+                .map(|category| lock_name(category, frame))
+                .collect();
             ui.small(format!("hunting, holding {}", names.join(", ")));
         }
     }
-    (changed, noted)
+    noted
 }
 
 /// The name to show a category by.
@@ -766,6 +811,17 @@ pub fn category_name(category: Category) -> &'static str {
         Category::Hair => "hair",
         Category::Age => "age",
         Category::Outfit => "outfit",
+    }
+}
+
+/// The name to show a lock by: its category's, except that on a body with no
+/// frame axis the frame lock is "family", because what it keeps there is the
+/// kind of animal the body is - its family, its cross, the blend - and its
+/// body length (symbios-avatar #366).
+fn lock_name(category: Category, frame: bool) -> &'static str {
+    match category {
+        Category::Frame if !frame => "family",
+        _ => category_name(category),
     }
 }
 
@@ -789,14 +845,21 @@ pub fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     egui::CollapsingHeader::new("composites")
         .default_open(true)
         .show(ui, |ui| {
+            // A person's axis (symbios-avatar #178): a body whose plan does not
+            // read it is not offered it, and is told why where it would be.
+            let frame = record.archetype.composite_priors().frame;
             let composites = &mut record.composites;
-            changed |= explored(
-                ui,
-                "femininity",
-                &mut composites.femininity,
-                0.0,
-                (-1.0, 1.0),
-            );
+            if frame {
+                changed |= explored(
+                    ui,
+                    "femininity",
+                    &mut composites.femininity,
+                    0.0,
+                    (-1.0, 1.0),
+                );
+            } else {
+                ui.small("This body has no frame axis: femininity is a person's.");
+            }
             changed |= explored(ui, "mass", &mut composites.mass, 0.0, (-1.0, 1.0));
             changed |= axis(
                 ui,
@@ -819,7 +882,16 @@ pub fn composite_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 }
 
 /// The archetype's own axes, whichever archetype it is.
-pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
+///
+/// Takes the whole record rather than the archetype (symbios-avatar #178): a
+/// quadruped's family centres its composites as well as its own axes, so a
+/// change of family carries both.
+pub fn body_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    let AvatarRecord {
+        archetype,
+        composites,
+        ..
+    } = record;
     let mut changed = false;
     egui::CollapsingHeader::new("body")
         .default_open(true)
@@ -913,17 +985,7 @@ pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
                     (-1.0, 1.0),
                 );
             }
-            Archetype::Quadruped(params) => {
-                let stature = symbios_avatar::QuadrupedParams::height_envelope();
-                changed |= axis(ui, "height", &mut params.height, stature.0..=stature.1);
-                changed |= explored(ui, "body length", &mut params.body_length, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "build", &mut params.build, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "muscle", &mut params.muscle, 0.0, (0.0, 1.0));
-                changed |= explored(ui, "leg length", &mut params.leg_length, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "neck length", &mut params.neck_length, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "head size", &mut params.head_size, 0.0, (-1.0, 1.0));
-                changed |= explored(ui, "tail length", &mut params.tail_length, 0.0, (-1.0, 1.0));
-            }
+            Archetype::Quadruped(params) => changed |= quadruped_axes(ui, params, composites),
             // An archetype this build does not know about is kept verbatim
             // rather than edited into something else — a panel that offered
             // sliders for it would write a body over one it cannot read.
@@ -932,6 +994,143 @@ pub fn body_axes(ui: &mut egui::Ui, archetype: &mut Archetype) -> bool {
             }
         });
     changed
+}
+
+/// A quadruped's body: its family, and the axes rolled around it.
+///
+/// `build` and `muscle` used to sit here and are gone (symbios-avatar #178):
+/// they retired into the `mass` and `bodyFat` composites, as the humanoid's
+/// did, and the composites section above carries both.
+fn quadruped_axes(
+    ui: &mut egui::Ui,
+    params: &mut QuadrupedParams,
+    composites: &mut symbios_avatar::Composites,
+) -> bool {
+    let mut changed = family_picker(ui, params, composites);
+    let stature = symbios_avatar::QuadrupedParams::height_envelope();
+    changed |= axis(ui, "height", &mut params.height, stature.0..=stature.1);
+    changed |= explored(ui, "body length", &mut params.body_length, 0.0, (-1.0, 1.0));
+    changed |= explored(ui, "chest depth", &mut params.chest_depth, 0.0, (-1.0, 1.0));
+    changed |= explored(ui, "leg length", &mut params.leg_length, 0.0, (-1.0, 1.0));
+    changed |= explored(ui, "stance", &mut params.stance, 0.0, (-1.0, 1.0));
+    changed |= explored(ui, "neck length", &mut params.neck_length, 0.0, (-1.0, 1.0));
+    changed |= explored(
+        ui,
+        "neck carriage",
+        &mut params.neck_carriage,
+        0.0,
+        (-1.0, 1.0),
+    );
+    changed |= explored(ui, "head size", &mut params.head_size, 0.0, (-1.0, 1.0));
+    changed |= explored(
+        ui,
+        "muzzle length",
+        &mut params.muzzle_length,
+        0.0,
+        (-1.0, 1.0),
+    );
+    changed |= explored(ui, "tail length", &mut params.tail_length, 0.0, (-1.0, 1.0));
+    changed |= explored(
+        ui,
+        "tail carriage",
+        &mut params.tail_carriage,
+        0.0,
+        (-1.0, 1.0),
+    );
+    // Last, because it is drawn over everything above (symbios-avatar #366):
+    // naturalistic to cute, the head, the face, the body and the legs at once.
+    changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
+    changed
+}
+
+/// Which kind of animal a quadruped is, and whether it is a cross
+/// (symbios-avatar #366).
+///
+/// **A pick goes through `QuadrupedParams::set_kind`, never into the fields.**
+/// The geometry reads only the axes, and a family is where a roll centres
+/// them, so writing the field alone would change nothing on screen; `set_kind`
+/// carries the body's character to the new centre instead - a long-legged dog
+/// becomes a long-legged cat - and a cross's blend slider morphs the body
+/// between its two families as it is dragged. Picking a cross starts it half
+/// way, and the blend is only offered on a cross. The composites the family
+/// centres are carried the same way (`CompositePriors::carry`).
+fn family_picker(
+    ui: &mut egui::Ui,
+    params: &mut QuadrupedParams,
+    composites: &mut symbios_avatar::Composites,
+) -> bool {
+    // **A drag re-kinds from where it began** (the P1 critic). Each frame of a
+    // dragged blend used to re-centre from the last frame's body, and every
+    // frame quantises, so the rounding summed over the drag: a dog crossed with
+    // a horse dragged from a quarter to three quarters came out 6 cm taller
+    // than one set there, and its body fat never moved at all. So the body as
+    // it was when the gesture began is kept, and every frame of it re-kinds
+    // from that: a drag lands where a jump would (#1599's lesson in the
+    // overlands editor - remember what was asked, not what was last shown).
+    let origin_id = ui.id().with("quadruped kind origin");
+    let origin: Option<(QuadrupedParams, symbios_avatar::Composites)> =
+        ui.data(|data| data.get_temp(origin_id));
+    let (mut family, mut hybrid, mut blend) = (params.family, params.hybrid, params.blend);
+    ui.horizontal(|ui| {
+        ui.label("family");
+        for kind in Family::ALL {
+            if ui.selectable_label(family == kind, kind.name()).clicked() {
+                family = kind;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("crossed with");
+        if ui.selectable_label(hybrid.is_none(), "none").clicked() {
+            hybrid = None;
+        }
+        for kind in Family::ALL.into_iter().filter(|&kind| kind != family) {
+            if ui
+                .selectable_label(hybrid == Some(kind), kind.name())
+                .clicked()
+                && hybrid != Some(kind)
+            {
+                if hybrid.is_none() {
+                    blend = 0.5;
+                }
+                hybrid = Some(kind);
+            }
+        }
+    });
+    let mut held = false;
+    if hybrid.is_some() {
+        // `axis`'s slider, kept here for the response a gesture is read from.
+        let response = ui.add(
+            egui::Slider::new(&mut blend, 0.0..=1.0)
+                .text("blend")
+                .step_by(0.001)
+                .fixed_decimals(3),
+        );
+        held = response.dragged() || response.is_pointer_button_down_on();
+    }
+    let base = match origin {
+        Some(origin) if held => origin,
+        _ => (*params, *composites),
+    };
+    ui.data_mut(|data| {
+        if held {
+            data.insert_temp(origin_id, base);
+        } else {
+            data.remove::<(QuadrupedParams, symbios_avatar::Composites)>(origin_id);
+        }
+    });
+    if (family, hybrid, blend) == (params.family, params.hybrid, params.blend) {
+        return false;
+    }
+    // The family centres the composites too (symbios-avatar #178), so they are
+    // carried with the plan's own axes: a slight dog becomes a slight horse.
+    let (mut kind, mut carried) = base;
+    let before = kind.composite_priors();
+    kind.set_kind(family, hybrid, blend);
+    before.carry(&kind.composite_priors(), &mut carried);
+    *params = kind;
+    *composites = carried;
+    true
 }
 
 /// One complexion swatch's colour, as egui wants it.
@@ -1017,7 +1216,14 @@ pub fn eye_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 }
 
 /// Nose, brow, mouth and ears.
+///
+/// Drawn only for a body whose head is a human skull (symbios-avatar #365):
+/// on any other head nothing reads these axes, and a slider that moves
+/// nothing is worse than none.
 pub fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    if !record.archetype.anatomy().human_head() {
+        return false;
+    }
     let mut changed = false;
     egui::CollapsingHeader::new("face").show(ui, |ui| {
         changed |= explored(ui, "nose", &mut record.face.nose, 0.5, (0.0, 1.0));
@@ -1055,7 +1261,13 @@ pub fn face_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// controls in one open header is a wall, and a person editing a beard is not
 /// editing a hairline. egui only runs the body of an OPEN header, so the four
 /// nobody has opened cost nothing to draw.
+///
+/// Drawn only for a body whose head is a human skull, where every follicle
+/// region is (symbios-avatar #365).
 pub fn hair_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    if !record.archetype.anatomy().human_head() {
+        return false;
+    }
     let mut changed = false;
     egui::CollapsingHeader::new("hair").show(ui, |ui| {
         changed |= zone(ui, "scalp", |ui| {
@@ -1520,7 +1732,13 @@ fn flank_style(ui: &mut egui::Ui, style: &mut symbios_avatar::FlankStyle) -> boo
 /// One nested header per garment, the hair section's shape and for its
 /// reason: a texture's own panel is a dozen controls, and two of them open at
 /// once is a wall.
+///
+/// Drawn only for a body with a human trunk, which the garments are cut for
+/// (symbios-avatar #365).
 pub fn outfit_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
+    if !record.archetype.anatomy().human_trunk() {
+        return false;
+    }
     let mut changed = false;
     egui::CollapsingHeader::new("outfit").show(ui, |ui| {
         changed |= zone(ui, "top", |ui| {
@@ -2106,12 +2324,19 @@ mod tests {
             Archetype::Quadruped(p) => vec![
                 ("height", p.height),
                 ("body_length", p.body_length),
-                ("build", p.build),
-                ("muscle", p.muscle),
                 ("leg_length", p.leg_length),
                 ("neck_length", p.neck_length),
                 ("head_size", p.head_size),
                 ("tail_length", p.tail_length),
+                // symbios-avatar #366: the cross's blend and the six axes
+                // the families brought.
+                ("blend", p.blend),
+                ("muzzle_length", p.muzzle_length),
+                ("stance", p.stance),
+                ("neck_carriage", p.neck_carriage),
+                ("tail_carriage", p.tail_carriage),
+                ("chest_depth", p.chest_depth),
+                ("appeal", p.appeal),
             ],
             Archetype::Unknown { .. } => Vec::new(),
         };
@@ -2714,6 +2939,374 @@ mod tests {
         assert_eq!(
             offered!(FLANK_CARDS, FLANK_HELMETS),
             expect(FlankStyle::NAMES)
+        );
+    }
+
+    /// The labels one frame of the record's sections shows, read through
+    /// AccessKit - what a person using the panel is offered.
+    fn offered(record: &mut AvatarRecord) -> Vec<String> {
+        labels(|ui| {
+            skin_axes(ui, record);
+            eye_axes(ui, record);
+            face_axes(ui, record);
+            hair_axes(ui, record);
+            outfit_axes(ui, record);
+        })
+    }
+
+    /// The text one frame of `draw` shows, read through AccessKit.
+    fn labels(draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            draw,
+        );
+        let update = output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit is on");
+        update
+            .nodes
+            .iter()
+            // A button's text is its label; a plain label's is its value.
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()).map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn a_quadruped_is_offered_no_face_hair_or_outfit() {
+        // symbios-avatar #365: nothing on a beast reads those axes, and a
+        // slider that moves nothing is worse than none. Its eyes are its own.
+        let mut beast =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut person = AvatarRecord::new("Person", Archetype::default());
+        let (beast, person) = (offered(&mut beast), offered(&mut person));
+        for section in ["face", "hair", "outfit"] {
+            assert!(
+                !beast.iter().any(|label| label == section),
+                "{section} was offered for a beast: {beast:?}"
+            );
+            assert!(
+                person.iter().any(|label| label == section),
+                "{section} was not offered for a person: {person:?}"
+            );
+        }
+        assert!(
+            beast.iter().any(|label| label == "eyes"),
+            "a beast's eyes were not offered: {beast:?}"
+        );
+    }
+
+    #[test]
+    fn a_quadruped_is_told_why_and_offered_no_lock_on_what_it_never_rolls() {
+        // symbios-avatar #365: a re-roll draws no hair and no outfit for a beast,
+        // so a lock on either would hold nothing; and the sections hidden further
+        // down are named where the body is chosen.
+        let mut beast =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut person = AvatarRecord::new("Person", Archetype::default());
+        let beast = labels(|ui| {
+            identity(ui, &mut beast);
+        });
+        let person = labels(|ui| {
+            identity(ui, &mut person);
+        });
+        for lock in ["hair", "outfit"] {
+            assert!(
+                !beast.iter().any(|label| label == lock),
+                "a beast was offered a {lock} lock: {beast:?}"
+            );
+            assert!(
+                person.iter().any(|label| label == lock),
+                "a person was not offered a {lock} lock: {person:?}"
+            );
+        }
+        let note = "This body has no face, hair or outfit yet: those are a person's.";
+        assert!(beast.iter().any(|label| label == note), "{beast:?}");
+        assert!(!person.iter().any(|label| label == note), "{person:?}");
+    }
+
+    /// Click the topmost button labelled `label` that `draw` shows, found
+    /// through AccessKit on a first frame, over the frames a click takes.
+    fn click(mut draw: impl FnMut(&mut egui::Ui), label: &str) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
+        let mut run = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                &mut draw,
+            )
+        };
+        let update = run(Vec::new())
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit is on");
+        let bounds = update
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label))
+            .filter_map(|(_, node)| node.bounds())
+            .min_by(|a, b| a.y0.total_cmp(&b.y0))
+            .unwrap_or_else(|| panic!("fixture: no button labelled {label}"));
+        let at = centre(
+            f64::midpoint(bounds.x0, bounds.x1),
+            f64::midpoint(bounds.y0, bounds.y1),
+        );
+        run(vec![egui::Event::PointerMoved(at), press(at, true)]);
+        run(vec![press(at, false)]);
+    }
+
+    #[test]
+    fn a_quadruped_s_family_pick_carries_its_character_to_the_new_family() {
+        // symbios-avatar #366 and #178: the geometry reads only the axes and
+        // the composites, so a pick that wrote the family alone would change
+        // nothing on screen. A leggy, heavy dog becomes a leggy, heavy cat -
+        // what `set_kind` and `CompositePriors::carry` say - and the blend is
+        // offered on a cross alone.
+        let dog = QuadrupedParams {
+            leg_length: 0.45,
+            ..QuadrupedParams::default()
+        };
+        let mut record = AvatarRecord::new("Beast", Archetype::Quadruped(dog));
+        record.composites.mass = 0.6;
+        let before = record.composites;
+        click(
+            |ui| {
+                body_axes(ui, &mut record);
+            },
+            "cat",
+        );
+        let mut expected = dog;
+        expected.set_kind(Family::Cat, None, 0.0);
+        assert_eq!(record.archetype, Archetype::Quadruped(expected));
+        let mut carried = before;
+        dog.composite_priors()
+            .carry(&expected.composite_priors(), &mut carried);
+        assert_eq!(record.composites, carried);
+        // And the contract rather than the call: as many spreads from the
+        // cat's centre as it was from the dog's.
+        let spreads = |mass: f32, kind: &QuadrupedParams| {
+            let (centre, spread) = kind.composite_priors().mass;
+            (mass - centre) / spread
+        };
+        assert!(
+            (spreads(record.composites.mass, &expected) - spreads(before.mass, &dog)).abs() < 0.01,
+            "a heavy dog is as heavy a cat: {} for {}",
+            record.composites.mass,
+            before.mass
+        );
+        let Archetype::Quadruped(cat) = record.archetype else {
+            unreachable!("asserted above");
+        };
+        assert!(
+            (cat.leg_length - dog.leg_length).abs() > 0.1,
+            "the body moved with the pick"
+        );
+
+        let mut plain = AvatarRecord::new("Plain", Archetype::Quadruped(cat));
+        let shown = labels(|ui| {
+            body_axes(ui, &mut plain);
+        });
+        assert!(!shown.iter().any(|label| label == "blend"), "{shown:?}");
+        let mut crossed = AvatarRecord::new(
+            "Crossed",
+            Archetype::Quadruped(QuadrupedParams {
+                hybrid: Some(Family::Horse),
+                blend: 0.5,
+                ..cat
+            }),
+        );
+        let shown = labels(|ui| {
+            body_axes(ui, &mut crossed);
+        });
+        assert!(shown.iter().any(|label| label == "blend"), "{shown:?}");
+    }
+
+    #[test]
+    fn a_dragged_blend_lands_where_a_jump_would() {
+        // The P1 critic's case: a dog crossed with a horse, dragged along its
+        // blend a few thousandths a frame. Re-kinded from each frame's body,
+        // the rounding summed over the drag - it landed centimetres from where
+        // a jump to the same blend lands; from the body the drag began on, the
+        // last frame IS the jump.
+        let cross = QuadrupedParams {
+            hybrid: Some(Family::Horse),
+            blend: 0.25,
+            ..QuadrupedParams::default()
+        };
+        let mut record = AvatarRecord::new("Cross", Archetype::Quadruped(cross));
+        record.composites.mass = 0.3;
+        record.composites.body_fat = 0.25;
+        record.sanitize();
+        let origin = record.clone();
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
+        let run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    body_axes(ui, record);
+                },
+            )
+        };
+        let update = run(Vec::new(), &mut record)
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit is on");
+        let rail = update
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Slider && node.label() == Some("blend")
+            })
+            .and_then(|(_, node)| node.bounds())
+            .expect("fixture: the blend slider is shown on a cross");
+        let at = |share: f64| {
+            centre(
+                rail.x0 + (rail.x1 - rail.x0) * share,
+                f64::midpoint(rail.y0, rail.y1),
+            )
+        };
+        let start = at(0.25);
+        run(
+            vec![egui::Event::PointerMoved(start), press(start, true)],
+            &mut record,
+        );
+        for step in 1..=200 {
+            let share = 0.25 + 0.5 * f64::from(step) / 200.0;
+            run(vec![egui::Event::PointerMoved(at(share))], &mut record);
+        }
+        run(vec![press(at(0.75), false)], &mut record);
+        run(Vec::new(), &mut record);
+
+        let Archetype::Quadruped(landed) = record.archetype else {
+            panic!("archetype changed");
+        };
+        assert!(
+            landed.blend > 0.6,
+            "fixture: the drag moved the blend to {}",
+            landed.blend
+        );
+        let Archetype::Quadruped(mut jumped) = origin.archetype else {
+            unreachable!("built as one");
+        };
+        let mut composites = origin.composites;
+        let before = jumped.composite_priors();
+        jumped.set_kind(Family::Dog, Some(Family::Horse), landed.blend);
+        before.carry(&jumped.composite_priors(), &mut composites);
+        assert_eq!(landed, jumped, "the drag drifted from the jump");
+        assert_eq!(record.composites, composites, "the composites drifted");
+        // And the drag did move the body: half a horse further is taller.
+        assert!(
+            landed.height - cross.height > 0.1,
+            "the body did not follow the drag: {} from {}",
+            landed.height,
+            cross.height
+        );
+    }
+
+    #[test]
+    fn a_quadruped_is_told_it_has_no_frame_axis_and_offered_none() {
+        // symbios-avatar #178: `femininity` is a person's axis and nothing on a
+        // beast reads it, so the slider would move nothing.
+        let mut beast =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut person = AvatarRecord::new("Person", Archetype::default());
+        let beast = labels(|ui| {
+            composite_axes(ui, &mut beast);
+        });
+        let person = labels(|ui| {
+            composite_axes(ui, &mut person);
+        });
+        let note = "This body has no frame axis: femininity is a person's.";
+        assert!(beast.iter().any(|label| label == note), "{beast:?}");
+        // And its frame lock is named for what it keeps there (#366).
+        let mut beast_record =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut person_record = AvatarRecord::new("Person", Archetype::default());
+        let beast_locks = labels(|ui| {
+            identity(ui, &mut beast_record);
+        });
+        let person_locks = labels(|ui| {
+            identity(ui, &mut person_record);
+        });
+        assert!(
+            beast_locks.iter().any(|label| label == "family"),
+            "{beast_locks:?}"
+        );
+        assert!(
+            !beast_locks.iter().any(|label| label == "frame"),
+            "{beast_locks:?}"
+        );
+        assert!(
+            person_locks.iter().any(|label| label == "frame"),
+            "{person_locks:?}"
+        );
+        assert!(!person.iter().any(|label| label == note), "{person:?}");
+        let offered = |shown: &[String]| {
+            shown
+                .iter()
+                .any(|label| label.contains("femininity") && label != note)
+        };
+        assert!(!offered(&beast), "{beast:?}");
+        assert!(offered(&person), "{person:?}");
+    }
+
+    #[test]
+    fn a_quadruped_with_every_axis_set_survives_the_wire_exactly() {
+        // `every_axis_the_panel_writes_survives_the_wire_exactly` for the other
+        // plan, a cross with every axis off its neutral (symbios-avatar #366).
+        let mut beast = AvatarRecord::new(
+            "Beast",
+            Archetype::Quadruped(QuadrupedParams {
+                height: 1.234_56,
+                body_length: -0.456_78,
+                leg_length: 0.234_56,
+                neck_length: 0.678_91,
+                head_size: -0.123_45,
+                tail_length: 0.912_34,
+                family: Family::Horse,
+                hybrid: Some(Family::Dog),
+                blend: 0.345_67,
+                muzzle_length: 0.456_78,
+                stance: 0.876_54,
+                neck_carriage: 0.543_21,
+                tail_carriage: -0.765_43,
+                chest_depth: 0.987_65,
+                appeal: 1.123_45,
+            }),
+        );
+        beast.sanitize();
+        let mut editor = RecordEditor::new(beast);
+        editor.touched();
+        let json = to_json(&editor.record);
+        let mut back: AvatarRecord = serde_json::from_str(&json).expect("its own JSON parses");
+        back.sanitize();
+        for ((name, before), (_, after)) in axes(&editor.record).iter().zip(axes(&back)) {
+            assert_eq!(
+                before.to_bits(),
+                after.to_bits(),
+                "{name} went out as {before} and came back as {after}"
+            );
+        }
+        assert_eq!(
+            editor.record, back,
+            "the record did not survive its own JSON"
         );
     }
 

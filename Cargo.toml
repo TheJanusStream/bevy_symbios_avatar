@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -108,7 +108,7 @@ bevy = "0.19"
 # strafe crosses over in a split stance, a heading's shorter stride steps at
 # the cadence that covers the travel, and a body turning where it stands steps
 # round. Breaking for a 0.x crate: `Stride` grew a public `split` field.
-symbios-avatar = "0.12.0"
+symbios-avatar = "0.13"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
