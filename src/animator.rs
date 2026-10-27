@@ -32,7 +32,9 @@
 use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
-use symbios_avatar::anim::{GazeConfig, IdleConfig, Speed, Target, Turn, gaze, gesture};
+use symbios_avatar::anim::{
+    GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, emote, gaze, gesture,
+};
 use symbios_avatar::{
     ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
     Viseme, Zone,
@@ -88,6 +90,10 @@ pub enum GaitKind {
     Running,
     /// Every contact down, always.
     Standing,
+    /// One of a four-legged body's patterns, whatever the speed (#370): a
+    /// walk, a trot, a pace, a canter or a gallop, its cycle still the
+    /// speed's. Any other body walks its own natural gait under it.
+    Pattern(Pattern),
 }
 
 impl GaitKind {
@@ -100,10 +106,21 @@ impl GaitKind {
         GaitKind::Standing,
     ];
 
+    /// A four-legged body's patterns, in picker order (#370).
+    pub const PATTERNS: [GaitKind; 6] = [
+        GaitKind::Pattern(Pattern::Walk),
+        GaitKind::Pattern(Pattern::Trot),
+        GaitKind::Pattern(Pattern::Pace),
+        GaitKind::Pattern(Pattern::Canter(Lead::Right)),
+        GaitKind::Pattern(Pattern::Gallop(Lead::Right)),
+        GaitKind::Pattern(Pattern::RotaryGallop(Lead::Right)),
+    ];
+
     /// The name to show this by.
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            GaitKind::Pattern(pattern) => pattern.name(),
             GaitKind::Natural => "natural",
             GaitKind::Wave => "wave",
             GaitKind::Trot => "trot",
@@ -120,14 +137,25 @@ impl GaitKind {
     /// could show one gait of the five.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.label() == name)
+        Self::ALL
+            .into_iter()
+            .chain(Self::PATTERNS)
+            .find(|kind| kind.label() == name || kind.label().replace(' ', "-") == name)
     }
 
     /// The gait itself, for a body.
     #[must_use]
     pub fn of(self, rig: &symbios_avatar::Rig) -> Gait {
         match self {
-            GaitKind::Natural => Gait::natural(rig),
+            // Its duty is the speed's, which the driver builds it at: this is
+            // the order the feet land in, for anything that asks.
+            GaitKind::Pattern(pattern) if rig.ground_contacts().len() == 4 => {
+                Gait::pattern(rig, pattern, 0.5)
+            }
+            // A pattern is a four-legged body's, and a person left with one
+            // picked - the picker is not drawn on two legs, so it cannot be
+            // cleared there - walks as a person, at a person's speed.
+            GaitKind::Natural | GaitKind::Pattern(_) => Gait::natural(rig),
             GaitKind::Wave => Gait::wave(rig),
             GaitKind::Trot => Gait::trot(rig),
             GaitKind::Running => Gait::running(rig),
@@ -748,10 +776,18 @@ pub fn steer(
     // loop, because the overlay closures borrow it for as long as a drive runs.
     let mut cursor: Option<f32> = None;
     let mut strained = false;
+    // Whether any body here can make the gesture held, and whether there is
+    // a body at all: see the let-go below.
+    let (mut any_body, mut gesturable) = (false, false);
     {
         let animator: &Animator = &animator;
         for (entity, body, mut driver) in &mut bodies {
             let rig = &body.avatar.rig;
+            any_body = true;
+            gesturable |= animator
+                .gesture
+                .as_ref()
+                .is_some_and(|(name, _)| gesture::for_body(rig, name).is_some());
             let picked = animator.gait.of(rig);
             // **One cursor for every body, advanced once.** `anim::Play` is the
             // engine's own cursor and this window already has one — the phase
@@ -799,6 +835,14 @@ pub fn steer(
                     .insert(AvatarClosure(driven.closure));
             }
         }
+    }
+    // **A gesture no body here can make is let go** (#370). The picker holds a
+    // gesture at its end, so a dog's sit outlived the dog when a person was
+    // loaded, and the person's row, which offers a person's roster, had no
+    // way to clear it. Written only when there is one to clear, so it marks
+    // the resource changed once rather than every frame.
+    if any_body && !gesturable && animator.gesture.is_some() {
+        animator.gesture = None;
     }
     // Through `bypass_change_detection`, because these are readouts and not
     // instructions: writing them through the `ResMut` would mark the resource
@@ -861,7 +905,7 @@ fn drive_body(
     let aimed = animator
         .gesture
         .as_ref()
-        .and_then(|(name, _)| gesture::by_name(name))
+        .and_then(|(name, _)| gesture::for_body(rig, name))
         .is_some_and(|clip| clip.tracks.iter().any(|track| track.target == Target::Gaze));
     // Over the locomotion and before the contacts are settled, which is
     // where authored motion goes: the legs keep the walk that carries
@@ -971,7 +1015,12 @@ fn drive_body(
             .map(Showing::Swim)
             .or_else(|| animator.leap.map(Showing::Leap)),
         cycle: Some(cycle),
-        gait: (animator.gait != GaitKind::Natural).then_some(frame.picked),
+        gait: (!matches!(animator.gait, GaitKind::Natural | GaitKind::Pattern(_)))
+            .then_some(frame.picked),
+        pattern: match animator.gait {
+            GaitKind::Pattern(pattern) => Some(pattern),
+            _ => None,
+        },
         walk: WalkFlags {
             posture: animator.posture,
             head_level: animator.head_level,
@@ -1111,7 +1160,7 @@ fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) {
     let Some((name, through)) = &animator.gesture else {
         return;
     };
-    let Some(gesture) = gesture::by_name(name) else {
+    let Some(gesture) = gesture::for_body(rig, name) else {
         return;
     };
     gesture.apply(rig, pose, *through);
@@ -1363,14 +1412,7 @@ fn locomotion_section(
     }
     // Two legs walk one way; only four corners have a choice to make.
     if walking && legs == 4 {
-        ui.horizontal(|ui| {
-            for kind in [GaitKind::Wave, GaitKind::Trot] {
-                let picked = animator.gait == kind;
-                if ui.selectable_label(picked, kind.label()).clicked() {
-                    animator.gait = kind;
-                }
-            }
-        });
+        pattern_picker(ui, animator);
     }
     if !standing {
         // **A checkbox rather than a bare slider**, because the default answer
@@ -1410,14 +1452,47 @@ fn locomotion_section(
         ui.toggle_value(&mut swim.carriage, "carriage");
     }
 
+    gesture_row(ui, animator, legs);
+}
+
+/// A four-legged body's gait: by speed, as the body would choose for itself,
+/// or one pattern held whatever the speed (#370).
+#[cfg(feature = "editor")]
+fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .selectable_label(animator.gait == GaitKind::Natural, "by speed")
+            .clicked()
+        {
+            animator.gait = GaitKind::Natural;
+        }
+        for kind in GaitKind::PATTERNS.into_iter().chain([GaitKind::Wave]) {
+            let picked = animator.gait == kind;
+            if ui.selectable_label(picked, kind.label()).clicked() {
+                animator.gait = kind;
+            }
+        }
+    });
+}
+
+/// The gestures a body can be asked for, and how far into one it is.
+#[cfg(feature = "editor")]
+fn gesture_row(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator, legs: usize) {
+    use bevy_egui::egui;
     // **The gestures sit apart from the locomotion**, because they are not one
     // of the things being chosen between: a gesture is laid over whatever the
     // body is already doing, so it is its own row rather than another entry in
     // the picker above.
     ui.separator();
     ui.label(egui::RichText::new("gesture").strong());
-    ui.horizontal(|ui| {
-        for name in gesture::ROSTER {
+    // A beast's roster on four legs (#370), a person's otherwise.
+    let roster = if legs == 4 {
+        emote::ROSTER
+    } else {
+        gesture::ROSTER
+    };
+    ui.horizontal_wrapped(|ui| {
+        for name in roster {
             let playing = animator
                 .gesture
                 .as_ref()
@@ -2396,6 +2471,66 @@ mod tests {
             GaitKind::named("running").is_some(),
             "a run the picker offers must be reachable by name from --gait"
         );
+    }
+    #[test]
+    fn every_pattern_answers_to_its_own_name() {
+        // #370. A beast's patterns are reachable by name from `--gait` as the
+        // picker offers them, the spaces in a name written as dashes - all
+        // but "trot", which reaches the five's own diagonal gait first, the
+        // same footfalls at a fixed duty.
+        for kind in GaitKind::PATTERNS {
+            for name in [kind.label().to_string(), kind.label().replace(' ', "-")] {
+                let found = GaitKind::named(&name);
+                assert!(
+                    found == Some(kind) || (name == "trot" && found == Some(GaitKind::Trot)),
+                    "{name} answered {found:?}"
+                );
+            }
+        }
+        assert_eq!(
+            GaitKind::named("canter"),
+            Some(GaitKind::Pattern(Pattern::Canter(Lead::Right)))
+        );
+    }
+
+    #[test]
+    fn a_beasts_emote_left_held_neither_moves_a_person_nor_stays() {
+        // #370. The picker holds a gesture at its end, so a dog's sit
+        // outlived the dog, and the person's row, a person's roster, had no
+        // way to clear it. A gesture is looked up by body, so the person
+        // stands as one asked for nothing, and one no body in the window can
+        // make is let go.
+        let ask = |gesture: Option<&str>| {
+            let mut app = app();
+            app.world_mut().resource_mut::<Animator>().gesture =
+                gesture.map(|name| (name.to_string(), 1.0));
+            tick(&mut app);
+            let held = app.world().resource::<Animator>().gesture.clone();
+            (posed(&mut app), held)
+        };
+        let (sitting, held) = ask(Some("Sit"));
+        let (standing, _) = ask(None);
+        assert_eq!(held, None, "a person kept a beast's sit");
+        assert!(sitting == standing, "a beast's sit moved a person");
+    }
+
+    #[test]
+    fn a_pattern_left_picked_walks_a_person_as_a_person() {
+        // #370. The pattern row is drawn on four legs only, so a pattern
+        // picked on a dog stayed picked when a person was loaded, and the
+        // person's speed was worked out through the pattern's duty.
+        let mut app = app();
+        let mut bodies = app.world_mut().query::<&AvatarBody>();
+        let rig = bodies
+            .iter(app.world())
+            .next()
+            .expect("a body")
+            .avatar
+            .rig
+            .clone();
+        for kind in GaitKind::PATTERNS {
+            assert_eq!(kind.of(&rig), GaitKind::Natural.of(&rig), "{kind:?}");
+        }
     }
 }
 

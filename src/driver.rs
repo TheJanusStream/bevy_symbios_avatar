@@ -51,6 +51,7 @@
 //! [`drive_avatar_bodies`] for the two reasons to.
 
 use bevy::prelude::*;
+use symbios_avatar::anim::Pattern;
 use symbios_avatar::anim::driver::{
     Driven, Driver, DriverConfig, Hold, Inputs, Showing, Source, WalkFlags, level_ground,
     velocity_of,
@@ -138,6 +139,11 @@ pub struct Drive {
     pub cadence: Option<f32>,
     /// Walk in this pattern instead of the one the speed picks.
     pub gait: Option<Gait>,
+    /// On four legs, move in this pattern - a walk, a trot, a canter, a
+    /// gallop - instead of the one the speed picks, its cycle still the
+    /// speed's and its duty the pattern's (#370): see the engine's
+    /// `Inputs::pattern`. A body that is not four-legged ignores it.
+    pub pattern: Option<Pattern>,
     /// The walk's ablation switches.
     pub walk: WalkFlags,
     /// How fast the body is turning, in radians a second, positive toward its
@@ -166,6 +172,7 @@ impl Default for Drive {
             cycle: None,
             cadence: None,
             gait: None,
+            pattern: None,
             walk: WalkFlags::default(),
             turn: 0.0,
             lids: None,
@@ -291,6 +298,7 @@ pub fn drive_avatar_bodies(
             cycle: drive.cycle,
             cadence: drive.cadence,
             gait: drive.gait.as_ref(),
+            pattern: drive.pattern,
             walk: drive.walk,
             turn: drive.turn,
             lids: drive.lids,
