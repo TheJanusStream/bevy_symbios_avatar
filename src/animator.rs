@@ -33,7 +33,7 @@ use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
 use symbios_avatar::anim::{
-    GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, emote, gaze, gesture,
+    GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, gaze, gesture,
 };
 use symbios_avatar::{
     ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
@@ -1479,6 +1479,7 @@ fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
 #[cfg(feature = "editor")]
 fn gesture_row(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator, legs: usize) {
     use bevy_egui::egui;
+    use symbios_avatar::anim::emote;
     // **The gestures sit apart from the locomotion**, because they are not one
     // of the things being chosen between: a gesture is laid over whatever the
     // body is already doing, so it is its own row rather than another entry in
