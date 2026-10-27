@@ -96,8 +96,8 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Family, GENERATOR_VERSION,
-    HumanoidParams, Limb, QuadrupedParams, Rig, Zone,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Family, Feet,
+    GENERATOR_VERSION, Horn, HumanoidParams, Limb, Nose, Pupil, QuadrupedParams, Rig, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -1013,6 +1013,7 @@ fn quadruped_axes(
     changed |= explored(ui, "chest depth", &mut params.chest_depth, 0.0, (-1.0, 1.0));
     changed |= explored(ui, "leg length", &mut params.leg_length, 0.0, (-1.0, 1.0));
     changed |= explored(ui, "stance", &mut params.stance, 0.0, (-1.0, 1.0));
+    changed |= chooser(ui, "feet", &mut params.feet, &Feet::ALL, Feet::name);
     changed |= explored(ui, "neck length", &mut params.neck_length, 0.0, (-1.0, 1.0));
     changed |= explored(
         ui,
@@ -1022,13 +1023,7 @@ fn quadruped_axes(
         (-1.0, 1.0),
     );
     changed |= explored(ui, "head size", &mut params.head_size, 0.0, (-1.0, 1.0));
-    changed |= explored(
-        ui,
-        "muzzle length",
-        &mut params.muzzle_length,
-        0.0,
-        (-1.0, 1.0),
-    );
+    changed |= quadruped_head(ui, params);
     changed |= explored(ui, "tail length", &mut params.tail_length, 0.0, (-1.0, 1.0));
     changed |= explored(
         ui,
@@ -1040,6 +1035,65 @@ fn quadruped_axes(
     // Last, because it is drawn over everything above (symbios-avatar #366):
     // naturalistic to cute, the head, the face, the body and the legs at once.
     changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
+    changed
+}
+
+/// A quadruped's face (symbios-avatar #367): the muzzle and how it is set,
+/// the eyes, the ears, the nose, the whiskers and a horn.
+///
+/// The parts the engine stores rather than reads off an axis - the pupils,
+/// the nose, a horn - are a row of choices each, where a creator overrides
+/// what a family gave: a dog with a cat's eyes is a choice somebody made.
+/// **Until the next family pick**, which hands the new family's own over
+/// (`set_kind`) - only a part one of the body's families has survives one.
+fn quadruped_head(ui: &mut egui::Ui, params: &mut QuadrupedParams) -> bool {
+    let mut changed = false;
+    for (name, value) in [
+        ("muzzle length", &mut params.muzzle_length),
+        ("muzzle breadth", &mut params.muzzle_breadth),
+        ("stop", &mut params.stop),
+        ("eye set", &mut params.eye_set),
+    ] {
+        changed |= explored(ui, name, value, 0.0, (-1.0, 1.0));
+    }
+    changed |= chooser(ui, "pupils", &mut params.pupil, &Pupil::ALL, Pupil::name);
+    for (name, value) in [
+        ("ear size", &mut params.ear_size),
+        ("ear tips", &mut params.ear_point),
+        ("ear carriage", &mut params.ear_carriage),
+    ] {
+        changed |= explored(ui, name, value, 0.0, (-1.0, 1.0));
+    }
+    changed |= chooser(ui, "nose", &mut params.nose, &Nose::ALL, Nose::name);
+    changed |= explored(ui, "whiskers", &mut params.whiskers, 0.0, (-1.0, 1.0));
+    changed |= chooser(ui, "horn", &mut params.horn, &Horn::ALL, Horn::name);
+    changed
+}
+
+/// A stored part's choices as a row of labels, the current one selected
+/// (symbios-avatar #367). Writes, and reports a change, only on a click that
+/// picks something other than what is already there.
+fn chooser<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut T,
+    choices: &[T],
+    name: fn(T) -> &'static str,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for &choice in choices {
+            if ui
+                .selectable_label(*value == choice, name(choice))
+                .clicked()
+                && *value != choice
+            {
+                *value = choice;
+                changed = true;
+            }
+        }
+    });
     changed
 }
 
@@ -2337,6 +2391,14 @@ mod tests {
                 ("tail_carriage", p.tail_carriage),
                 ("chest_depth", p.chest_depth),
                 ("appeal", p.appeal),
+                // symbios-avatar #367: the face's.
+                ("muzzle_breadth", p.muzzle_breadth),
+                ("stop", p.stop),
+                ("eye_set", p.eye_set),
+                ("ear_size", p.ear_size),
+                ("ear_point", p.ear_point),
+                ("ear_carriage", p.ear_carriage),
+                ("whiskers", p.whiskers),
             ],
             Archetype::Unknown { .. } => Vec::new(),
         };
@@ -3289,6 +3351,17 @@ mod tests {
                 tail_carriage: -0.765_43,
                 chest_depth: 0.987_65,
                 appeal: 1.123_45,
+                muzzle_breadth: -0.345_67,
+                stop: 0.654_32,
+                eye_set: -0.789_12,
+                pupil: Pupil::Slit,
+                ear_size: 0.234_56,
+                ear_point: -0.567_89,
+                ear_carriage: -0.912_34,
+                nose: Nose::Soft,
+                feet: Feet::Pads,
+                whiskers: 0.456_78,
+                horn: Horn::Unicorn,
             }),
         );
         beast.sanitize();
