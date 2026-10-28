@@ -18,6 +18,7 @@
 //! cargo run --release -F builtin-clips --example viewer -- --gesture Greeting
 //! cargo run --release -F builtin-clips --example viewer -- --seed 7
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped
+//! cargo run --release -F builtin-clips --example viewer -- --quadruped --gesture Sit  # down, and held
 //! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
@@ -950,10 +951,10 @@ fn starting_animator() -> Animator {
     animator.swim = value("--swim").map(|pace| symbios_avatar::Swim::at(0.0).toward(pace));
     // A procedural gesture by the baked roster's own name, so `--gesture
     // Greeting` and `--clip Greeting` show the two answers to the same question.
-    //  holds the gesture where it holds the gait: one flag, because
-    // the whole point of scrubbing is to look at one instant of the BODY.
     // `--phase` holds the gesture where it holds the gait: one flag, because the
-    // whole point of scrubbing is to look at one instant of the BODY.
+    // whole point of scrubbing is to look at one instant of the BODY. A beast's
+    // `--gesture Sit` or `"Lie Down"` is a state its driver plays at its own
+    // pace (#53), and `--phase` poses that state at a point of its way down.
     animator.gesture = word("--gesture").map(|name| (name, value("--phase").unwrap_or(0.0)));
     animator.leap = value("--leap")
         .map(symbios_avatar::Leap::to_height)

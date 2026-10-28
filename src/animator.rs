@@ -17,6 +17,23 @@
 //! is now, by construction, the walk an application draws: there is one driver
 //! and both run it.
 //!
+//! ## A beast's states are the driver's too
+//!
+//! A gesture is the one motion this window still plays on a clock of its own,
+//! so it can be held and scrubbed. **A beast's Sit and Lie Down are not
+//! gestures in that sense** (#53, engine #377): they are states, which the
+//! driver goes into at the animal's own pace, holds, and gets up from in the
+//! animal's own order, and a window replaying them on its own clock would show
+//! something no application draws. So the gesture row's pick of a state is
+//! asked of the driver, as a consumer's `Drive::gesture` is, and so is
+//! whatever gets the beast up: letting go of the pick, "Get Up", another
+//! gesture, which plays once it is up, or setting it moving. The row follows
+//! the driver rather than leading it - the slider reads how far down the
+//! beast is, and a state the beast is not in is let go - and leads it only
+//! under hold, where the slider poses the way down itself. Each body's
+//! driver is asked for itself, so one built under a pick is asked it too.
+//! [`Animator::gesture`] has the rules.
+//!
 //! ## Why a window rather than more keys
 //!
 //! A flag and a held key are enough to say "walk" and nothing else. They cannot
@@ -29,11 +46,12 @@
 //! Unlike a rebuild, none of this costs anything: a pose is a few dozen
 //! quaternions — a blink included, since the four lids have joints of their own.
 
+use bevy::ecs::entity::EntityHashMap;
 use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
 use symbios_avatar::anim::{
-    GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, gaze, gesture,
+    Clip, GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, emote, gaze, gesture,
 };
 use symbios_avatar::{
     ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
@@ -48,7 +66,12 @@ use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
 /// A second and a half, which is a greeting: long enough for three waves to
 /// read as waves and short enough that a body is not still doing it when the
 /// conversation has moved on. The engine's gestures are written in normalised
-/// time, so this is the only place the real duration is decided.
+/// time, so this is the only place the real duration is decided - and it is
+/// handed to the driver as its own `gesture_secs`, so a gesture a beast plays
+/// once it is up takes as long as one this window plays itself (#53).
+///
+/// **Not a beast's states**, which keep their own time (`emote::seconds`):
+/// see [`Animator::gesture`].
 const GESTURE_TIME: f32 = 1.5;
 
 /// The seed every body this window adopts is given.
@@ -250,6 +273,27 @@ pub struct Animator {
     /// [`Animator::cycle`]: a greeting is not a cycle, it happens once and
     /// finishes, and pinning it to the gait's phase would make it play at the
     /// speed the legs happen to be going.
+    ///
+    /// **A beast's Sit and Lie Down are states, and its driver plays them**
+    /// (#53, engine #377): picked, the beast goes down at its own pace
+    /// (`emote::seconds`) and stays down, and the number here is how far
+    /// down it is rather than this window's clock: it follows the pick's own
+    /// way down and holds at one while the beast stays down, and while
+    /// something gets the beast up it stays where it was. Getting up is the
+    /// driver's too:
+    /// letting go of the pick, picking `emote::GET_UP` (which lets go of it),
+    /// or picking another gesture gets the beast up in the animal's own order
+    /// (`emote::getting_up`), and the other gesture plays once it is up;
+    /// walking it, swimming it or leaping it gets it up in a hurry, and the
+    /// pick lets go once it is up, as it does of a state the beast would not
+    /// go into because it was moving. With [`Self::scrub`] on, the number
+    /// poses a state at that point of its way down instead, and whatever
+    /// gets the beast up from there gets it up from that point. A body built
+    /// under a state - the record editor rebuilds one on every edit - is
+    /// drawn as far down as the number says from its first frame, so a
+    /// sitting beast can be tuned as it sits. A person's gestures, and a
+    /// beast's while it is up, run on this window's clock as they always
+    /// have.
     pub gesture: Option<(String, f32)>,
     /// A swim to show instead of the walk, if any.
     ///
@@ -484,6 +528,68 @@ pub struct Animator {
     talk: Talk,
     /// How long the body has been alive, for circling the gaze target.
     elapsed: f32,
+    /// What the drivers have been told of [`Self::gesture`], and what they
+    /// are doing with it. Bypass-written: it is a readout.
+    told: Told,
+}
+
+/// What the drivers this window steers have been told of the gesture row's
+/// pick, and what they are doing with it (#53).
+///
+/// **A beast's state is a request, and the pick is a state of the window**,
+/// so this is the edge between them: a pick is asked of a driver once, on
+/// the frame it changes, as a consumer's `Drive::gesture` is.
+///
+/// **Once per body, not once per window.** The record editor despawns and
+/// rebuilds the body on every edit, and a body built under a pick has a
+/// fresh driver that was never asked it: told once for the window, a sitting
+/// dog rebuilt stood up and the row let go of its sit.
+#[derive(Debug, Default)]
+struct Told {
+    /// What each body's driver has been told, by body.
+    bodies: EntityHashMap<Asked>,
+    /// Whether the pick is a driver's to play rather than this window's
+    /// clock's, on any body: a beast's state, or a gesture asked of a beast
+    /// while its driver was playing one.
+    handed: bool,
+    /// Whether a driver is playing the pick itself and it is not a state: a
+    /// gesture the engine cannot stop part way, so the row keeps it lit.
+    busy: bool,
+    /// Whether a driver was playing a gesture after the last frame: motion,
+    /// for the still-body rule, held state included.
+    playing: bool,
+    /// How much longer to drive, in seconds: for as long as a driver plays a
+    /// gesture, and once none does, for the frame after and the blend. The
+    /// frame a gesture ends on stands this window's own gaze aside and starts
+    /// the driver's blend, and a still body left there would keep both.
+    settling: f32,
+    /// Where a state was posed from the slider on the last frame, if one
+    /// was: the frame that stops doing so blends into what the driver is
+    /// doing, and one that gets the beast up gets it up from there.
+    scrubbed: Option<f32>,
+}
+
+impl Told {
+    /// A frame with no body to tell: nothing is playing, and nothing has been
+    /// told, so a body built later is asked as one already here would be.
+    fn no_bodies(&mut self) {
+        self.bodies.clear();
+        self.playing = false;
+        self.busy = false;
+        self.settling = 0.0;
+    }
+}
+
+/// What one body's driver has been told of the gesture row's pick (#53).
+#[derive(Debug, Default)]
+struct Asked {
+    /// The pick it was told about.
+    pick: Option<String>,
+    /// Whether the pick is its driver's to play, as [`Told::handed`] says.
+    handed: bool,
+    /// Seconds its driver has run since it was told: a gesture of the pick's
+    /// name that has played longer is one from before, still getting up.
+    since: f32,
 }
 
 impl Default for Animator {
@@ -539,6 +645,7 @@ impl Default for Animator {
             listening: false,
             talk: Talk::seeded(7),
             elapsed: 0.0,
+            told: Told::default(),
         }
     }
 }
@@ -575,6 +682,10 @@ impl Animator {
             // An expression still easing toward its target is motion: the
             // still-body rule may only re-engage once the face has arrived.
             && self.showing == self.expression
+            // So is a gesture a driver is playing (#53), and the blend out of
+            // one: a beast's state keeps its own clock, which writes nothing
+            // here to wake on.
+            && self.told.settling <= 0.0
     }
 
     /// How fast the body is travelling, in metres a second.
@@ -715,7 +826,9 @@ pub fn adopt_bodies(
 /// Three cases, and the middle one is the one that is easy to get wrong.
 ///
 /// **Something is moving** — a walk, a blink, a circling gaze — so the pose is
-/// written every frame, which is what it costs.
+/// written every frame, which is what it costs. A gesture a driver is playing
+/// is motion too, a beast's held state included, and so is the blend out of
+/// one: none of them writes anything to the window to wake on (#53).
 ///
 /// **Nothing is moving but something was just changed.** A gaze held at an
 /// angle and a lid held half shut are both poses somebody asked for, and both
@@ -741,7 +854,13 @@ pub fn steer(
     mut bodies: Query<(Entity, Ref<AvatarBody>, &mut AvatarDriver), Without<Drive>>,
 ) {
     let asked = animator.is_changed();
-    if animator.is_idle() && !asked {
+    let (resting, unasked) = pending(
+        &animator,
+        bodies
+            .iter()
+            .map(|(entity, body, _)| (entity, body.into_inner())),
+    );
+    if animator.is_idle() && !asked && !unasked {
         return;
     }
 
@@ -749,7 +868,7 @@ pub fn steer(
     if animator.tracking {
         animator.elapsed += delta;
     }
-    advance_gesture(&mut animator, delta);
+    advance_gesture(&mut animator, delta, resting);
     // The cursor is bypass-written for the same reason `strained` is — it is
     // this frame's readout, not an instruction.
     let showing = ease_expression(animator.showing, animator.expression, delta, animator.blend);
@@ -779,6 +898,8 @@ pub fn steer(
     // Whether any body here can make the gesture held, and whether there is
     // a body at all: see the let-go below.
     let (mut any_body, mut gesturable) = (false, false);
+    // What the drivers made of the pick: see `Told`.
+    let mut after = After::default();
     {
         let animator: &Animator = &animator;
         for (entity, body, mut driver) in &mut bodies {
@@ -788,7 +909,10 @@ pub fn steer(
                 .gesture
                 .as_ref()
                 .is_some_and(|(name, _)| gesture::for_body(rig, name).is_some());
+            let told = animator.told.bodies.get(&entity);
             let picked = animator.gait.of(rig);
+            let stirred = stirred(animator, &driver, animator.speed_of(rig, &picked), gaiting);
+            let mut gesturing = plan_gesture(animator, &driver, rig, told, stirred);
             // **One cursor for every body, advanced once.** `anim::Play` is the
             // engine's own cursor and this window already has one — the phase
             // slider, which exists so a gait can be held still at one point in
@@ -806,23 +930,37 @@ pub fn steer(
                     (animator.cycle + delta * animator.cadence_of(rig, &picked)).fract()
                 }
             });
-            let Some(driven) = drive_body(
-                animator,
-                &mut driver,
-                rig,
-                &Frame {
-                    delta,
-                    cycle,
-                    gaiting,
-                    picked: &picked,
-                    clip,
-                    jaw_angle,
-                    showing,
-                    eyes: body.avatar.parts.eyes.as_ref(),
-                },
-            ) else {
+            let frame = Frame {
+                delta,
+                cycle,
+                gaiting,
+                picked: &picked,
+                clip,
+                jaw_angle,
+                showing,
+                eyes: body.avatar.parts.eyes.as_ref(),
+            };
+            let brought = bring(animator, &mut driver, rig, &frame, &mut gesturing, told);
+            // **Leaving a scrub blends into what the driver is doing**, which
+            // went on under it: a state posed from the slider is not where the
+            // driver's own has got to, and letting go of hold would jump there.
+            // After `bring`, whose frames would take the request otherwise.
+            if animator.told.scrubbed.is_some() && !gesturing.scrubbing {
+                driver.blend_now();
+            }
+            gesturing.since += brought + delta;
+            let Some(driven) = drive_body(animator, &mut driver, rig, &frame, &gesturing) else {
                 continue;
             };
+            // **A head this window left to a driver that did not aim it is
+            // blended back.** Whether the driver's gesture aims is read before
+            // its frame, and the frame one ends on - or the one a state is
+            // refused on - is the one that misreads: the head stood where the
+            // body had it, and the next frame's gaze would turn it in one.
+            if gesturing.driver_aims && !gesturing.own_aims() && !driven.aimed {
+                driver.blend_now();
+            }
+            after.read(animator, &driver, rig, &gesturing, entity);
             strained |= driven.strained;
             commands.entity(entity).insert(AvatarPose(driven.pose));
             // Kept as the record of what the lids are holding, for anything that
@@ -841,8 +979,23 @@ pub fn steer(
     // loaded, and the person's row, which offers a person's roster, had no
     // way to clear it. Written only when there is one to clear, so it marks
     // the resource changed once rather than every frame.
-    if any_body && !gesturable && animator.gesture.is_some() {
+    //
+    // **And so is a state the beast is not in** (#53): one it got up from
+    // because it was moved, or would not go into because it was moving - the
+    // pick says what the body is doing, and a beast walking under a lit "Sit"
+    // is not sitting. "Get Up" is let go on the frame it is asked for: it is
+    // an act, not something a body goes on doing.
+    let getting_up = animator
+        .gesture
+        .as_ref()
+        .is_some_and(|(name, _)| name == emote::GET_UP);
+    if any_body && (!gesturable || after.ended || getting_up) && animator.gesture.is_some() {
         animator.gesture = None;
+    }
+    if any_body {
+        after.tell(animator.bypass_change_detection(), delta);
+    } else {
+        animator.bypass_change_detection().told.no_bodies();
     }
     // Through `bypass_change_detection`, because these are readouts and not
     // instructions: writing them through the `ResMut` would mark the resource
@@ -851,6 +1004,442 @@ pub fn steer(
         animator.bypass_change_detection().cycle = cycle;
     }
     animator.bypass_change_detection().strained = strained;
+}
+
+/// What the drivers made of the gesture row's pick this frame, gathered over
+/// the bodies and written back once (#53): see [`Told`].
+#[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "readouts of independent facts about one frame, gathered body by body"
+)]
+struct After {
+    /// What each body's driver has been told, after this frame.
+    bodies: EntityHashMap<Asked>,
+    /// Whether a driver is playing a gesture.
+    playing: bool,
+    /// Whether a driver is playing the pick itself and it is not a state.
+    busy: bool,
+    /// Where a state was posed from the slider, if one was.
+    scrubbed: Option<f32>,
+    /// Whether the pick is a state a beast is not in, and so is let go.
+    ended: bool,
+    /// Whether a driver finished a gesture it was handed.
+    finished: bool,
+    /// How far through the pick a driver is, `0..1`.
+    readout: Option<f32>,
+}
+
+impl After {
+    /// Reads one body's driver after its frame.
+    fn read(
+        &mut self,
+        animator: &Animator,
+        driver: &AvatarDriver,
+        rig: &Rig,
+        gesturing: &Gesturing,
+        body: Entity,
+    ) {
+        let now = driver.gesture();
+        self.playing |= now.is_some();
+        if gesturing.scrubbing {
+            self.scrubbed = gesturing.own.as_ref().map(|(_, through)| *through);
+        }
+        let mut asked = Asked {
+            pick: animator.gesture.as_ref().map(|(name, _)| name.clone()),
+            handed: gesturing.handed,
+            since: gesturing.since,
+        };
+        if let Some((pick, _)) = &animator.gesture
+            && rests(rig)
+        {
+            match now {
+                None if state(rig, pick) && !gesturing.scrubbing => self.ended = true,
+                None if gesturing.handed => {
+                    self.finished = true;
+                    asked.handed = false;
+                }
+                // A state's way down at its own pace, and anything else at the
+                // pace this window gives it: held at one once it is there, as
+                // the window's own clock holds a gesture at its end. **Only the
+                // pick's own going down and holding**: a state of the pick's
+                // name that has played longer than the pick has been asked for
+                // is one from before, still getting up, and one the body is
+                // being moved out of is coming back up - the slider stays
+                // where it was for both, rather than reading a way down the
+                // body is not on.
+                Some((name, elapsed)) if name == pick && !gesturing.scrubbing => {
+                    let resting = state(rig, name);
+                    self.busy |= !resting;
+                    if elapsed <= gesturing.since + 1.0e-3 && !(resting && gesturing.stirred) {
+                        let span = emote::seconds(rig, name).unwrap_or(GESTURE_TIME);
+                        self.readout = Some((elapsed / span).min(1.0));
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.bodies.insert(body, asked);
+    }
+
+    /// Writes what was read back to the window, which has let go of any pick
+    /// it had to by now, `delta` seconds after the last frame.
+    fn tell(mut self, animator: &mut Animator, delta: f32) {
+        // What every body has been told is the pick as it stands now: one let
+        // go of was let go of for all of them.
+        let pick = animator.gesture.as_ref().map(|(name, _)| name.clone());
+        for asked in self.bodies.values_mut() {
+            if asked.pick != pick {
+                *asked = Asked {
+                    pick: pick.clone(),
+                    ..Asked::default()
+                };
+            }
+        }
+        // A gesture a driver played is held at its end once it is done, as
+        // one this window plays is.
+        let handed = self.bodies.values().any(|asked| asked.handed);
+        if let Some((_, through)) = &mut animator.gesture {
+            if self.finished {
+                *through = 1.0;
+            } else if let Some(readout) = self.readout {
+                *through = readout;
+            }
+        }
+        // At least the frame after the one a gesture ended on, and then as
+        // long as the blend takes.
+        let settling = if self.playing || animator.told.playing {
+            animator.blend.max(f32::EPSILON)
+        } else {
+            (animator.told.settling - delta).max(0.0)
+        };
+        animator.told = Told {
+            bodies: self.bodies,
+            handed,
+            busy: self.busy && pick.is_some(),
+            playing: self.playing,
+            settling,
+            scrubbed: self.scrubbed,
+        };
+    }
+}
+
+/// One body's part in the gesture row's pick, for one frame (#53).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about one body's frame, decided once and read in several places"
+)]
+struct Gesturing<'a> {
+    /// Whether the pick changed since this body's driver was told of it, or
+    /// it has never been told: a body new to the window is.
+    anew: bool,
+    /// Whether the window is moving the body: see [`stirred`].
+    stirred: bool,
+    /// Seconds the body's driver has run since it was told the pick, as of
+    /// the start of this frame: see [`Asked::since`].
+    since: f32,
+    /// The name asked of the body's driver this frame: a request, taken once,
+    /// as [`Inputs::gesture`] is.
+    ask: Option<&'a str>,
+    /// The clip this window lays over the motion itself, and how far into it.
+    own: Option<(Clip, f32)>,
+    /// Whether the gesture the driver is playing, or the one asked of it,
+    /// aims the head.
+    driver_aims: bool,
+    /// Whether the pick is the driver's to play, as [`Told::handed`] says.
+    handed: bool,
+    /// Whether `own` is a state posed from the slider.
+    scrubbing: bool,
+}
+
+impl Gesturing<'_> {
+    /// Whether the clip this window lays aims the head.
+    fn own_aims(&self) -> bool {
+        self.own.as_ref().is_some_and(|(clip, _)| aims(clip))
+    }
+}
+
+/// Whether `clip` aims the head: it carries a [`Target::Gaze`] track.
+fn aims(clip: &Clip) -> bool {
+    clip.tracks.iter().any(|track| track.target == Target::Gaze)
+}
+
+/// Whether `name` is a state on `rig`: a beast's sit or lying down (#53),
+/// the emotes that keep their own time and so the only ones
+/// `emote::seconds` answers for.
+fn state(rig: &Rig, name: &str) -> bool {
+    emote::seconds(rig, name).is_some()
+}
+
+/// Whether `rig` has states in its roster: whether it is a beast's.
+fn rests(rig: &Rig) -> bool {
+    emote::ROSTER.iter().any(|name| state(rig, name))
+}
+
+/// What the window's pick is to the bodies before their frame (#53):
+/// whether it is a state on any of them, which keeps its own time and not
+/// this window's clock, and whether a beast among them has not been told of
+/// it. A beast built under a pick has to be asked it, which writes nothing to
+/// the window to wake on - and with blinking off nothing else would.
+fn pending<'b>(
+    animator: &Animator,
+    bodies: impl Iterator<Item = (Entity, &'b AvatarBody)>,
+) -> (bool, bool) {
+    let Some((name, _)) = &animator.gesture else {
+        return (false, false);
+    };
+    let (mut resting, mut unasked) = (false, false);
+    for (entity, body) in bodies {
+        let rig = &body.avatar.rig;
+        resting |= state(rig, name);
+        unasked |= rests(rig)
+            && animator
+                .told
+                .bodies
+                .get(&entity)
+                .is_none_or(|told| told.pick.as_ref() != Some(name));
+    }
+    (resting, unasked)
+}
+
+/// What one body does with the gesture row's pick this frame (#53).
+///
+/// **A person's pick is this window's**, played on its own clock as it always
+/// was. **A beast's states are its driver's**, so that what the window shows
+/// is what a consumer's [`Drive::gesture`] gets: a state is asked of the
+/// driver on the frame it is picked, and the driver goes down, holds and gets
+/// up. So is anything picked while the driver is playing one - it gets the
+/// beast up and plays once it is - and letting go of a state is asking for
+/// [`emote::GET_UP`]. What is left to the window is a beast's gesture while it
+/// is up, which is a person's case, and a state posed from the slider under
+/// hold: the driver's own clip for the way down, at the slider's point - but
+/// not on a body being moved, which the driver will not let rest.
+///
+/// `told` is what this body's driver was told before: see [`Told`].
+fn plan_gesture<'a>(
+    animator: &'a Animator,
+    driver: &AvatarDriver,
+    rig: &Rig,
+    told: Option<&Asked>,
+    stirred: bool,
+) -> Gesturing<'a> {
+    let anew = told.map(|told| told.pick.as_ref())
+        != Some(animator.gesture.as_ref().map(|(name, _)| name));
+    let pick = animator
+        .gesture
+        .as_ref()
+        .map(|(name, through)| (name.as_str(), *through));
+    let beast = rests(rig);
+    let playing = driver.gesture().map(|(name, _)| name);
+    let ask = if anew && beast {
+        match pick {
+            // "Get Up" among them, which gets a beast up out of a state and
+            // does nothing to one that is not in one.
+            Some((name, _)) if state(rig, name) || playing.is_some() => Some(name),
+            None if playing.is_some_and(|name| state(rig, name)) => Some(emote::GET_UP),
+            _ => None,
+        }
+    } else {
+        None
+    }
+    // Nor a state of a body being moved, which the driver refuses: asked, it
+    // would still stand the window's gaze aside for a frame.
+    .filter(|&ask| !(stirred && state(rig, ask)));
+    let handed = if anew {
+        ask.is_some_and(|ask| ask != emote::GET_UP && pick.is_some_and(|(name, _)| name == ask))
+    } else {
+        told.is_some_and(|told| told.handed)
+    };
+    let scrubbing =
+        beast && animator.scrub && !stirred && pick.is_some_and(|(name, _)| state(rig, name));
+    let own = match pick {
+        // Never quite at nought: a rest asked for none of itself poses
+        // nothing, which would leave the driver's own state showing under a
+        // slider that says the beast is standing.
+        Some((name, through)) if scrubbing => {
+            gesture::for_body(rig, name).map(|clip| (clip, through.max(f32::EPSILON)))
+        }
+        // A state, or anything else the driver was handed, is the driver's.
+        Some((name, _)) if beast && (state(rig, name) || handed) => None,
+        Some((name, through)) => gesture::for_body(rig, name).map(|clip| (clip, through)),
+        None => None,
+    };
+    let driver_aims = playing
+        .into_iter()
+        .chain(ask)
+        .any(|name| gesture::for_body(rig, name).is_some_and(|clip| aims(&clip)));
+    Gesturing {
+        anew,
+        stirred,
+        since: told.filter(|_| !anew).map_or(0.0, |told| told.since),
+        ask,
+        own,
+        driver_aims,
+        handed,
+        scrubbing,
+    }
+}
+
+/// How fast a body may be carried and still rest, in metres a second: the
+/// engine's own figure for a body being moved (engine #377, private there),
+/// which gets a beast up out of a state and keeps it from going into one.
+const STIR: f32 = 0.1;
+
+/// Whether the window is moving a body this frame as the engine counts it
+/// (#53): carried faster than [`STIR`], shown swimming or leaping, or still
+/// in the air. Read before the driver's frame, so a state is not posed from
+/// the slider over a body its driver will not let rest, and the slider does
+/// not read a way down the body is coming back up.
+fn stirred(animator: &Animator, driver: &AvatarDriver, speed: f32, gaiting: bool) -> bool {
+    (gaiting && speed.abs() >= STIR)
+        || animator.swim.is_some()
+        || animator.leap.is_some()
+        || driver.airborne().is_some()
+}
+
+/// The step a driver is run in through frames nobody is shown, in seconds:
+/// three of a display's.
+///
+/// Coarse because only where the frames end is kept, and that does not
+/// depend on the step: a state moves on in proportion to the time, and the
+/// springs cut a long frame into substeps of their own. Each is a whole
+/// drive, and getting a beast up and down again unseen is up to four and a
+/// half seconds of them.
+const UNSEEN_STEP: f32 = 1.0 / 20.0;
+
+/// Brings a body's driver to where the window says the body is, before its
+/// frame (#53), through frames nobody is shown; answers how many seconds it
+/// ran them for. Two cases, both on a frame the body is new to the pick.
+///
+/// **A body built under a state the window says it is part way into, or
+/// down in, is seated there.** The record editor rebuilds a body on every
+/// edit, so a beast that went down again each time could not be tuned while
+/// it sits: a new driver is asked the state and run through as much of its
+/// way down as the slider reads, and the body is drawn already there.
+///
+/// **A state posed from the slider and let go of for something that gets
+/// the beast up rises from the slider's point.** The driver's own state went
+/// on underneath, so it is down where the slider may say half way, and
+/// getting it up from there dropped the body into a full sit before it rose.
+/// So the driver is got up, unseen, and taken down to the slider's point,
+/// still under the slider's pose; the frame's own request then gets it up
+/// from part way down, which the driver does the way it was going.
+fn bring<'a>(
+    animator: &'a Animator,
+    driver: &mut AvatarDriver,
+    rig: &Rig,
+    frame: &Frame<'_>,
+    gesturing: &mut Gesturing<'a>,
+    told: Option<&'a Asked>,
+) -> f32 {
+    if !gesturing.anew {
+        return 0.0;
+    }
+    if let Some((name, through)) = &animator.gesture
+        && gesturing.ask == Some(name.as_str())
+        && *through > 0.0
+        && driver.gesture().is_none()
+        && let Some(down) = emote::seconds(rig, name)
+    {
+        let ran = drive_unseen(
+            animator,
+            driver,
+            rig,
+            frame,
+            gesturing,
+            name,
+            way_into(down, *through),
+        );
+        // Asked already, by the first of them.
+        gesturing.ask = None;
+        return ran;
+    }
+    if let Some(at) = animator.told.scrubbed
+        && !gesturing.scrubbing
+        && let Some(ask) = gesturing.ask
+        && let Some(was) = told
+            .and_then(|told| told.pick.as_deref())
+            .filter(|&was| was != ask)
+        && let (Some(down), Some((_, up))) = (emote::seconds(rig, was), emote::getting_up(rig, was))
+    {
+        let mut own = gesture::for_body(rig, was).map(|clip| (clip, at));
+        std::mem::swap(&mut gesturing.own, &mut own);
+        // Up from wherever the driver's own state has got to: from part way
+        // down at most `down`, from down `up`, and a step for the rounding.
+        drive_unseen(
+            animator,
+            driver,
+            rig,
+            frame,
+            gesturing,
+            emote::GET_UP,
+            down + up + UNSEEN_STEP,
+        );
+        drive_unseen(
+            animator,
+            driver,
+            rig,
+            frame,
+            gesturing,
+            was,
+            way_into(down, at),
+        );
+        std::mem::swap(&mut gesturing.own, &mut own);
+    }
+    0.0
+}
+
+/// Seconds into a state's way down of `down` seconds that put a beast
+/// `through` of the way down: past the end for all of it, so the driver is
+/// holding the state rather than a rounding short of the end, from which it
+/// would come back up the way it went instead of rising as the animal does.
+fn way_into(down: f32, through: f32) -> f32 {
+    if through >= 1.0 {
+        down + UNSEEN_STEP
+    } else {
+        through.max(0.0) * down
+    }
+}
+
+/// Drives a body through `seconds` of frames nobody is shown, asking `ask`
+/// of the first, and stops early once its driver is playing nothing; answers
+/// how many seconds it ran. `gesturing` is the frame's, and is left as it was.
+fn drive_unseen<'a>(
+    animator: &Animator,
+    driver: &mut AvatarDriver,
+    rig: &Rig,
+    frame: &Frame<'_>,
+    gesturing: &mut Gesturing<'a>,
+    ask: &'a str,
+    seconds: f32,
+) -> f32 {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a few seconds of sixtieths, and none for a negative span"
+    )]
+    let steps = (seconds / UNSEEN_STEP).ceil().max(0.0) as usize;
+    if steps == 0 {
+        return 0.0;
+    }
+    #[expect(clippy::cast_precision_loss, reason = "a few hundred steps")]
+    let step = seconds / steps as f32;
+    let unseen = Frame {
+        delta: step,
+        ..*frame
+    };
+    let asking = gesturing.ask.replace(ask);
+    let mut ran = 0.0;
+    for _ in 0..steps {
+        drive_body(animator, driver, rig, &unseen, gesturing);
+        gesturing.ask = None;
+        ran += step;
+        if driver.gesture().is_none() {
+            break;
+        }
+    }
+    gesturing.ask = asking;
+    ran
 }
 
 /// What one body's frame is, beside the window that is steering it.
@@ -887,6 +1476,7 @@ fn drive_body(
     driver: &mut AvatarDriver,
     rig: &Rig,
     frame: &Frame<'_>,
+    gesturing: &Gesturing<'_>,
 ) -> Option<symbios_avatar::anim::driver::Driven> {
     let (delta, cycle, clip) = (frame.delta, frame.cycle, frame.clip);
     let speed = animator.speed_of(rig, frame.picked);
@@ -902,17 +1492,18 @@ fn drive_body(
     // `Target::Gaze` track and one that does not, does not. So a wave
     // still lets the body look around while it waves — which is what a
     // waving body does — and a nod owns the head for as long as it runs.
-    let aimed = animator
-        .gesture
-        .as_ref()
-        .and_then(|(name, _)| gesture::for_body(rig, name))
-        .is_some_and(|clip| clip.tracks.iter().any(|track| track.target == Target::Gaze));
+    //
+    // A gesture the driver plays aims the head itself and stands its own
+    // glance aside for it, so all this window has to do then is not turn
+    // the head away (#53).
+    let aimed = gesturing.own_aims();
+    let own = gesturing.own.as_ref();
     // Over the locomotion and before the contacts are settled, which is
     // where authored motion goes: the legs keep the walk that carries
     // them, and the feet are planted after whatever was laid on top
     // (engine #253's order).
     let over_locomotion = |rig: &Rig, pose: &mut Pose| {
-        gesturing(rig, animator, pose);
+        lay_gesture(rig, own, pose);
         if let Some(clip) = clip {
             // After the gesture, so the two clip forms layer in the
             // order the engine describes them: goals first, angles over
@@ -937,8 +1528,8 @@ fn drive_body(
             // whole gesture rather than its gaze track alone, because
             // the clip is the only thing that knows which tracks those
             // are and every other track re-applies to the same value.
-            gesturing(rig, animator, pose);
-        } else {
+            lay_gesture(rig, own, pose);
+        } else if !gesturing.driver_aims {
             // A target at head height, applied after the gait, because
             // looking somewhere is a turn added to whatever the spine is
             // already doing.
@@ -980,6 +1571,13 @@ fn drive_body(
         idle: animator.idle,
         blend: animator.blend,
         pace_response: animator.pace_response,
+        // One number for how long a gesture takes, whoever plays it: a
+        // beast plays what it was asked for while it was down once it is up.
+        gesture_secs: GESTURE_TIME,
+        // And no rate limit. It is for a sender pasting one word four times;
+        // a pick in this window is one hand's deliberate choice, and dropping
+        // one would leave the row lit for a gesture nothing plays.
+        gesture_cooldown: 0.0,
         ..DriverConfig::default()
     });
     // A listener goes stiller than a body alone in a room, and a body
@@ -1015,6 +1613,9 @@ fn drive_body(
             .map(Showing::Swim)
             .or_else(|| animator.leap.map(Showing::Leap)),
         cycle: Some(cycle),
+        // A beast's state, and what gets it up out of one: see
+        // `plan_gesture`. Everything else this window lays on itself.
+        gesture: gesturing.ask,
         gait: (!matches!(animator.gait, GaitKind::Natural | GaitKind::Pattern(_)))
             .then_some(frame.picked),
         pattern: match animator.gait {
@@ -1132,19 +1733,24 @@ fn scanned_angle(elapsed: f32, speed: f32, limit: f32) -> f32 {
 /// which is also why it is not routed through [`Inputs::gesture`], where a
 /// request fires once and clears and a capture could not hold it at a phase.
 ///
+/// **Except a pick a driver is playing, or a beast's state** (#53), which
+/// keeps its own time, whether or not the driver has it yet: `resting` says
+/// the pick is one. The number is then the driver's progress, read back
+/// after its frame rather than run here.
+///
 /// The write is guarded on the gesture actually running, which is what keeps
 /// the change-detection signal in [`steer`] from latching on.
-fn advance_gesture(animator: &mut Animator, delta: f32) {
-    let scrubbing = animator.scrub;
+fn advance_gesture(animator: &mut Animator, delta: f32, resting: bool) {
+    let held = animator.scrub || animator.told.handed || resting;
     if let Some((_, through)) = &mut animator.gesture
-        && !scrubbing
+        && !held
     {
         *through = (*through + delta / GESTURE_TIME).min(1.0);
     }
 }
 
-/// Lays the procedural gesture over whatever the body is already doing, and
-/// says whether it aimed the head.
+/// Lays the procedural gesture this window plays over whatever the body is
+/// already doing.
 ///
 /// **Over, and before the baked clip**, so the two clip forms layer in the
 /// order the engine describes them: goals first, angles over them. A gesture
@@ -1156,14 +1762,10 @@ fn advance_gesture(animator: &mut Animator, delta: f32) {
 /// the name — a clip that aims the head carries a [`Target::Gaze`] track, and
 /// asking it beats keeping a list of which gestures involve the head, which
 /// would be wrong the moment the roster grew.
-fn gesturing(rig: &Rig, animator: &Animator, pose: &mut Pose) {
-    let Some((name, through)) = &animator.gesture else {
-        return;
-    };
-    let Some(gesture) = gesture::for_body(rig, name) else {
-        return;
-    };
-    gesture.apply(rig, pose, *through);
+fn lay_gesture(rig: &Rig, own: Option<&(Clip, f32)>, pose: &mut Pose) {
+    if let Some((gesture, through)) = own {
+        gesture.apply(rig, pose, *through);
+    }
 }
 
 /// Which way the sloped ground faces, for a given grade and camber.
@@ -1324,6 +1926,15 @@ pub fn animator_panel(
         .iter()
         .next()
         .map_or(2, |body| body.avatar.rig.ground_contacts().len());
+    // Which of the row's gestures are states on this body (#53), which the
+    // row says, and whose slider works otherwise.
+    let states: Vec<&str> = bodies.iter().next().map_or_else(Vec::new, |body| {
+        emote::ROSTER
+            .iter()
+            .copied()
+            .filter(|name| state(&body.avatar.rig, name))
+            .collect()
+    });
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -1340,7 +1951,7 @@ pub fn animator_panel(
         .default_pos(opens_at)
         .default_width(WINDOW_WIDTH)
         .show(ctx, |ui| {
-            locomotion_section(ui, &clips, &mut animator, legs);
+            locomotion_section(ui, &clips, &mut animator, legs, &states);
             ui.separator();
             ground_section(ui, &mut animator);
             ui.separator();
@@ -1361,6 +1972,7 @@ fn locomotion_section(
     clips: &Clips,
     animator: &mut Animator,
     legs: usize,
+    states: &[&str],
 ) {
     use bevy_egui::egui;
     let clipping = animator.clip.is_some();
@@ -1452,7 +2064,7 @@ fn locomotion_section(
         ui.toggle_value(&mut swim.carriage, "carriage");
     }
 
-    gesture_row(ui, animator, legs);
+    gesture_row(ui, animator, legs, states, !standing);
 }
 
 /// A four-legged body's gait: by speed, as the body would choose for itself,
@@ -1476,10 +2088,26 @@ fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
 }
 
 /// The gestures a body can be asked for, and how far into one it is.
+///
+/// On a beast, `states` names the gestures that are states (#53): its driver
+/// plays them, so the slider follows it rather than leading, and poses one
+/// only under hold - which is offered beside it, because the phase row's hold
+/// is not drawn for a body standing still, and a beast that is not standing
+/// still does not sit.
+///
+/// **And hold is offered here whenever it is on and `phase_hold` says the
+/// phase row is not offering it** (#53): a hold left on with nothing drawn to
+/// turn it off - a state's let go of under it, or `--phase` on a standing
+/// body - froze every later gesture at nought, a person's included.
 #[cfg(feature = "editor")]
-fn gesture_row(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator, legs: usize) {
+fn gesture_row(
+    ui: &mut bevy_egui::egui::Ui,
+    animator: &mut Animator,
+    legs: usize,
+    states: &[&str],
+    phase_hold: bool,
+) {
     use bevy_egui::egui;
-    use symbios_avatar::anim::emote;
     // **The gestures sit apart from the locomotion**, because they are not one
     // of the things being chosen between: a gesture is laid over whatever the
     // body is already doing, so it is its own row rather than another entry in
@@ -1498,18 +2126,80 @@ fn gesture_row(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator, legs: usiz
                 .gesture
                 .as_ref()
                 .is_some_and(|(chosen, _)| chosen == name);
-            if ui.selectable_label(playing, *name).clicked() {
-                animator.gesture = (!playing).then(|| ((*name).to_string(), 0.0));
+            let label = ui.selectable_label(playing, *name);
+            let label = if states.contains(name) {
+                label.on_hover_text(
+                    "a state: the beast goes down at its own pace and stays \
+                     down. Get Up, letting go of it or another gesture gets it \
+                     up, and the other gesture plays once it is; moving it gets \
+                     it up in a hurry, and it will not go down while it moves",
+                )
+            } else if *name == emote::GET_UP {
+                label.on_hover_text("gets a sitting or lying beast up where it is")
+            } else if playing && animator.told.busy {
+                label.on_hover_text(
+                    "the beast is playing it, and finishes what it has started; \
+                     another gesture plays in its place",
+                )
+            } else {
+                label
+            };
+            if label.clicked() {
+                click_gesture(animator, name);
             }
         }
     });
-    if let Some((_, through)) = &mut animator.gesture {
-        ui.add(
-            egui::Slider::new(through, 0.0..=1.0)
-                .text("through")
-                .fixed_decimals(2),
-        );
+    let handed = animator.told.handed;
+    let state = animator
+        .gesture
+        .as_ref()
+        .is_some_and(|(name, _)| states.contains(&name.as_str()));
+    let hold = state || (animator.scrub && !phase_hold);
+    if animator.gesture.is_none() && !hold {
+        return;
     }
+    ui.horizontal(|ui| {
+        if let Some((_, through)) = &mut animator.gesture {
+            // Followed while the driver plays it, and led only where this
+            // window poses it: a state under hold.
+            ui.add_enabled(
+                !handed || (state && animator.scrub),
+                egui::Slider::new(through, 0.0..=1.0)
+                    .text("through")
+                    .fixed_decimals(2),
+            )
+            .on_disabled_hover_text(
+                "the beast keeps its own pace: a state's way down, or a \
+                 gesture played once it is up. Hold poses a state at any \
+                 point of its way down",
+            );
+        }
+        if hold {
+            ui.toggle_value(&mut animator.scrub, "hold");
+        }
+    });
+}
+
+/// What a click on the gesture row's `name` does: picks it, or lets go of
+/// it if it is the pick.
+///
+/// **Except a gesture a beast's driver is playing that is not a state**
+/// (#53), which the engine plays to its end once started and has no way to
+/// stop: let go of, the row went dark over a beast still shaking. So it stays
+/// lit until it ends; another pick still plays in its place. One asked for
+/// while the beast was down and not yet playing is let go of as any pick
+/// is, and the driver drops it: letting go asks for `emote::GET_UP`, which
+/// clears what it was to play once up.
+#[cfg(feature = "editor")]
+fn click_gesture(animator: &mut Animator, name: &str) {
+    let lit = animator
+        .gesture
+        .as_ref()
+        .is_some_and(|(chosen, _)| chosen == name);
+    if lit && animator.told.busy {
+        return;
+    }
+    animator.gesture = (!lit).then(|| (name.to_string(), 0.0));
 }
 
 /// The controls that only mean anything while the gait is walking: its pace,
@@ -1704,6 +2394,27 @@ mod tests {
     /// fixed sixtieth of a second and the results the same on a fast machine
     /// and a slow one.
     fn app() -> App {
+        app_of(Archetype::default())
+    }
+
+    /// The same around one beast, the default dog (#53).
+    fn beast_app() -> App {
+        app_of(Archetype::Quadruped(
+            symbios_avatar::QuadrupedParams::default(),
+        ))
+    }
+
+    /// The same around one body of `archetype`.
+    fn app_of(archetype: Archetype) -> App {
+        let mut app = bare_app();
+        app.world_mut()
+            .spawn(SpawnAvatar::from(AvatarRecord::new("Driven", archetype)));
+        tick(&mut app);
+        app
+    }
+
+    /// The same with no body in it yet.
+    fn bare_app() -> App {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins.build().disable::<bevy::time::TimePlugin>(),
@@ -1723,11 +2434,6 @@ mod tests {
             Update,
             (build_requested_avatars, adopt_bodies, steer, count_writes).chain(),
         );
-        app.world_mut().spawn(SpawnAvatar::from(AvatarRecord::new(
-            "Driven",
-            Archetype::default(),
-        )));
-        tick(&mut app);
         app
     }
 
@@ -2047,7 +2753,6 @@ mod tests {
     }
 
     /// The one body's rig.
-    #[cfg(feature = "builtin-clips")]
     fn rig_of(app: &mut App) -> symbios_avatar::Rig {
         let mut bodies = app.world_mut().query::<&AvatarBody>();
         bodies
@@ -2531,6 +3236,829 @@ mod tests {
             .clone();
         for kind in GaitKind::PATTERNS {
             assert_eq!(kind.of(&rig), GaitKind::Natural.of(&rig), "{kind:?}");
+        }
+    }
+
+    /// Picks a gesture in the row, or lets go of the pick, as a click does.
+    fn pick(app: &mut App, name: Option<&str>) {
+        app.world_mut().resource_mut::<Animator>().gesture =
+            name.map(|name| (name.to_string(), 0.0));
+    }
+
+    /// The pick the row holds.
+    fn picked(app: &App) -> Option<(String, f32)> {
+        app.world().resource::<Animator>().gesture.clone()
+    }
+
+    /// What the one body's driver is playing, and how long it has.
+    fn playing(app: &mut App) -> Option<(String, f32)> {
+        let mut drivers = app.world_mut().query::<&AvatarDriver>();
+        drivers
+            .iter(app.world())
+            .next()
+            .and_then(|driver| driver.gesture())
+            .map(|(name, elapsed)| (name.to_string(), elapsed))
+    }
+
+    /// Where every joint of the one body is drawn.
+    fn drawn(app: &mut App, rig: &Rig) -> Vec<Vec3> {
+        posed(app).forward(rig).positions
+    }
+
+    /// How high the body's hips are drawn.
+    fn hips(app: &mut App, rig: &Rig) -> f32 {
+        let pelvis = *rig.in_zone(Zone::Pelvis).first().expect("a pelvis");
+        drawn(app, rig)[pelvis].y
+    }
+
+    /// Runs `frames` frames and answers the furthest any joint moved in one
+    /// of them: a snap is a body's worth of travel in a frame.
+    fn worst_step(app: &mut App, rig: &Rig, frames: usize) -> f32 {
+        let mut last = drawn(app, rig);
+        let mut worst = 0.0f32;
+        for _ in 0..frames {
+            tick(app);
+            let now = drawn(app, rig);
+            let step = last
+                .iter()
+                .zip(&now)
+                .map(|(a, b)| a.distance(*b))
+                .fold(0.0f32, f32::max);
+            worst = worst.max(step);
+            last = now;
+        }
+        worst
+    }
+
+    /// Frames in `seconds`, rounded up.
+    fn frames(seconds: f32) -> usize {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a few seconds of frames"
+        )]
+        let frames = (seconds * 60.0).ceil() as usize;
+        frames
+    }
+
+    /// A beast standing still, blinking and scanning nothing, sat down and
+    /// held there for `held` seconds; and how high its hips stood first.
+    fn sat(held: f32) -> (App, Rig, f32) {
+        let mut app = beast_app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+        }
+        tick(&mut app);
+        let rig = rig_of(&mut app);
+        let standing = hips(&mut app, &rig);
+        pick(&mut app, Some("Sit"));
+        let down = emote::seconds(&rig, "Sit").expect("a beast sits");
+        for _ in 0..frames(down + held) {
+            tick(&mut app);
+        }
+        (app, rig, standing)
+    }
+
+    #[test]
+    fn a_beasts_sit_goes_down_at_its_own_pace_and_is_held() {
+        // #53, engine #377. The window ran every gesture over its own second
+        // and a half, so a dog's sit landed half a second late, and a state
+        // is the driver's to play. Run with nothing else moving, so the
+        // still-body rule has to know a driver's state is motion: it writes
+        // nothing to the window to wake it.
+        let mut app = beast_app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+        }
+        tick(&mut app);
+        let rig = rig_of(&mut app);
+        let standing = hips(&mut app, &rig);
+        let down = emote::seconds(&rig, "Sit").expect("a beast sits");
+        pick(&mut app, Some("Sit"));
+        for _ in 0..frames(down / 2.0) {
+            tick(&mut app);
+        }
+        let half = hips(&mut app, &rig);
+        // Two frames past its own seconds, for the frame the pick is asked on.
+        for _ in frames(down / 2.0)..frames(down) + 2 {
+            tick(&mut app);
+        }
+        let landed = hips(&mut app, &rig);
+        let through = picked(&app).expect("still picked").1;
+        for _ in 0..frames(3.0) {
+            tick(&mut app);
+        }
+        let held = hips(&mut app, &rig);
+        let depth = standing - held;
+        assert!(depth > 0.1, "the sit lowered the hips {depth} m");
+        assert!(
+            (standing - half) > 0.1 * depth && (standing - half) < 0.9 * depth,
+            "half way through its time the sit was {:.0}% down",
+            (standing - half) / depth * 100.0
+        );
+        assert!(
+            (landed - held).abs() < 2.0e-3,
+            "at its own {down:.2} s the sit stood {:.1} mm off where it holds",
+            (landed - held) * 1000.0
+        );
+        assert!(
+            (through - 1.0).abs() < 1.0e-6,
+            "the slider read {through} at the end of the way down"
+        );
+        assert_eq!(
+            playing(&mut app).map(|(name, _)| name).as_deref(),
+            Some("Sit"),
+            "three seconds on, the beast is no longer in its sit"
+        );
+    }
+
+    #[test]
+    fn letting_go_of_a_sit_or_asking_get_up_rises_without_a_snap() {
+        // #53. Letting go of the pick set no gesture at all, so a sitting dog
+        // stood up in one frame. Both ways out get the beast up in the
+        // driver's own order and time, and "Get Up" lets go of itself.
+        for route in [None, Some(emote::GET_UP)] {
+            let (mut app, rig, standing) = sat(1.0);
+            let up = emote::getting_up(&rig, "Sit")
+                .expect("a sit to rise from")
+                .1;
+            pick(&mut app, route);
+            let rising = worst_step(&mut app, &rig, frames(up / 2.0));
+            let midway = playing(&mut app);
+            let rest = worst_step(&mut app, &rig, frames(up / 2.0 + 0.5));
+            let worst = rising.max(rest);
+            assert!(
+                midway.is_some_and(|(name, _)| name == "Sit"),
+                "{route:?}: half way through its rise the beast was not rising"
+            );
+            assert!(
+                worst < 0.1,
+                "{route:?}: a joint moved {:.0} mm in one frame getting up",
+                worst * 1000.0
+            );
+            assert_eq!(playing(&mut app), None, "{route:?}: it never got up");
+            assert_eq!(picked(&app), None, "{route:?}: the row still holds a pick");
+            let stood = hips(&mut app, &rig);
+            assert!(
+                (stood - standing).abs() < 0.01,
+                "{route:?}: up, the hips stood {:.0} mm off where they began",
+                (stood - standing) * 1000.0
+            );
+        }
+    }
+
+    #[test]
+    fn a_gesture_picked_while_down_plays_once_the_beast_is_up() {
+        // #53. Another pick replaced the sit outright, so the dog stood up in
+        // one frame to shake itself. The driver gets it up first - exactly as
+        // it gets up from a sit let go of, with nothing of the shake laid
+        // over it and the shake's clock not yet running - and then plays it;
+        // a pick while it plays is played in its place, as a click on a
+        // person's row is; and once one is done the row holds it at its end,
+        // as it holds a gesture this window plays. A shake because it braces
+        // from its first moment, so one laid over the rise shows.
+        let (mut app, rig, _) = sat(1.0);
+        let (mut plain, _, _) = sat(1.0);
+        let up = emote::getting_up(&rig, "Sit")
+            .expect("a sit to rise from")
+            .1;
+        pick(&mut app, Some("Shake"));
+        pick(&mut plain, None);
+        for _ in 0..frames(up) - 2 {
+            tick(&mut app);
+            tick(&mut plain);
+            assert!(
+                posed(&mut app) == posed(&mut plain),
+                "the window laid the shake over the beast getting up"
+            );
+        }
+        let rising = playing(&mut app);
+        let early = picked(&app).expect("still picked").1;
+        let shaking = worst_step(&mut app, &rig, 6);
+        let shake = playing(&mut app);
+        pick(&mut app, Some("Wag"));
+        tick(&mut app);
+        let wag = playing(&mut app);
+        let rest = worst_step(&mut app, &rig, frames(GESTURE_TIME));
+        assert!(
+            rising.is_some_and(|(name, _)| name == "Sit"),
+            "the shake did not wait for the beast to get up"
+        );
+        assert!(
+            early < 0.05,
+            "the shake's clock ran to {early} before it played"
+        );
+        assert!(
+            shake.is_some_and(|(name, _)| name == "Shake"),
+            "the beast got up and did not shake"
+        );
+        assert!(
+            wag.is_some_and(|(name, _)| name == "Wag"),
+            "a pick while the beast shook was dropped"
+        );
+        let worst = shaking.max(rest);
+        assert!(
+            worst < 0.1,
+            "a joint moved {:.0} mm in one frame",
+            worst * 1000.0
+        );
+        assert_eq!(playing(&mut app), None, "the wag never finished");
+        assert_eq!(
+            picked(&app),
+            Some(("Wag".to_string(), 1.0)),
+            "a played gesture is held at its end"
+        );
+    }
+
+    #[test]
+    fn walking_a_sitting_beast_gets_it_up_in_a_hurry_and_lets_the_pick_go() {
+        // #53. A sit left picked under a walk sat the dog down over its own
+        // legs. Moved, it gets up in two fifths of its own time, the row lets
+        // go of a state it is no longer in, and a sit asked of it while it
+        // walks is let go rather than kept lit over a walking body.
+        let (mut app, rig, _) = sat(1.0);
+        let up = emote::getting_up(&rig, "Sit")
+            .expect("a sit to rise from")
+            .1;
+        app.world_mut().resource_mut::<Animator>().walking = true;
+        let rising = worst_step(&mut app, &rig, frames(up * emote::HURRY) + 2);
+        assert_eq!(
+            playing(&mut app),
+            None,
+            "a walked beast was still getting up"
+        );
+        assert_eq!(
+            picked(&app),
+            None,
+            "the row kept a sit the beast got up from"
+        );
+        // Up in two fifths of its own time: its fastest joint moves 106 mm
+        // a frame, the engine's own hurry, and a snap moves it the whole way.
+        assert!(
+            rising < 0.11,
+            "a joint moved {:.0} mm in one frame getting up",
+            rising * 1000.0
+        );
+        pick(&mut app, Some("Sit"));
+        tick(&mut app);
+        assert_eq!(playing(&mut app), None, "a walking beast sat down");
+        assert_eq!(picked(&app), None, "the row kept a sit the beast refused");
+    }
+
+    #[test]
+    fn hold_poses_a_state_where_the_slider_puts_it_and_lets_go_blended() {
+        // #53. Under hold the slider poses the way down itself, as the
+        // driver's own clip is played - even at nought, where a rest asked
+        // for none of itself poses nothing and would leave the driver's sit,
+        // going on underneath, showing - and letting go of hold blends into
+        // the sit the driver holds rather than jumping to it.
+        let (mut app, rig, standing) = sat(1.0);
+        let held = hips(&mut app, &rig);
+        let at = |app: &mut App, through: f32| {
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.scrub = true;
+                animator.gesture = Some(("Sit".to_string(), through));
+            }
+            for _ in 0..20 {
+                tick(app);
+            }
+            hips(app, &rig)
+        };
+        let (nought, half, whole) = (at(&mut app, 0.0), at(&mut app, 0.5), at(&mut app, 1.0));
+        assert!(
+            (nought - standing).abs() < 0.01,
+            "held at nought, the hips stood {:.0} mm off standing",
+            (nought - standing) * 1000.0
+        );
+        assert!(
+            half < nought - 0.02 && half > whole + 0.02,
+            "half way read {half}"
+        );
+        assert!(
+            (whole - held).abs() < 2.0e-3,
+            "held at one, the hips stood {:.1} mm off the driver's sit",
+            (whole - held) * 1000.0
+        );
+        at(&mut app, 0.0);
+        app.world_mut().resource_mut::<Animator>().scrub = false;
+        let worst = worst_step(&mut app, &rig, 30);
+        // The blend's whole sit from nought, in its 0.15 s: its worst frame
+        // moves a joint 153 mm, about a third of the hips' 0.42 m of travel,
+        // and a jump would move it all in one.
+        assert!(
+            worst < 0.16,
+            "letting go of hold moved a joint {:.0} mm in one frame",
+            worst * 1000.0
+        );
+        assert!(
+            (hips(&mut app, &rig) - held).abs() < 2.0e-3,
+            "let go of, the slider did not hand the beast back to its sit"
+        );
+    }
+
+    #[test]
+    fn the_gaze_comes_back_blended_when_a_state_ends() {
+        // #53. A state aims the head, so the window's gaze stands aside for
+        // it, and whether it does is read before the driver's frame: on the
+        // frame the beast is up the head stood where the body had it, and
+        // the next frame's gaze turned it in one - or, with nothing else
+        // moving and no blend to wait out, never turned it back at all. Held
+        // off to the side, so the turn is all of the slider's.
+        for blend in [Animator::default().blend, 0.0] {
+            let (mut app, rig, _) = sat(1.0);
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.gaze_angle = 0.6;
+                animator.blend = blend;
+            }
+            let head = *rig.in_zone(Zone::Head).first().expect("a head");
+            let yaw = |app: &mut App| {
+                let out = posed(app).forward(&rig).rotations[head]
+                    * symbios_avatar::rig::landmark::FORWARD;
+                out.x.atan2(out.z)
+            };
+            for _ in 0..5 {
+                tick(&mut app);
+            }
+            let sitting = yaw(&mut app);
+            assert!(
+                sitting.abs() < 0.05,
+                "blend {blend}: the window turned a sitting beast's head {sitting:.2} rad"
+            );
+            let up = emote::getting_up(&rig, "Sit")
+                .expect("a sit to rise from")
+                .1;
+            pick(&mut app, None);
+            let mut last = sitting;
+            let mut worst = 0.0f32;
+            for _ in 0..frames(up + 1.0) {
+                tick(&mut app);
+                let now = yaw(&mut app);
+                worst = worst.max((now - last).abs());
+                last = now;
+            }
+            assert!(
+                last > 0.2,
+                "blend {blend}: up, the head did not turn to the slider: {last:.2} rad"
+            );
+            assert!(
+                blend <= 0.0 || worst < 0.3,
+                "the head turned {worst:.2} rad in one frame as the beast got up"
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_picked_before_its_beast_is_built_is_asked_of_it_once_it_is() {
+        // #53. The pick is asked of a driver on the frame it changes, so a
+        // frame with no body to ask must not count as telling one: the
+        // viewer's `--gesture Sit` is picked before anything is built. In a
+        // window with nothing else moving, so the ask cannot ride a blink:
+        // a new body writes nothing to the window to wake on.
+        let mut app = bare_app();
+        {
+            let mut animator = app.world_mut().resource_mut::<Animator>();
+            animator.blinking = false;
+            animator.tracking = false;
+        }
+        pick(&mut app, Some("Sit"));
+        tick(&mut app);
+        app.world_mut().spawn(SpawnAvatar::from(AvatarRecord::new(
+            "Late",
+            Archetype::Quadruped(symbios_avatar::QuadrupedParams::default()),
+        )));
+        tick(&mut app);
+        tick(&mut app);
+        assert_eq!(
+            playing(&mut app).map(|(name, _)| name).as_deref(),
+            Some("Sit"),
+            "a beast built after its sit was picked never sat"
+        );
+    }
+
+    #[test]
+    fn a_persons_gesture_runs_on_the_windows_clock_and_not_the_drivers() {
+        // #53. Only a beast's states are its driver's: a person's gesture is
+        // played by this window over its own second and a half, scrubbable,
+        // as before.
+        let mut app = app();
+        pick(&mut app, Some("Greeting"));
+        for _ in 0..45 {
+            tick(&mut app);
+        }
+        assert_eq!(
+            playing(&mut app),
+            None,
+            "a person's wave went to the driver"
+        );
+        let through = picked(&app).expect("still picked").1;
+        assert!(
+            (through - 0.5).abs() < 0.02,
+            "three quarters of a second into a wave the slider read {through}"
+        );
+    }
+
+    /// The default dog's archetype.
+    fn dog() -> Archetype {
+        Archetype::Quadruped(symbios_avatar::QuadrupedParams::default())
+    }
+
+    /// Despawns every body and asks for `record` in their place, as the
+    /// record editor does on every edit, re-roll and change of archetype.
+    fn rebuild_as(app: &mut App, record: AvatarRecord) {
+        let mut bodies = app.world_mut().query_filtered::<Entity, With<AvatarBody>>();
+        let old: Vec<Entity> = bodies.iter(app.world()).collect();
+        for body in old {
+            app.world_mut().despawn(body);
+        }
+        app.world_mut().spawn(SpawnAvatar::from(record));
+    }
+
+    /// How far below its bind pose the one body's hips are drawn: a beast
+    /// down in a state has them well below, standing they are not.
+    fn hips_down(app: &mut App) -> f32 {
+        let rig = rig_of(app);
+        let pelvis = *rig.in_zone(Zone::Pelvis).first().expect("a pelvis");
+        rig.joints[pelvis].position.y - hips(app, &rig)
+    }
+
+    #[test]
+    fn a_sitting_beast_rebuilt_rerolled_or_reshaped_stays_down_and_keeps_its_pick() {
+        // #53. The record editor despawns and rebuilds the body on every
+        // edit, and the window told its pick once for every body: the new
+        // one's driver was never asked to sit, so it stood, and the row let
+        // go of a sit it was not in. Each body is asked for itself, and one
+        // built under a state the slider has it down in is drawn down there
+        // from its first frame, so a sitting body can be tuned as it sits.
+        let mut rerolled = AvatarRecord::new("Driven", dog());
+        rerolled.reroll(11);
+        let horse = AvatarRecord::new(
+            "Driven",
+            Archetype::Quadruped(symbios_avatar::QuadrupedParams {
+                family: symbios_avatar::Family::Horse,
+                ..symbios_avatar::QuadrupedParams::default()
+            }),
+        );
+        for (what, record) in [
+            ("rebuilt", AvatarRecord::new("Driven", dog())),
+            ("rerolled", rerolled),
+            ("a horse", horse),
+        ] {
+            let (mut app, rig, _) = sat(1.0);
+            let held = hips(&mut app, &rig);
+            rebuild_as(&mut app, record);
+            tick(&mut app);
+            let first = hips_down(&mut app);
+            if what == "rebuilt" {
+                let drawn = hips(&mut app, &rig);
+                assert!(
+                    (drawn - held).abs() < 2.0e-3,
+                    "{what}: on its first frame the hips stood {:.1} mm off the sit",
+                    (drawn - held) * 1000.0
+                );
+            }
+            for _ in 0..frames(2.0) {
+                tick(&mut app);
+            }
+            assert!(
+                first > 0.1 && (hips_down(&mut app) - first).abs() < 2.0e-3,
+                "{what}: the hips came {first:.3} m down on the first frame and \
+                 then moved to {:.3}",
+                hips_down(&mut app)
+            );
+            assert_eq!(
+                playing(&mut app).map(|(name, _)| name).as_deref(),
+                Some("Sit"),
+                "{what}: the new body is not sitting"
+            );
+            assert_eq!(
+                picked(&app),
+                Some(("Sit".to_string(), 1.0)),
+                "{what}: the row let go of the sit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_beast_spawned_while_one_sits_leaves_it_sitting() {
+        // #53. One window-wide record of what the drivers were told made a
+        // second body's fresh driver look like a state the beast had left, so
+        // the row let go of the sit and the first beast stood up.
+        let (mut app, rig, _) = sat(1.0);
+        let held = hips(&mut app, &rig);
+        let mut bodies = app.world_mut().query_filtered::<Entity, With<AvatarBody>>();
+        let first = bodies.single(app.world()).expect("one body");
+        app.world_mut()
+            .spawn(SpawnAvatar::from(AvatarRecord::new("Second", dog())));
+        for _ in 0..frames(1.0) {
+            tick(&mut app);
+        }
+        let mut drivers = app.world_mut().query::<&AvatarDriver>();
+        let sitting = drivers
+            .iter(app.world())
+            .filter(|driver| driver.gesture().is_some_and(|(name, _)| name == "Sit"))
+            .count();
+        assert_eq!(sitting, 2, "both beasts should be sitting");
+        assert_eq!(
+            picked(&app),
+            Some(("Sit".to_string(), 1.0)),
+            "the row let go"
+        );
+        let pose = app
+            .world()
+            .get::<AvatarPose>(first)
+            .expect("the first body is posed")
+            .0
+            .clone();
+        let pelvis = *rig.in_zone(Zone::Pelvis).first().expect("a pelvis");
+        let drawn = pose.forward(&rig).positions[pelvis].y;
+        assert!(
+            (drawn - held).abs() < 2.0e-3,
+            "the first beast's hips moved {:.1} mm",
+            (drawn - held) * 1000.0
+        );
+    }
+
+    #[test]
+    fn letting_go_of_a_held_state_rises_from_where_the_slider_has_it() {
+        // #53. Under hold the slider poses the way down while the driver's
+        // own sit goes on underneath, and letting go of the pick - or asking
+        // "Get Up" - got the beast up from that sit: from the slider's 0.3,
+        // nearly standing, the blend carried the hips down to the full sit
+        // and the beast rose from there. It rises from where the slider has
+        // it, as a beast stopped part way down comes back up the way it went.
+        for (route, at) in [(None, 0.3), (Some(emote::GET_UP), 0.3), (None, 1.0)] {
+            let (mut app, rig, standing) = sat(1.0);
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.scrub = true;
+                animator.gesture = Some(("Sit".to_string(), at));
+            }
+            for _ in 0..20 {
+                tick(&mut app);
+            }
+            let posed_at = hips(&mut app, &rig);
+            pick(&mut app, route);
+            let up = emote::getting_up(&rig, "Sit")
+                .expect("a sit to rise from")
+                .1;
+            let (mut lowest, mut last, mut worst) = (posed_at, drawn(&mut app, &rig), 0.0f32);
+            for _ in 0..frames(up + 0.5) {
+                tick(&mut app);
+                lowest = lowest.min(hips(&mut app, &rig));
+                let now = drawn(&mut app, &rig);
+                let step = last
+                    .iter()
+                    .zip(&now)
+                    .map(|(a, b)| a.distance(*b))
+                    .fold(0.0f32, f32::max);
+                worst = worst.max(step);
+                last = now;
+            }
+            assert!(
+                lowest > posed_at - 5.0e-3,
+                "{route:?} at {at}: from {posed_at:.3} the hips went down to {lowest:.3} \
+                 before rising"
+            );
+            // The beast's own way up, from part way down or from its sit,
+            // moves its fastest joint 34 and 52 mm a frame, which is the
+            // engine's to answer for: the bound is for the window's part,
+            // which adds nothing to it.
+            assert!(
+                worst < 0.055,
+                "{route:?} at {at}: a joint moved {:.0} mm in one frame",
+                worst * 1000.0
+            );
+            assert_eq!(
+                playing(&mut app),
+                None,
+                "{route:?} at {at}: it never got up"
+            );
+            assert!(
+                (hips(&mut app, &rig) - standing).abs() < 0.01,
+                "{route:?} at {at}: up, the hips stood {:.0} mm off where they began",
+                (hips(&mut app, &rig) - standing) * 1000.0
+            );
+        }
+    }
+
+    #[test]
+    fn the_slider_reads_the_way_down_only_while_the_body_is_on_it() {
+        // #53. The readout was the driver's count over the way down's time,
+        // whatever the driver was doing: a sit picked again while the beast
+        // was still getting up from the last read one all the way up, then
+        // dropped, and a beast walked off part way down read its way down
+        // climbing while it rose. It follows the pick's own way down and
+        // stays where it was otherwise, so it never runs back nor jumps.
+        let (mut app, rig, _) = sat(1.0);
+        let down = emote::seconds(&rig, "Sit").expect("a beast sits");
+        // One frame's share of the way down, and a little for the rounding.
+        let most = 1.0 / 60.0 / down + 1.0e-4;
+        pick(&mut app, None);
+        for _ in 0..20 {
+            tick(&mut app);
+        }
+        pick(&mut app, Some("Sit"));
+        let mut last = 0.0f32;
+        for _ in 0..frames(3.0) {
+            tick(&mut app);
+            let through = picked(&app).expect("still picked").1;
+            assert!(
+                through >= last && through - last <= most,
+                "picked again while rising, the slider went from {last} to {through}"
+            );
+            last = through;
+        }
+        assert!((last - 1.0).abs() < 1.0e-6, "the sit read {last} once down");
+
+        let mut app = beast_app();
+        tick(&mut app);
+        pick(&mut app, Some("Sit"));
+        for _ in 0..30 {
+            tick(&mut app);
+        }
+        let before = picked(&app).expect("still picked").1;
+        app.world_mut().resource_mut::<Animator>().walking = true;
+        while let Some((_, through)) = picked(&app) {
+            assert!(
+                (through - before).abs() < 1.0e-6,
+                "walked part way down, the slider went from {before} to {through}"
+            );
+            tick(&mut app);
+        }
+    }
+
+    #[test]
+    fn hold_never_poses_a_state_on_a_beast_that_will_not_rest() {
+        // #53. Under hold, a sit picked on a walking beast slipped past the
+        // let-go - the driver refused it, and a scrub was exempt - and the
+        // row held it at its end, posing a full sit over the walk. The beast
+        // is drawn exactly as one walking with nothing picked, from the
+        // first frame, and the row lets go.
+        let walking = || {
+            let mut app = beast_app();
+            {
+                let mut animator = app.world_mut().resource_mut::<Animator>();
+                animator.walking = true;
+                animator.scrub = true;
+            }
+            tick(&mut app);
+            app
+        };
+        let (mut app, mut plain) = (walking(), walking());
+        pick(&mut app, Some("Sit"));
+        for _ in 0..10 {
+            tick(&mut app);
+            tick(&mut plain);
+            assert!(
+                posed(&mut app) == posed(&mut plain),
+                "a sit was posed over a walking beast"
+            );
+        }
+        assert_eq!(picked(&app), None, "the row kept a sit the beast refused");
+    }
+
+    /// The text one frame of the motion window's locomotion section shows
+    /// for `animator`, read through AccessKit.
+    #[cfg(feature = "editor")]
+    fn offered(animator: &mut Animator, legs: usize, states: &[&str]) -> Vec<String> {
+        use bevy_egui::egui;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let clips = Clips::default();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| locomotion_section(ui, &clips, animator, legs, states),
+        );
+        output
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit is on")
+            .nodes
+            .iter()
+            .filter_map(|(_, node)| node.label().or_else(|| node.value()).map(str::to_owned))
+            .collect()
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn hold_left_on_is_offered_wherever_it_freezes_a_gesture() {
+        // #53. The state's hold is drawn only while a state is picked, and
+        // the phase row's only while the body is not standing, so a hold
+        // turned on for a sit and left on as the sit was let go of was drawn
+        // nowhere: every later gesture stood frozen at nought - a wag, and
+        // after a rebuild a person's wave - with nothing to turn it off.
+        let (mut app, rig, _) = sat(0.2);
+        let states: Vec<&str> = emote::ROSTER
+            .iter()
+            .copied()
+            .filter(|name| state(&rig, name))
+            .collect();
+        app.world_mut().resource_mut::<Animator>().scrub = true;
+        for _ in 0..5 {
+            tick(&mut app);
+        }
+        pick(&mut app, None);
+        for _ in 0..frames(2.0) {
+            tick(&mut app);
+        }
+        let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
+        assert!(animator.scrub, "the hold was let go of on its own");
+        assert!(
+            offered(&mut animator, 4, &states)
+                .iter()
+                .any(|label| label == "hold"),
+            "a hold left on over a standing beast was drawn nowhere"
+        );
+        animator.gesture = Some(("Wag".to_string(), 0.0));
+        assert!(
+            offered(&mut animator, 4, &states)
+                .iter()
+                .any(|label| label == "hold"),
+            "a wag frozen under hold was offered no hold"
+        );
+        animator.gesture = None;
+        *app.world_mut().resource_mut::<Animator>() = animator;
+        rebuild_as(&mut app, AvatarRecord::new("Person", Archetype::default()));
+        tick(&mut app);
+        pick(&mut app, Some("Greeting"));
+        tick(&mut app);
+        let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
+        assert!(
+            offered(&mut animator, 2, &[])
+                .iter()
+                .any(|label| label == "hold"),
+            "a person's wave frozen under hold was offered no hold"
+        );
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn a_gesture_the_beast_is_playing_stays_lit_until_it_ends() {
+        // #53. A shake picked while the beast sits is the driver's, played
+        // once it is up, and once started the engine plays it to its end:
+        // clicked off, the row went dark over a beast still shaking. It
+        // stays lit until it ends. Clicked off while the beast is still
+        // getting up, before it plays, it is dropped and never plays.
+        let click = |app: &mut App, name: &str| {
+            click_gesture(&mut app.world_mut().resource_mut::<Animator>(), name);
+        };
+        let (mut app, rig, _) = sat(1.0);
+        let up = emote::getting_up(&rig, "Sit")
+            .expect("a sit to rise from")
+            .1;
+        click(&mut app, "Shake");
+        let mut waited = 0;
+        while playing(&mut app).is_none_or(|(name, _)| name != "Shake") {
+            assert!(waited < frames(up + 0.5), "the beast never shook");
+            tick(&mut app);
+            waited += 1;
+        }
+        tick(&mut app);
+        click(&mut app, "Shake");
+        assert_eq!(
+            picked(&app).map(|(name, _)| name).as_deref(),
+            Some("Shake"),
+            "the row went dark over a beast still shaking"
+        );
+        for _ in 0..frames(GESTURE_TIME) {
+            tick(&mut app);
+        }
+        assert_eq!(playing(&mut app), None, "the shake never ended");
+        assert_eq!(
+            picked(&app),
+            Some(("Shake".to_string(), 1.0)),
+            "held at its end"
+        );
+        click(&mut app, "Shake");
+        assert_eq!(
+            picked(&app),
+            None,
+            "a shake that has ended was not let go of"
+        );
+
+        let (mut app, _, _) = sat(1.0);
+        click(&mut app, "Shake");
+        for _ in 0..5 {
+            tick(&mut app);
+        }
+        click(&mut app, "Shake");
+        assert_eq!(picked(&app), None, "a shake not yet playing was kept");
+        for _ in 0..frames(up + GESTURE_TIME) {
+            tick(&mut app);
+            assert!(
+                playing(&mut app).is_none_or(|(name, _)| name != "Shake"),
+                "a shake let go of before it played played anyway"
+            );
         }
     }
 }

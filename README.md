@@ -212,6 +212,22 @@ expression and a held viseme; where the gaze is aimed and how far the chain may
 turn; and, as readouts, how far the footing solve had to move the feet and how
 many contacts it could not reach.
 
+A gesture plays once over a second and a half and is held at its end, and the
+"through" slider scrubs it. **A beast's Sit and Lie Down are states** instead,
+and the window plays them through the same `AvatarDriver`, so they move as an
+application's would: picked, the beast goes down at its own pace and stays
+down; letting go of the pick, picking "Get Up" or picking another gesture gets
+it up in the animal's own order, and the other gesture plays once it is up;
+walking, swimming or leaping it gets it up in a hurry, and the row lets go of a
+state the beast is no longer in. The slider reads how far down the beast is:
+it follows its own way down and stays at one while the beast is down, and
+while something gets the beast up it stays where it was. With "hold" on it
+poses a state at any point of the way down, and letting go of the state there
+gets the beast up from that point; "hold" is drawn beside the slider for as
+long as it is on and the phase row is not showing it. A body the record editor
+rebuilds while it sits is drawn sitting from its first frame, so a sitting
+beast can be tuned as it sits.
+
 The two ground controls are two axes rather than one because a plane has two:
 **grade** is the hill the body walks up or down, along `+z` where it faces, and
 **camber** is the one it stands across, along `+x`. Together they reach every

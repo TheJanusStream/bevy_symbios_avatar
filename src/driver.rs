@@ -128,6 +128,14 @@ pub struct Drive {
     /// **Taken by the drive**, so setting it is a request that fires once and a
     /// consumer never has to remember to clear it. A name the roster does not
     /// carry is ignored and spends no cooldown.
+    ///
+    /// **On four legs, Sit and Lie Down are states** (engine #377): asked for
+    /// once, the beast goes down at its own pace and stays down until
+    /// something gets it up - its being moved, leaving the ground or
+    /// swimming, which gets it up in a hurry; another gesture, which it gets
+    /// up for and then plays; or the engine's `emote::GET_UP`, "Get Up", which
+    /// gets it up where it is. The motion window plays a beast's states
+    /// through this same driver (#53), so what it shows is what this gets.
     pub gesture: Option<String>,
     /// Whether an editor is holding the body, and how.
     pub hold: Hold,
