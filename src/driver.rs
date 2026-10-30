@@ -322,7 +322,10 @@ pub fn drive_avatar_bodies(
         let Some(driven) = driver.drive(&body.avatar.rig, &inputs, level_ground) else {
             continue;
         };
-        commands.entity(entity).insert((
+        // `try_insert`, because a body may leave in the frame it is driven: a
+        // despawn queued ahead of this one lands first in the flush, and a plain
+        // `insert` on a despawned entity panics (#54).
+        commands.entity(entity).try_insert((
             Drove::from(&driven),
             AvatarPose(driven.pose),
             AvatarClosure(driven.closure),
@@ -398,6 +401,31 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(1.0 / 60.0));
         app.update();
+    }
+
+    /// A body that leaves in the frame it is driven takes the frame's pose with
+    /// it (#54): a despawn ahead of the drive's own commands lands first in the
+    /// flush, as a peer's departure does, and the pose finds nothing to land on.
+    ///
+    /// **In the drive's set and `before_ignore_deferred`, or this proves nothing:**
+    /// a plain `before` puts a sync point between the two, and a system outside the
+    /// set is flushed at the sync point ahead of it. Either way the despawn is
+    /// applied before the drive runs, and the drive's query never sees the body.
+    #[test]
+    fn a_body_despawned_in_the_frame_it_is_driven_is_let_go() {
+        let mut app = app();
+        let entity = spawn_driven(&mut app);
+        app.add_systems(
+            Update,
+            (move |mut commands: Commands| commands.entity(entity).despawn())
+                .in_set(crate::AvatarSystems::Animate)
+                .before_ignore_deferred(drive_avatar_bodies),
+        );
+        tick(&mut app);
+        assert!(
+            app.world().get_entity(entity).is_err(),
+            "the body should be gone"
+        );
     }
 
     #[test]
