@@ -1346,7 +1346,9 @@ pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// Drawn only for a quadruped. A slider each, over the engine's envelope for
 /// a length: none to long, and past long into the exploration range, where
 /// the engine's own ceiling thins the cards rather than letting the body
-/// past its budget.
+/// past its budget. And one that is not a length (symbios-avatar #389): how
+/// stiff the mane is, flat at nothing and a short upright crest at the top,
+/// over the engine's own stored range.
 pub fn fur_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let Archetype::Quadruped(params) = &mut record.archetype else {
         return false;
@@ -1363,6 +1365,7 @@ pub fn fur_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         ] {
             changed |= explored(ui, name, length, 0.0, (0.0, 1.0));
         }
+        changed |= axis(ui, "mane stiffness", &mut fur.mane_stiffness, 0.0..=1.0);
     });
     changed
 }
@@ -2502,12 +2505,13 @@ mod tests {
             ("whiskers", p.whiskers),
             // symbios-avatar #368: the coat's one axis.
             ("coat intensity", p.coat.intensity),
-            // symbios-avatar #369: the fur's five.
+            // symbios-avatar #369: the fur's five, and #389's stiffness.
             ("fur mane", p.fur.mane),
             ("fur ruff", p.fur.ruff),
             ("fur tail", p.fur.tail),
             ("fur feathering", p.fur.feathering),
             ("fur tufts", p.fur.tufts),
+            ("fur mane stiffness", p.fur.mane_stiffness),
         ]
     }
 
@@ -3180,6 +3184,105 @@ mod tests {
     }
 
     #[test]
+    fn a_mane_s_stiffness_slider_rewrites_nothing_on_sight_and_moves_when_dragged() {
+        // symbios-avatar #389. An egui slider with a clamp and a step rewrites
+        // what it is shown, with no input, if the value is off its grid: every
+        // thousandth a record can hold is drawn idle and must come back as it
+        // went in. The default among them must also stay off the wire.
+        let mut record =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
+        let mut changed = false;
+        let run = |events: Vec<egui::Event>, record: &mut AvatarRecord, changed: &mut bool| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    *changed = fur_axes(ui, record);
+                },
+            )
+        };
+        let bounds_of =
+            |output: egui::FullOutput, label: &str, role: Option<egui::accesskit::Role>| {
+                let update = output
+                    .platform_output
+                    .accesskit_update
+                    .expect("AccessKit is on");
+                update
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.label() == Some(label) && role.is_none_or(|role| node.role() == role)
+                    })
+                    .and_then(|(_, node)| node.bounds())
+                    .unwrap_or_else(|| panic!("fixture: no {label}"))
+            };
+        // Open the section, as a person does.
+        let header = bounds_of(run(Vec::new(), &mut record, &mut changed), "fur", None);
+        let at = centre(
+            f64::midpoint(header.x0, header.x1),
+            f64::midpoint(header.y0, header.y1),
+        );
+        run(
+            vec![egui::Event::PointerMoved(at), press(at, true)],
+            &mut record,
+            &mut changed,
+        );
+        run(vec![press(at, false)], &mut record, &mut changed);
+        for _ in 0..30 {
+            run(Vec::new(), &mut record, &mut changed);
+        }
+        let stiffness = |record: &AvatarRecord| {
+            let Archetype::Quadruped(params) = &record.archetype else {
+                panic!("a beast");
+            };
+            params.fur.mane_stiffness
+        };
+        let rail = bounds_of(
+            run(Vec::new(), &mut record, &mut changed),
+            "mane stiffness",
+            Some(egui::accesskit::Role::Slider),
+        );
+        for thousandth in 0..=1000u16 {
+            let Archetype::Quadruped(params) = &mut record.archetype else {
+                panic!("a beast");
+            };
+            params.fur.mane_stiffness = f32::from(thousandth) / 1000.0;
+            record.sanitize();
+            let before = stiffness(&record).to_bits();
+            run(Vec::new(), &mut record, &mut changed);
+            assert_eq!(
+                stiffness(&record).to_bits(),
+                before,
+                "{thousandth} thousandths rewritten on sight"
+            );
+            assert!(!changed, "{thousandth} thousandths reported as changed");
+        }
+        // And a person's drag does reach the record: at a quarter of its rail,
+        // well under where the sweep left it.
+        let at = centre(
+            rail.x0 + (rail.x1 - rail.x0) * 0.25,
+            f64::midpoint(rail.y0, rail.y1),
+        );
+        run(
+            vec![egui::Event::PointerMoved(at), press(at, true)],
+            &mut record,
+            &mut changed,
+        );
+        assert!(changed, "the drag reported no change");
+        assert!(
+            stiffness(&record) < 0.5,
+            "the drag left {}",
+            stiffness(&record)
+        );
+    }
+
+    #[test]
     fn a_quadruped_is_offered_no_face_hair_or_outfit() {
         // symbios-avatar #365: nothing on a beast reads those axes, and a
         // slider that moves nothing is worse than none. Its eyes are its own.
@@ -3543,6 +3646,7 @@ mod tests {
                     tail: 2.345_67,
                     feathering: 0.456_78,
                     tufts: 0.678_91,
+                    mane_stiffness: 0.789_12,
                 },
             }),
         );
