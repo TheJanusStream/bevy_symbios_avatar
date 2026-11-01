@@ -940,7 +940,7 @@ pub fn steer(
                 showing,
                 eyes: body.avatar.parts.eyes.as_ref(),
             };
-            let brought = bring(animator, &mut driver, rig, &frame, &mut gesturing, told);
+            let brought = bring(animator, &mut driver, rig, &mut gesturing, told);
             // **Leaving a scrub blends into what the driver is doing**, which
             // went on under it: a state posed from the slider is not where the
             // driver's own has got to, and letting go of hold would jump there.
@@ -1280,55 +1280,50 @@ fn plan_gesture<'a>(
     }
 }
 
-/// How fast a body may be carried and still rest, in metres a second: the
-/// engine's own figure for a body being moved (engine #377, private there),
-/// which gets a beast up out of a state and keeps it from going into one.
-const STIR: f32 = 0.1;
-
 /// Whether the window is moving a body this frame as the engine counts it
-/// (#53): carried faster than [`STIR`], shown swimming or leaping, or still
+/// (#53, engine #383): carried by the gait, shown swimming or leaping, or still
 /// in the air. Read before the driver's frame, so a state is not posed from
 /// the slider over a body its driver will not let rest, and the slider does
 /// not read a way down the body is coming back up.
 fn stirred(animator: &Animator, driver: &AvatarDriver, speed: f32, gaiting: bool) -> bool {
-    (gaiting && speed.abs() >= STIR)
-        || animator.swim.is_some()
-        || animator.leap.is_some()
-        || driver.airborne().is_some()
+    driver.stirred(&Inputs {
+        velocity: Vec3::Z * if gaiting { speed } else { 0.0 },
+        showing: showing(animator),
+        ..Inputs::default()
+    })
 }
 
-/// The step a driver is run in through frames nobody is shown, in seconds:
-/// three of a display's.
-///
-/// Coarse because only where the frames end is kept, and that does not
-/// depend on the step: a state moves on in proportion to the time, and the
-/// springs cut a long frame into substeps of their own. Each is a whole
-/// drive, and getting a beast up and down again unseen is up to four and a
-/// half seconds of them.
-const UNSEEN_STEP: f32 = 1.0 / 20.0;
+/// What the window shows a body doing in place of walking: a swim replaces the
+/// walk rather than layering over it, for the same reason a leap does - a body
+/// cannot be mid-stride and prone in the water at once. Both are shown rather
+/// than inferred, because a viewer has no world to infer them from.
+fn showing(animator: &Animator) -> Option<Showing> {
+    animator
+        .swim
+        .map(Showing::Swim)
+        .or_else(|| animator.leap.map(Showing::Leap))
+}
 
 /// Brings a body's driver to where the window says the body is, before its
-/// frame (#53), through frames nobody is shown; answers how many seconds it
-/// ran them for. Two cases, both on a frame the body is new to the pick.
+/// frame (#53), in one step (engine #383); answers how many seconds of the
+/// state that stands for. Two cases, both on a frame the body is new to the
+/// pick.
 ///
 /// **A body built under a state the window says it is part way into, or
 /// down in, is seated there.** The record editor rebuilds a body on every
 /// edit, so a beast that went down again each time could not be tuned while
-/// it sits: a new driver is asked the state and run through as much of its
-/// way down as the slider reads, and the body is drawn already there.
+/// it sits: a new driver is drawn already there.
 ///
 /// **A state posed from the slider and let go of for something that gets
 /// the beast up rises from the slider's point.** The driver's own state went
 /// on underneath, so it is down where the slider may say half way, and
 /// getting it up from there dropped the body into a full sit before it rose.
-/// So the driver is got up, unseen, and taken down to the slider's point,
-/// still under the slider's pose; the frame's own request then gets it up
-/// from part way down, which the driver does the way it was going.
+/// So the driver is seated at the slider's point; the frame's own request then
+/// gets it up from there, which the driver does the way it was going.
 fn bring<'a>(
     animator: &'a Animator,
     driver: &mut AvatarDriver,
     rig: &Rig,
-    frame: &Frame<'_>,
     gesturing: &mut Gesturing<'a>,
     told: Option<&'a Asked>,
 ) -> f32 {
@@ -1341,18 +1336,10 @@ fn bring<'a>(
         && driver.gesture().is_none()
         && let Some(down) = emote::seconds(rig, name)
     {
-        let ran = drive_unseen(
-            animator,
-            driver,
-            rig,
-            frame,
-            gesturing,
-            name,
-            way_into(down, *through),
-        );
-        // Asked already, by the first of them.
+        driver.seat(rig, name, *through);
+        // Asked already, by being seated.
         gesturing.ask = None;
-        return ran;
+        return through.min(1.0) * down;
     }
     if let Some(at) = animator.told.scrubbed
         && !gesturing.scrubbing
@@ -1360,86 +1347,10 @@ fn bring<'a>(
         && let Some(was) = told
             .and_then(|told| told.pick.as_deref())
             .filter(|&was| was != ask)
-        && let (Some(down), Some((_, up))) = (emote::seconds(rig, was), emote::getting_up(rig, was))
     {
-        let mut own = gesture::for_body(rig, was).map(|clip| (clip, at));
-        std::mem::swap(&mut gesturing.own, &mut own);
-        // Up from wherever the driver's own state has got to: from part way
-        // down at most `down`, from down `up`, and a step for the rounding.
-        drive_unseen(
-            animator,
-            driver,
-            rig,
-            frame,
-            gesturing,
-            emote::GET_UP,
-            down + up + UNSEEN_STEP,
-        );
-        drive_unseen(
-            animator,
-            driver,
-            rig,
-            frame,
-            gesturing,
-            was,
-            way_into(down, at),
-        );
-        std::mem::swap(&mut gesturing.own, &mut own);
+        driver.seat(rig, was, at);
     }
     0.0
-}
-
-/// Seconds into a state's way down of `down` seconds that put a beast
-/// `through` of the way down: past the end for all of it, so the driver is
-/// holding the state rather than a rounding short of the end, from which it
-/// would come back up the way it went instead of rising as the animal does.
-fn way_into(down: f32, through: f32) -> f32 {
-    if through >= 1.0 {
-        down + UNSEEN_STEP
-    } else {
-        through.max(0.0) * down
-    }
-}
-
-/// Drives a body through `seconds` of frames nobody is shown, asking `ask`
-/// of the first, and stops early once its driver is playing nothing; answers
-/// how many seconds it ran. `gesturing` is the frame's, and is left as it was.
-fn drive_unseen<'a>(
-    animator: &Animator,
-    driver: &mut AvatarDriver,
-    rig: &Rig,
-    frame: &Frame<'_>,
-    gesturing: &mut Gesturing<'a>,
-    ask: &'a str,
-    seconds: f32,
-) -> f32 {
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "a few seconds of sixtieths, and none for a negative span"
-    )]
-    let steps = (seconds / UNSEEN_STEP).ceil().max(0.0) as usize;
-    if steps == 0 {
-        return 0.0;
-    }
-    #[expect(clippy::cast_precision_loss, reason = "a few hundred steps")]
-    let step = seconds / steps as f32;
-    let unseen = Frame {
-        delta: step,
-        ..*frame
-    };
-    let asking = gesturing.ask.replace(ask);
-    let mut ran = 0.0;
-    for _ in 0..steps {
-        drive_body(animator, driver, rig, &unseen, gesturing);
-        gesturing.ask = None;
-        ran += step;
-        if driver.gesture().is_none() {
-            break;
-        }
-    }
-    gesturing.ask = asking;
-    ran
 }
 
 /// What one body's frame is, beside the window that is steering it.
@@ -1604,14 +1515,7 @@ fn drive_body(
         at: animator.at,
         facing: animator.heading(),
         heading: Some(Heading::degrees(animator.heading)),
-        // A swim replaces the walk rather than layering over it, for the
-        // same reason a leap does: a body cannot be mid-stride and prone
-        // in the water at once. Both are shown rather than inferred,
-        // because a viewer has no world to infer them from.
-        showing: animator
-            .swim
-            .map(Showing::Swim)
-            .or_else(|| animator.leap.map(Showing::Leap)),
+        showing: showing(animator),
         cycle: Some(cycle),
         // A beast's state, and what gets it up out of one: see
         // `plan_gesture`. Everything else this window lays on itself.
