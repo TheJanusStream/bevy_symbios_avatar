@@ -97,10 +97,15 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
-use symbios_avatar::plan::{Agouti, Fantasy, Pattern, Pigment, White};
+use symbios_avatar::plan::{
+    Agouti, CURVE_RANGE, FLUTES_RANGE, FORK_RANGE, Fantasy, LENGTH_RANGE, ORNAMENT_SWATCHES,
+    POINTS_RANGE, Pattern, Pigment, TAPER_RANGE, THICKNESS_RANGE, TWIST_RANGE, White,
+};
+use symbios_avatar::texture::{coat_colour, coat_swatches};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Family, Feet,
-    GENERATOR_VERSION, Horn, HumanoidParams, Limb, Nose, Pupil, QuadrupedParams, Rig, Zone,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Coat, CoatChannel, Family,
+    Feet, GENERATOR_VERSION, HumanoidParams, Limb, Nose, Ornament, OrnamentKind, Ornaments, Pupil,
+    QuadrupedParams, Rig, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -1055,10 +1060,10 @@ fn quadruped_axes(
 }
 
 /// A quadruped's face (symbios-avatar #367): the muzzle and how it is set,
-/// the eyes, the ears, the nose, the whiskers and a horn.
+/// the eyes, the ears, the nose, the whiskers, and what it wears on its head.
 ///
 /// The parts the engine stores rather than reads off an axis - the pupils,
-/// the nose, a horn - are a row of choices each, where a creator overrides
+/// the nose - are a row of choices each, where a creator overrides
 /// what a family gave: a dog with a cat's eyes is a choice somebody made.
 /// **Until the next family pick**, which hands the new family's own over
 /// (`set_kind`) - only a part one of the body's families has survives one.
@@ -1082,7 +1087,116 @@ fn quadruped_head(ui: &mut egui::Ui, params: &mut QuadrupedParams) -> bool {
     }
     changed |= chooser(ui, "nose", &mut params.nose, &Nose::ALL, Nose::name);
     changed |= explored(ui, "whiskers", &mut params.whiskers, 0.0, (-1.0, 1.0));
-    changed |= chooser(ui, "horn", &mut params.horn, &Horn::ALL, Horn::name);
+    changed |= ornaments(ui, params);
+    changed
+}
+
+/// What a beast wears on its head (symbios-avatar #402), a section of its own: a row
+/// a kind, each with an on-off control and, while on, its sliders and colours.
+///
+/// Turning a piece on gives it the engine's own good one of its kind, and nothing
+/// here writes unless it is touched: a slider's range and step are the record's own,
+/// and a colour stays off the picker's byte grid until one is picked. **A re-roll of
+/// an unlocked head takes every piece off** and puts on what its seed draws, usually
+/// nothing (symbios-avatar #403); the head's lock keeps them.
+fn ornaments(ui: &mut egui::Ui, params: &mut QuadrupedParams) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new("head ornaments").show(ui, |ui| {
+        for (name, kind) in [
+            ("single horn", OrnamentKind::Horn),
+            ("paired horns", OrnamentKind::PairedHorns),
+            ("upper fangs", OrnamentKind::UpperFangs),
+            ("lower fangs", OrnamentKind::LowerFangs),
+            ("tusks", OrnamentKind::Tusks),
+            ("antlers", OrnamentKind::Antlers),
+        ] {
+            ui.push_id(kind.name(), |ui| {
+                changed |= ornament_row(ui, name, kind, &mut params.ornaments);
+            });
+        }
+    });
+    changed
+}
+
+/// One kind of piece: on or off, and while on, everything it is shaped by.
+fn ornament_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    kind: OrnamentKind,
+    ornaments: &mut Ornaments,
+) -> bool {
+    let mut changed = false;
+    let mut worn = ornaments.get(kind).is_some();
+    if ui.checkbox(&mut worn, name).changed() {
+        ornaments.wear(kind, worn);
+        changed = true;
+    }
+    if let Some(piece) = ornaments.get_mut(kind) {
+        ui.indent(kind.name(), |ui| {
+            changed |= ornament_shape(ui, piece);
+        });
+    }
+    if let (OrnamentKind::Antlers, Some(antlers)) = (kind, &mut ornaments.antlers) {
+        ui.indent("branching", |ui| {
+            let (fewest, most) = POINTS_RANGE;
+            changed |= ui
+                .add(egui::Slider::new(&mut antlers.points, fewest..=most).text("points"))
+                .changed();
+            changed |= axis(ui, "fork", &mut antlers.fork, FORK_RANGE.0..=FORK_RANGE.1);
+        });
+    }
+    changed
+}
+
+/// The shape and colours every piece shares, over the engine's own envelopes.
+fn ornament_shape(ui: &mut egui::Ui, piece: &mut Ornament) -> bool {
+    let mut changed = false;
+    for (name, value, (low, high)) in [
+        ("length", &mut piece.length, LENGTH_RANGE),
+        ("thickness", &mut piece.thickness, THICKNESS_RANGE),
+        ("taper", &mut piece.taper, TAPER_RANGE),
+        ("curve", &mut piece.curve, CURVE_RANGE),
+        ("flutes", &mut piece.flutes, FLUTES_RANGE),
+    ] {
+        changed |= axis(ui, name, value, low..=high);
+    }
+    // Greyed with its reason painted: a tube with no flutes looks the same at any
+    // twist, and hover text does not fire on what is disabled (#1289's rule).
+    let fluted = piece.flutes > 0.0;
+    ui.add_enabled_ui(fluted, |ui| {
+        changed |= axis(ui, "twist", &mut piece.twist, TWIST_RANGE.0..=TWIST_RANGE.1);
+    });
+    if !fluted {
+        ui.weak("a smooth piece has nothing to twist: give it flutes");
+    }
+    changed |= ornament_colour(ui, "base", &mut piece.base);
+    changed |= ornament_colour(ui, "tip", &mut piece.tip);
+    changed
+}
+
+/// One of a piece's colours: the engine's presets and a free picker, as a coat's
+/// channel offers (symbios-avatar #401). Written only when one is clicked or picked.
+fn ornament_colour(ui: &mut egui::Ui, name: &str, colour: &mut [f32; 3]) -> bool {
+    let mut changed = false;
+    ui.push_id(name, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(name);
+            for (swatch_name, tone) in ORNAMENT_SWATCHES {
+                let marked = tone
+                    .iter()
+                    .zip(colour.iter())
+                    .all(|(a, b)| (a - b).abs() < 0.004);
+                let button = egui::Button::new(if marked { "•" } else { " " })
+                    .fill(swatch(symbios_avatar::Vec3::from_array(tone)))
+                    .min_size(egui::vec2(18.0, 18.0));
+                if ui.add(button).on_hover_text(swatch_name).clicked() {
+                    *colour = tone;
+                    changed = true;
+                }
+            }
+            changed |= free_colour(ui, colour);
+        });
+    });
     changed
 }
 
@@ -1286,10 +1400,15 @@ pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// turned. The marks are a seed, thrown again rather than slid, because
 /// neighbouring seeds lay out unrelated marks and a slider over them would
 /// promise a nearness that is not there.
+///
+/// Under them, any colour for what the loci would otherwise derive
+/// (symbios-avatar #401): each one a row of the engine's presets, a free picker
+/// and a way back to following the coat.
 pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let Archetype::Quadruped(params) = &mut record.archetype else {
         return false;
     };
+    let (nose, feet, mane) = (params.nose, params.feet, params.fur.mane);
     let coat = &mut params.coat;
     let mut changed = false;
     egui::CollapsingHeader::new("coat").show(ui, |ui| {
@@ -1336,7 +1455,112 @@ pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
                 changed = true;
             }
         });
+        egui::CollapsingHeader::new("colours").show(ui, |ui| {
+            for (name, channel) in [
+                ("dark", CoatChannel::Dark),
+                ("light", CoatChannel::Light),
+                ("white markings", CoatChannel::White),
+                ("nose and pads", CoatChannel::Leather),
+                ("claws and hooves", CoatChannel::Horn),
+                ("mane", CoatChannel::Mane),
+                ("tail", CoatChannel::Tail),
+            ] {
+                let unseen = unseen_channel(channel, coat, nose, feet, mane);
+                changed |= coat_channel(ui, name, channel, coat, unseen);
+            }
+        });
     });
+    changed
+}
+
+/// Why a colour picked for `channel` shows nowhere on this beast yet, if it does
+/// not. Painted rather than hovered, and the row stays live: a colour can be picked
+/// ahead of the mark that will show it, and is kept.
+fn unseen_channel(
+    channel: CoatChannel,
+    coat: &Coat,
+    nose: Nose,
+    feet: Feet,
+    mane: f32,
+) -> Option<&'static str> {
+    let plain = coat.agouti == Agouti::Solid && coat.pattern == Pattern::None;
+    let unseen = match channel {
+        CoatChannel::Dark => plain && coat.pigment == Pigment::Red && !coat.dun,
+        CoatChannel::Light => {
+            plain
+                && coat.pigment != Pigment::Red
+                && !(coat.points || coat.dun || coat.tortie || coat.merle)
+        }
+        CoatChannel::White => coat.white == White::None && !coat.roan,
+        CoatChannel::Leather => nose == Nose::Soft && feet == Feet::Hooves,
+        CoatChannel::Horn => feet == Feet::Pads,
+        CoatChannel::Mane => mane <= 0.0,
+        CoatChannel::Tail => false,
+    };
+    unseen.then_some(match channel {
+        CoatChannel::Dark => "this coat draws nothing in its dark yet: give it a pattern",
+        CoatChannel::Light => "this coat shows its light only on its belly: give it a pattern",
+        CoatChannel::White => "this coat has no white on it yet: give it some",
+        CoatChannel::Leather => "a soft muzzle and hooves show no leather",
+        CoatChannel::Horn => "sheathed claws show no horn",
+        _ => "this beast grows no mane yet: see fur",
+    })
+}
+
+/// One colour of a coat (symbios-avatar #401): the engine's presets for it, a free
+/// picker, and a way back to following the coat.
+///
+/// The same pair [`ramped_colour`] offers, for its reasons, and a colour nobody
+/// touches is written back no more than there: until one is picked the picker opens
+/// on what the loci paint, read from the engine each frame, and the record holds
+/// nothing. A marker on a swatch means it was picked; a coat that happens to derive
+/// that colour has picked nothing.
+fn coat_channel(
+    ui: &mut egui::Ui,
+    name: &str,
+    channel: CoatChannel,
+    coat: &mut Coat,
+    unseen: Option<&str>,
+) -> bool {
+    let picked = coat.colours.get(channel);
+    let mut colour = picked.unwrap_or_else(|| coat_colour(coat, channel));
+    let mut changed = false;
+    let mut follow = false;
+    ui.push_id(channel.name(), |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(name);
+            for (swatch_name, tone) in coat_swatches(channel) {
+                let marked = picked.is_some_and(|colour| {
+                    tone.iter()
+                        .zip(colour.iter())
+                        .all(|(a, b)| (a - b).abs() < 0.004)
+                });
+                let button = egui::Button::new(if marked { "•" } else { " " })
+                    .fill(swatch(symbios_avatar::Vec3::from_array(tone)))
+                    .min_size(egui::vec2(18.0, 18.0));
+                if ui.add(button).on_hover_text(swatch_name).clicked() {
+                    colour = tone;
+                    changed = true;
+                }
+            }
+            changed |= free_colour(ui, &mut colour);
+            if picked.is_none() {
+                ui.weak("follows the coat");
+            } else if ui.button("follow the coat").clicked() {
+                follow = true;
+            }
+        });
+        if let Some(unseen) = unseen {
+            ui.weak(unseen);
+        }
+    });
+    if follow {
+        *coat.colours.get_mut(channel) = None;
+        return true;
+    }
+    if changed {
+        *coat.colours.get_mut(channel) = Some(colour);
+    }
     changed
 }
 
@@ -2475,7 +2699,7 @@ pub fn measure_aperture(body: Option<&AvatarBody>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symbios_avatar::{Coat, Fur, LockSet};
+    use symbios_avatar::{CoatColours, Fur, LockSet};
 
     /// A quadruped's axes, for [`axes`]: its own list, since a beast's
     /// body, face, coat and fur put [`axes`] past a hundred lines.
@@ -2513,7 +2737,31 @@ mod tests {
             ("fur feathering", p.fur.feathering),
             ("fur tufts", p.fur.tufts),
             ("fur mane stiffness", p.fur.mane_stiffness),
+            // symbios-avatar #401: a part of each colour a coat can pick.
+            ("coat dark", p.coat.colours.dark.map_or(-1.0, |c| c[0])),
+            ("coat light", p.coat.colours.light.map_or(-1.0, |c| c[1])),
+            ("coat white", p.coat.colours.white.map_or(-1.0, |c| c[2])),
+            (
+                "coat leather",
+                p.coat.colours.leather.map_or(-1.0, |c| c[0]),
+            ),
+            ("coat horn", p.coat.colours.horn.map_or(-1.0, |c| c[1])),
+            ("coat mane", p.coat.colours.mane.map_or(-1.0, |c| c[2])),
+            ("coat tail", p.coat.colours.tail.map_or(-1.0, |c| c[0])),
+            // symbios-avatar #402: a number of each piece, and the antlers' own.
+            ("horn", ornament(p, OrnamentKind::Horn)),
+            ("paired horns", ornament(p, OrnamentKind::PairedHorns)),
+            ("upper fangs", ornament(p, OrnamentKind::UpperFangs)),
+            ("lower fangs", ornament(p, OrnamentKind::LowerFangs)),
+            ("tusks", ornament(p, OrnamentKind::Tusks)),
+            ("antlers", ornament(p, OrnamentKind::Antlers)),
+            ("antler fork", p.ornaments.antlers.map_or(-1.0, |a| a.fork)),
         ]
+    }
+
+    /// A piece's length, or a value no length is if it is not worn.
+    fn ornament(p: &QuadrupedParams, kind: OrnamentKind) -> f32 {
+        p.ornaments.get(kind).map_or(-1.0, |piece| piece.length)
     }
 
     /// Every axis the panel writes, as a path and the value at it.
@@ -3283,6 +3531,347 @@ mod tests {
         );
     }
 
+    /// What a frame of [`with_open_colours`] shows: each label and where.
+    type Nodes = Vec<(String, egui::accesskit::Rect)>;
+
+    /// One frame of [`with_open_colours`]: what it shows, and whether it changed.
+    type Frame<'a> = dyn FnMut(Vec<egui::Event>, &mut AvatarRecord) -> (Nodes, bool) + 'a;
+
+    /// The colours section of a beast's coat, opened, on `record`, with a runner of
+    /// frames handed to `go`.
+    fn with_open_colours(
+        record: &mut AvatarRecord,
+        mut go: impl FnMut(&mut Frame, &mut AvatarRecord),
+    ) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0));
+        let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
+            let mut changed = false;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    changed |= coat_axes(ui, record);
+                },
+            );
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            let nodes: Nodes = update
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| {
+                    let text = node.label().or(node.value())?;
+                    Some((text.to_owned(), node.bounds()?))
+                })
+                .collect();
+            (nodes, changed)
+        };
+        for header in ["coat", "colours"] {
+            let (nodes, _) = run(Vec::new(), record);
+            let bounds = nodes
+                .iter()
+                .find(|(label, _)| label == header)
+                .unwrap_or_else(|| panic!("fixture: no {header}: {nodes:?}"))
+                .1;
+            let at = centre(
+                f64::midpoint(bounds.x0, bounds.x1),
+                f64::midpoint(bounds.y0, bounds.y1),
+            );
+            run(vec![egui::Event::PointerMoved(at), press(at, true)], record);
+            run(vec![press(at, false)], record);
+            for _ in 0..20 {
+                run(Vec::new(), record);
+            }
+        }
+        go(&mut run, record);
+    }
+
+    /// The coat's picked colours in `record`.
+    fn picked(record: &AvatarRecord) -> CoatColours {
+        let Archetype::Quadruped(params) = &record.archetype else {
+            panic!("a beast");
+        };
+        params.coat.colours
+    }
+
+    /// The head ornaments section, opened, on `record`, with a runner of frames handed
+    /// to `go` (symbios-avatar #402).
+    fn with_open_ornaments(
+        record: &mut AvatarRecord,
+        mut go: impl FnMut(&mut Frame, &mut AvatarRecord),
+    ) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0));
+        let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
+            let mut changed = false;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let Archetype::Quadruped(params) = &mut record.archetype else {
+                        panic!("a beast");
+                    };
+                    changed |= ornaments(ui, params);
+                },
+            );
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            let nodes: Nodes = update
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| {
+                    let text = node.label().or(node.value())?;
+                    Some((text.to_owned(), node.bounds()?))
+                })
+                .collect();
+            (nodes, changed)
+        };
+        let (nodes, _) = run(Vec::new(), record);
+        let bounds = nodes
+            .iter()
+            .find(|(label, _)| label == "head ornaments")
+            .unwrap_or_else(|| panic!("fixture: no header: {nodes:?}"))
+            .1;
+        let at = centre(
+            f64::midpoint(bounds.x0, bounds.x1),
+            f64::midpoint(bounds.y0, bounds.y1),
+        );
+        run(vec![egui::Event::PointerMoved(at), press(at, true)], record);
+        run(vec![press(at, false)], record);
+        for _ in 0..20 {
+            run(Vec::new(), record);
+        }
+        go(&mut run, record);
+    }
+
+    /// A beast wearing every kind, its numbers off anything a slider or a swatch would
+    /// land on by itself.
+    fn ornate() -> AvatarRecord {
+        let mut params = QuadrupedParams::default();
+        for kind in OrnamentKind::ALL {
+            params.ornaments.wear(kind, true);
+            let piece = params.ornaments.get_mut(kind).expect("worn");
+            piece.length = 1.377;
+            piece.curve = -0.123;
+            piece.twist = 0.777;
+            piece.flutes = 0.111;
+            piece.base = [0.123, 0.457, 0.789];
+            piece.tip = [0.001, 0.999, 0.333];
+        }
+        params.ornaments.antlers.as_mut().expect("worn").fork = 0.333;
+        AvatarRecord::new("Beast", Archetype::Quadruped(params))
+    }
+
+    #[test]
+    fn head_ornaments_write_nothing_merely_by_being_drawn() {
+        let mut bare = AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut worn = ornate();
+        for record in [&mut bare, &mut worn] {
+            let before = record.clone();
+            with_open_ornaments(record, |run, record| {
+                let (nodes, _) = run(Vec::new(), record);
+                assert!(
+                    nodes.iter().any(|(label, _)| label == "antlers"),
+                    "fixture: the section is not open: {nodes:?}"
+                );
+                for _ in 0..10 {
+                    let (_, changed) = run(Vec::new(), record);
+                    assert!(!changed, "reported as changed with no input");
+                }
+            });
+            assert_eq!(*record, before, "rewritten on sight");
+        }
+    }
+
+    #[test]
+    fn a_head_ornament_goes_on_and_comes_off_and_says_why_it_cannot_twist() {
+        let mut record =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let worn = |record: &AvatarRecord| {
+            let Archetype::Quadruped(params) = &record.archetype else {
+                panic!("a beast");
+            };
+            params.ornaments
+        };
+        with_open_ornaments(&mut record, |run, record| {
+            let tap = |label: &str, run: &mut Frame, record: &mut AvatarRecord| {
+                let (nodes, _) = run(Vec::new(), record);
+                let bounds = nodes
+                    .iter()
+                    .find(|(found, _)| found == label)
+                    .unwrap_or_else(|| panic!("no {label}: {nodes:?}"))
+                    .1;
+                let at = centre(
+                    f64::midpoint(bounds.x0, bounds.x1),
+                    f64::midpoint(bounds.y0, bounds.y1),
+                );
+                run(vec![egui::Event::PointerMoved(at), press(at, true)], record);
+                let (_, changed) = run(vec![press(at, false)], record);
+                for _ in 0..10 {
+                    run(Vec::new(), record);
+                }
+                changed
+            };
+            let why = "a smooth piece has nothing to twist: give it flutes";
+            let (nodes, _) = run(Vec::new(), record);
+            assert!(!nodes.iter().any(|(label, _)| label == why), "{nodes:?}");
+            assert!(tap("tusks", run, record), "putting one on reports a change");
+            assert_eq!(
+                worn(record).tusks,
+                Some(OrnamentKind::Tusks.preset()),
+                "and it is the engine's own"
+            );
+            let (nodes, _) = run(Vec::new(), record);
+            assert!(nodes.iter().any(|(label, _)| label == why), "{nodes:?}");
+            assert!(tap("single horn", run, record));
+            assert_eq!(
+                worn(record).horn,
+                Some(Ornament::UNICORN),
+                "a horn starts as a unicorn's"
+            );
+            assert!(tap("tusks", run, record), "taking one off reports a change");
+            assert!(tap("single horn", run, record));
+            assert!(worn(record).is_empty(), "{:?}", worn(record));
+        });
+    }
+
+    #[test]
+    fn a_coat_s_colours_write_nothing_merely_by_being_drawn() {
+        // symbios-avatar #401. Nothing picked stays nothing, whatever the picker
+        // opens on; a colour off the picker's byte grid stays where it was.
+        let mut untouched =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        let mut chosen = QuadrupedParams::default();
+        chosen.coat.colours = CoatColours {
+            dark: Some([0.123, 0.457, 0.789]),
+            tail: Some([0.001, 0.999, 0.333]),
+            ..CoatColours::default()
+        };
+        let mut chosen = AvatarRecord::new("Beast", Archetype::Quadruped(chosen));
+        for record in [&mut untouched, &mut chosen] {
+            let before = record.clone();
+            with_open_colours(record, |run, record| {
+                let (nodes, _) = run(Vec::new(), record);
+                assert!(
+                    nodes.iter().any(|(label, _)| label == "nose and pads"),
+                    "fixture: the section is not open: {nodes:?}"
+                );
+                for _ in 0..10 {
+                    let (_, changed) = run(Vec::new(), record);
+                    assert!(!changed, "reported as changed with no input");
+                }
+            });
+            assert_eq!(*record, before, "rewritten on sight");
+        }
+    }
+
+    #[test]
+    fn a_coat_s_channel_takes_a_preset_and_goes_back_to_following_the_coat() {
+        let mut record =
+            AvatarRecord::new("Beast", Archetype::Quadruped(QuadrupedParams::default()));
+        with_open_colours(&mut record, |run, record| {
+            let (nodes, _) = run(Vec::new(), record);
+            let mut rows: Vec<u64> = nodes
+                .iter()
+                .filter(|(label, _)| label == "follows the coat")
+                .map(|(_, bounds)| bounds.y0.to_bits())
+                .collect();
+            rows.sort_unstable();
+            rows.dedup();
+            assert_eq!(
+                rows.len(),
+                CoatChannel::ALL.len(),
+                "every channel starts by saying so: {nodes:?}"
+            );
+            assert!(!nodes.iter().any(|(label, _)| label == "follow the coat"));
+            let tap =
+                |bounds: egui::accesskit::Rect, run: &mut Frame, record: &mut AvatarRecord| {
+                    let at = centre(
+                        f64::midpoint(bounds.x0, bounds.x1),
+                        f64::midpoint(bounds.y0, bounds.y1),
+                    );
+                    run(vec![egui::Event::PointerMoved(at), press(at, true)], record);
+                    let (_, changed) = run(vec![press(at, false)], record);
+                    changed
+                };
+            // The first swatch beside "mane": a swatch has no label of its own, so
+            // its place is read off the row's name.
+            let row = nodes
+                .iter()
+                .find(|(label, _)| label == "mane")
+                .expect("a mane's row")
+                .1;
+            let at = egui::accesskit::Rect {
+                x0: row.x1 + 4.0,
+                x1: row.x1 + 18.0,
+                y0: row.y0,
+                y1: row.y1,
+            };
+            assert!(tap(at, run, record), "the swatch reported no change");
+            let swatches = symbios_avatar::texture::coat_swatches(CoatChannel::Mane);
+            assert_eq!(picked(record).mane, Some(swatches[0].1));
+            assert_eq!(
+                CoatColours {
+                    mane: None,
+                    ..picked(record)
+                },
+                CoatColours::default(),
+                "and only its channel"
+            );
+            for _ in 0..3 {
+                run(Vec::new(), record);
+            }
+            let (nodes, _) = run(Vec::new(), record);
+            let back = nodes
+                .iter()
+                .find(|(label, _)| label == "follow the coat")
+                .expect("the way back is offered once there is somewhere to come back from")
+                .1;
+            assert!(tap(back, run, record), "the way back reported no change");
+            assert!(picked(record).is_empty(), "{:?}", picked(record));
+        });
+    }
+
+    #[test]
+    fn a_colour_with_nothing_to_show_on_says_why() {
+        // Hover text never fires on what is not there: it is painted.
+        let bare = QuadrupedParams::default();
+        let says = |params: QuadrupedParams, why: &str| {
+            let mut record = AvatarRecord::new("Beast", Archetype::Quadruped(params));
+            with_open_colours(&mut record, |run, record| {
+                let (nodes, _) = run(Vec::new(), record);
+                assert!(
+                    nodes.iter().any(|(label, _)| label == why),
+                    "{why}: {nodes:?}"
+                );
+            });
+        };
+        says(bare, "this beast grows no mane yet: see fur");
+        says(bare, "this coat has no white on it yet: give it some");
+        let mut maned = bare;
+        maned.fur.mane = 0.5;
+        let mut record = AvatarRecord::new("Beast", Archetype::Quadruped(maned));
+        with_open_colours(&mut record, |run, record| {
+            let (nodes, _) = run(Vec::new(), record);
+            assert!(
+                !nodes.iter().any(|(label, _)| label.contains("no mane")),
+                "{nodes:?}"
+            );
+        });
+    }
+
     #[test]
     fn a_quadruped_is_offered_no_face_hair_or_outfit() {
         // symbios-avatar #365: nothing on a beast reads those axes, and a
@@ -3623,7 +4212,23 @@ mod tests {
                 nose: Nose::Soft,
                 feet: Feet::Pads,
                 whiskers: 0.456_78,
-                horn: Horn::Unicorn,
+                // symbios-avatar #402: every piece, off the grid before the sanitize.
+                ornaments: {
+                    let mut worn = Ornaments::default();
+                    for kind in OrnamentKind::ALL {
+                        worn.wear(kind, true);
+                        if let Some(piece) = worn.get_mut(kind) {
+                            piece.length = 1.234_56;
+                            piece.curve = -0.345_67;
+                            piece.base = [0.123_45, 0.2, 0.3];
+                        }
+                    }
+                    if let Some(antlers) = &mut worn.antlers {
+                        antlers.points = 7;
+                        antlers.fork = 0.654_32;
+                    }
+                    worn
+                },
                 // symbios-avatar #368: every locus off its default.
                 coat: Coat {
                     pigment: Pigment::Liver,
@@ -3639,6 +4244,16 @@ mod tests {
                     intensity: 1.345_67,
                     fantasy: Fantasy::Ocean,
                     marks: 54_321,
+                    // symbios-avatar #401: every colour picked.
+                    colours: CoatColours {
+                        dark: Some([0.123_45, 0.2, 0.3]),
+                        light: Some([0.4, 0.567_89, 0.6]),
+                        white: Some([0.7, 0.8, 0.912_34]),
+                        leather: Some([0.345_67, 0.1, 0.2]),
+                        horn: Some([0.3, 0.456_78, 0.5]),
+                        mane: Some([0.6, 0.7, 0.678_91]),
+                        tail: Some([0.789_12, 0.8, 0.9]),
+                    },
                 },
                 // symbios-avatar #369: every zone off none.
                 fur: Fur {
