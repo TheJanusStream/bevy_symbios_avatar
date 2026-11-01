@@ -1347,8 +1347,9 @@ pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// a length: none to long, and past long into the exploration range, where
 /// the engine's own ceiling thins the cards rather than letting the body
 /// past its budget. And one that is not a length (symbios-avatar #389): how
-/// stiff the mane is, flat at nothing and a short upright crest at the top,
-/// over the engine's own stored range.
+/// stiff the mane is, flat at nothing and straight up off the crest at the top,
+/// its length staying what the mane's own slider says, over the engine's own
+/// stored range.
 pub fn fur_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let Archetype::Quadruped(params) = &mut record.archetype else {
         return false;
