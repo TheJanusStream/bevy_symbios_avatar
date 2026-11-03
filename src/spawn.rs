@@ -23,9 +23,13 @@
 //!
 //! **A body's hair can have two tiers, and only one draws at a time** (#48).
 //! Asked for with [`AvatarConfig::far_hair`], the engine builds a far tier beside
-//! the near hair - the scalp as one smooth low-poly solid, the facial cards as
-//! they are - and hands it back outside [`Avatar::meshes`]. It becomes one more
-//! entity here, with the near hair's own material and skin, and the two carry a
+//! the near hair and hands it back outside [`Avatar::meshes`]. On a person it is
+//! the scalp as one smooth low-poly solid, the facial cards as they are; on a
+//! maned beast (since symbios-avatar 0.19.2) it is the fur's cards as they are
+//! with the mane's solid on a far coarser grid, 560 triangles against the near
+//! solid's 2,016 (#55). A maneless beast has no far tier: its cards are what it
+//! draws at every distance. Where there is one, it becomes one more entity here,
+//! with the near hair's own material and skin, and the two carry a
 //! [`VisibilityRange`] each so the camera's distance picks which one draws: see
 //! [`HairLod`]. A body built without a far tier draws its hair at every distance,
 //! exactly as before.

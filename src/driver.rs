@@ -58,6 +58,7 @@ use symbios_avatar::anim::driver::{
 };
 use symbios_avatar::{Expression, Gait, Heading};
 
+use crate::ground::GroundPatch;
 use crate::spawn::{AvatarBody, AvatarClosure, AvatarPose};
 
 /// One body's motion state: every clock that outlives a frame.
@@ -93,7 +94,8 @@ impl AvatarDriver {
 /// Written by whatever moves the body and read by [`drive_avatar_bodies`]. It
 /// is [`Inputs`] in component form, minus the frame's own length — which comes
 /// from [`Time`] — and minus the two borrowed layers, which a component cannot
-/// hold; see [`drive_avatar_bodies`].
+/// hold; see [`drive_avatar_bodies`]. The ground the engine takes as a closure
+/// it takes here as data, [`Self::ground`] (#56).
 ///
 /// Every field past the first three has a default that means "nothing
 /// unusual", so an application fills in a place and a velocity and leaves the
@@ -162,6 +164,20 @@ pub struct Drive {
     /// The face the body is resting in, which decides where the lids sit when
     /// they are not mid-blink.
     pub face: Expression,
+    /// The ground under the body this frame, in its own frame, or [`None`] for
+    /// the level floor at the root's `y = 0` (#56).
+    ///
+    /// **Data rather than the closure the engine takes**, because a closure is
+    /// a borrow of whatever it reads and a component cannot hold one: the
+    /// owner samples its world into a [`GroundPatch`] and the drive answers the
+    /// engine from that. Rewrite it every frame the body moves, as the rest of
+    /// this component is - a patch is the ground where the body WAS when it was
+    /// sampled, and the drive reads it as the ground where the body is.
+    /// [`GroundPatch::resample`] keeps the allocation for that.
+    ///
+    /// [`None`] is exactly the floor this component always had: a body
+    /// without a patch is driven bit for bit as it was before there was one.
+    pub ground: Option<GroundPatch>,
 }
 
 impl Default for Drive {
@@ -185,6 +201,7 @@ impl Default for Drive {
             turn: 0.0,
             lids: None,
             face: Expression::NEUTRAL,
+            ground: None,
         }
     }
 }
@@ -272,15 +289,24 @@ impl From<&Driven> for Drove {
 /// both cases, which is the whole point of the second — a hold is a pause, not
 /// a re-pose.
 ///
+/// # The ground under the feet
+///
+/// A body's feet are planted on [`Drive::ground`] when it carries one, and on
+/// the **level floor** at its root's `y = 0` ([`level_ground`]) when it does
+/// not (#56). The patch is data the owner samples from its world, because the
+/// engine's ground is a closure and no closure can live in a component; this
+/// system answers the engine from it. A body with no patch is handed
+/// [`level_ground`] itself, exactly as before there was a patch to carry.
+///
 /// # When to drive a body yourself instead
 ///
-/// This system gives every body a **level floor** and lays **no layer** over
-/// the motion, because neither a ground closure nor an overlay can live in a
-/// component: both are borrows of things a system holds. A consumer that needs
-/// either — real terrain under the feet, an authored clip or a face over the
-/// pose — writes its own system that builds [`Inputs`] with those closures and
-/// calls [`Driver::drive`](symbios_avatar::anim::Driver::drive) directly. That
-/// is a dozen lines and no duplicated state machine, which is the division this
+/// This system lays **no layer** over the motion, because an overlay cannot
+/// live in a component: it is a borrow of something a system holds. A consumer
+/// that needs one - an authored clip or a face over the pose, or a ground it
+/// can only answer live, such as a physics ray per probe - writes its own
+/// system that builds [`Inputs`] with those closures and calls
+/// [`Driver::drive`](symbios_avatar::anim::Driver::drive) directly. That is a
+/// dozen lines and no duplicated state machine, which is the division this
 /// module exists to make possible. Such a body carries an [`AvatarDriver`] and
 /// no [`Drive`], and this system passes it by.
 pub fn drive_avatar_bodies(
@@ -293,33 +319,16 @@ pub fn drive_avatar_bodies(
         // Taken rather than read, so a request fires once and a consumer never
         // has to remember to clear it.
         let gesture = drive.gesture.take();
-        let inputs = Inputs {
-            delta,
-            velocity: drive.velocity,
-            at: drive.at,
-            facing: drive.facing,
-            heading: drive.heading,
-            swimming: drive.swimming,
-            gesture: gesture.as_deref(),
-            hold: drive.hold,
-            showing: drive.showing,
-            cycle: drive.cycle,
-            cadence: drive.cadence,
-            gait: drive.gait.as_ref(),
-            pattern: drive.pattern,
-            walk: drive.walk,
-            turn: drive.turn,
-            lids: drive.lids,
-            face: drive.face,
-            // Handed over here rather than left to the caller, so the rule that
-            // a blink rides AFTER the blend cannot be forgotten by a consumer:
-            // smoothed by a gait transition, a blink arrives as a slow
-            // heavy-lidded droop that reads as a body falling asleep.
-            eyes: body.avatar.parts.eyes.as_ref(),
-            over_locomotion: None,
-            over_settled: None,
+        let drive = &*drive;
+        let inputs = inputs_of(drive, gesture.as_deref(), body, delta);
+        // The two arms are two monomorphisations rather than one closure that
+        // checks for a patch, so a body without one is handed the engine's own
+        // `level_ground` and is driven exactly as it was before #56.
+        let driven = match &drive.ground {
+            Some(patch) => driver.drive(&body.avatar.rig, &inputs, |point| patch.ground(point)),
+            None => driver.drive(&body.avatar.rig, &inputs, level_ground),
         };
-        let Some(driven) = driver.drive(&body.avatar.rig, &inputs, level_ground) else {
+        let Some(driven) = driven else {
             continue;
         };
         // `try_insert`, because a body may leave in the frame it is driven: a
@@ -330,6 +339,45 @@ pub fn drive_avatar_bodies(
             AvatarPose(driven.pose),
             AvatarClosure(driven.closure),
         ));
+    }
+}
+
+/// One body's [`Inputs`] for a frame `delta` long, from its [`Drive`] and the
+/// `gesture` taken from it.
+///
+/// Its own function so the tests can build exactly what the system hands the
+/// driver, and drive a second driver from it by hand.
+fn inputs_of<'a>(
+    drive: &'a Drive,
+    gesture: Option<&'a str>,
+    body: &'a AvatarBody,
+    delta: f32,
+) -> Inputs<'a> {
+    Inputs {
+        delta,
+        velocity: drive.velocity,
+        at: drive.at,
+        facing: drive.facing,
+        heading: drive.heading,
+        swimming: drive.swimming,
+        gesture,
+        hold: drive.hold,
+        showing: drive.showing,
+        cycle: drive.cycle,
+        cadence: drive.cadence,
+        gait: drive.gait.as_ref(),
+        pattern: drive.pattern,
+        walk: drive.walk,
+        turn: drive.turn,
+        lids: drive.lids,
+        face: drive.face,
+        // Handed over here rather than left to the caller, so the rule that
+        // a blink rides AFTER the blend cannot be forgotten by a consumer:
+        // smoothed by a gait transition, a blink arrives as a slow
+        // heavy-lidded droop that reads as a body falling asleep.
+        eyes: body.avatar.parts.eyes.as_ref(),
+        over_locomotion: None,
+        over_settled: None,
     }
 }
 
@@ -584,6 +632,265 @@ mod tests {
             app.world().get::<Drove>(body).expect("driven").source,
             Source::Gait,
             "a body travelling at 1.4 m/s is walking"
+        );
+    }
+
+    /// Spawns a body of `archetype` for each drive in `drives`, all seeded
+    /// alike and built small, and runs the one frame that builds and first
+    /// drives them all.
+    ///
+    /// A 64-texel atlas and no far hair tier, because these measure where the
+    /// feet go and nothing drawn: the default atlas costs every test a paint
+    /// it never looks at. One frame for all of them, so bodies compared frame
+    /// by frame have been driven the same number of times.
+    fn spawn_small(
+        app: &mut App,
+        archetype: &Archetype,
+        seed: u64,
+        drives: Vec<Drive>,
+    ) -> Vec<Entity> {
+        let bodies = drives
+            .into_iter()
+            .map(|drive| {
+                app.world_mut()
+                    .spawn((
+                        crate::SpawnAvatar {
+                            record: AvatarRecord::new("Grounded", archetype.clone()),
+                            config: symbios_avatar::AvatarConfig {
+                                atlas: 64,
+                                ..symbios_avatar::AvatarConfig::default()
+                            },
+                            closure: 0.0,
+                        },
+                        AvatarDriver::seeded(seed),
+                        drive,
+                    ))
+                    .id()
+            })
+            .collect();
+        tick(app);
+        bodies
+    }
+
+    fn beast() -> Archetype {
+        Archetype::Quadruped(symbios_avatar::QuadrupedParams::default())
+    }
+
+    /// A pose as bits, so two poses compare equal only when every float in
+    /// them is the same float: `-0.0 == 0.0` would pass a comparison of values.
+    fn bits(pose: &symbios_avatar::Pose) -> (Vec<[u32; 4]>, [u32; 3]) {
+        (
+            pose.rotations
+                .iter()
+                .map(|rotation| rotation.to_array().map(f32::to_bits))
+                .collect(),
+            pose.translation.to_array().map(f32::to_bits),
+        )
+    }
+
+    /// The pose last written onto `body`.
+    fn posed(app: &App, body: Entity) -> symbios_avatar::Pose {
+        app.world()
+            .get::<AvatarPose>(body)
+            .expect("a driven body is posed")
+            .0
+            .clone()
+    }
+
+    /// Walk `bodies` down their own `+Z` at 1.4 m/s for `frames` frames, then
+    /// stand them still for as many, calling `each` after every frame.
+    fn walk_then_stand(
+        app: &mut App,
+        bodies: &[Entity],
+        frames: usize,
+        mut each: impl FnMut(&mut App, usize),
+    ) {
+        let mut at = Vec3::ZERO;
+        for frame in 0..frames * 2 {
+            if frame < frames {
+                at += Vec3::Z * (1.4 / 60.0);
+            }
+            for &body in bodies {
+                app.world_mut()
+                    .entity_mut(body)
+                    .get_mut::<Drive>()
+                    .expect("a drive")
+                    .moved_to(at, 1.0 / 60.0);
+            }
+            tick(app);
+            each(app, frame);
+        }
+    }
+
+    /// A body without a patch is driven by exactly the call this system made
+    /// before there were patches (#56): a second driver, seeded alike and
+    /// handed the same inputs and the engine's own `level_ground` by hand,
+    /// draws the same skeleton to the bit on every frame of a walk and a stop.
+    #[test]
+    fn a_body_without_a_patch_is_driven_exactly_as_on_the_level_floor() {
+        let mut app = app();
+        let [body] = spawn_small(&mut app, &beast(), 11, vec![Drive::default()])[..] else {
+            unreachable!()
+        };
+        let mut by_hand = Driver::seeded(11);
+        let mut check = |app: &mut App, frame: usize| {
+            let world = app.world();
+            let delta = world.resource::<Time>().delta_secs();
+            let avatar = world.get::<AvatarBody>(body).expect("built");
+            let drive = world.get::<Drive>(body).expect("a drive");
+            assert!(drive.ground.is_none());
+            let inputs = inputs_of(drive, None, avatar, delta);
+            let driven = by_hand
+                .drive(&avatar.avatar.rig, &inputs, level_ground)
+                .expect("a frame with time in it is driven");
+            assert_eq!(
+                bits(&driven.pose),
+                bits(&posed(app, body)),
+                "frame {frame}: the system drove a body with no patch off some other floor"
+            );
+        };
+        check(&mut app, 0);
+        walk_then_stand(&mut app, &[body], 60, check);
+    }
+
+    /// A patch of level ground is the level floor (#56): two bodies seeded
+    /// alike, one carrying a patch of zeros over its whole reach and one
+    /// carrying none, draw the same skeleton to the bit on every frame of a
+    /// walk and a stop.
+    #[test]
+    fn a_level_patch_drives_exactly_as_the_level_floor() {
+        let mut app = app();
+        let rig = symbios_avatar::Avatar::build_with(
+            &AvatarRecord::new("Grounded", beast()),
+            &symbios_avatar::AvatarConfig {
+                atlas: 64,
+                ..symbios_avatar::AvatarConfig::default()
+            },
+        )
+        .expect("the beast builds")
+        .rig;
+        let reach = GroundPatch::reach(&rig).expect("a beast stands on its feet");
+        let flat = Drive {
+            ground: Some(GroundPatch::sampled(reach, 0.25, |_| 0.0)),
+            ..Drive::default()
+        };
+        let [level, patched] = spawn_small(&mut app, &beast(), 5, vec![Drive::default(), flat])[..]
+        else {
+            unreachable!()
+        };
+        let same = |app: &App, frame: usize| {
+            assert_eq!(
+                bits(&posed(app, level)),
+                bits(&posed(app, patched)),
+                "frame {frame}: a patch of zeros drove the body off the level floor"
+            );
+        };
+        same(&app, 0);
+        walk_then_stand(&mut app, &[level, patched], 60, |app, frame| {
+            same(app, frame);
+        });
+    }
+
+    /// How far above the ground `height` gives each foot `body` stands on is
+    /// in its last pose: the lowest extremity joint of every limb it stands on
+    /// ([`Rig::ground_contacts`](symbios_avatar::Rig::ground_contacts)),
+    /// whether that foot is down this frame or not.
+    fn soles(app: &App, body: Entity, height: impl Fn(Vec3) -> f32) -> Vec<f32> {
+        let rig = &app
+            .world()
+            .get::<AvatarBody>(body)
+            .expect("built")
+            .avatar
+            .rig;
+        let at = posed(app, body).forward(rig);
+        rig.ground_contacts()
+            .into_iter()
+            .map(|limb| {
+                let sole = rig
+                    .extremity_joints(limb)
+                    .into_iter()
+                    .map(|joint| at.positions[joint])
+                    .min_by(|a, b| a.y.total_cmp(&b.y))
+                    .expect("a contact has an extremity");
+                sole.y - height(sole)
+            })
+            .collect()
+    }
+
+    /// A beast on a slope stands on the slope (#56). Two beasts seeded alike
+    /// walk a second and stand a second, one on the level floor and one over
+    /// a patch rising a fifth of a metre per metre toward its front.
+    ///
+    /// **Standing**, every foot of the sloped one is on the slope: within
+    /// 15 mm of the height the same foot stands over the level floor, which
+    /// is its pad joint's own two centimetres off the sole, laid along the
+    /// slope's normal rather than up. The level one's feet against the same
+    /// slope are a span of 127 mm apart, the fore feet in the hill and the
+    /// hind ones over it, so the bound is an eighth of the defect.
+    ///
+    /// **Walking**, no foot of the sloped one is ever in the hill, and on
+    /// every frame the lowest is on it, where the level one's lowest is up to
+    /// 88 mm into it. The second after the stop is judged only once settled:
+    /// on four legs the idle's recovering step is solved at its rest height
+    /// and lowered with the pelvis rather than seated on the ground under it
+    /// (symbios-avatar 0.19.3, `Idle::drive_on`), so a fore foot stepping home
+    /// uphill passes through the slope for a third of a second whatever
+    /// ground this crate hands over.
+    #[test]
+    fn a_beast_on_a_sloped_patch_plants_its_feet_on_the_slope() {
+        const GRADE: f32 = 0.2;
+        let slope = |at: Vec3| at.z * GRADE;
+        let mut app = app();
+        let rig = symbios_avatar::Avatar::build_with(
+            &AvatarRecord::new("Grounded", beast()),
+            &symbios_avatar::AvatarConfig {
+                atlas: 64,
+                ..symbios_avatar::AvatarConfig::default()
+            },
+        )
+        .expect("the beast builds")
+        .rig;
+        let reach = GroundPatch::reach(&rig).expect("a beast stands on its feet");
+        let hill = Drive {
+            ground: Some(GroundPatch::sampled(reach, 0.25, |at| at.y * GRADE)),
+            ..Drive::default()
+        };
+        let [level, sloped] = spawn_small(&mut app, &beast(), 5, vec![Drive::default(), hill])[..]
+        else {
+            unreachable!()
+        };
+        let lowest = |soles: &[f32]| soles.iter().copied().fold(f32::MAX, f32::min);
+        let mut deepest_on_the_level = 0.0f32;
+        walk_then_stand(&mut app, &[level, sloped], 60, |app, frame| {
+            let flat = soles(app, level, |_| 0.0);
+            let hill = soles(app, sloped, slope);
+            let off = soles(app, level, slope);
+            if frame < 60 {
+                deepest_on_the_level = deepest_on_the_level.min(lowest(&off));
+                assert!(
+                    lowest(&hill) > -0.005 && lowest(&hill) < 0.035,
+                    "frame {frame}: walking up the slope, its lowest foot is {:.3} m off it: \
+                     {hill:?}",
+                    lowest(&hill)
+                );
+            } else if frame >= 90 {
+                for (foot, (hill, flat)) in hill.iter().zip(&flat).enumerate() {
+                    assert!(
+                        (hill - flat).abs() < 0.015,
+                        "frame {frame}: standing, foot {foot} is {hill:.3} m off the slope \
+                         where it stands {flat:.3} m off the level floor"
+                    );
+                }
+                let span = off.iter().copied().fold(f32::MIN, f32::max) - lowest(&off);
+                assert!(
+                    span > 0.1,
+                    "the level floor's feet should be the slope's rise apart"
+                );
+            }
+        });
+        assert!(
+            deepest_on_the_level < -0.05,
+            "on the level floor some foot should have walked into the hill: {deepest_on_the_level}"
         );
     }
 

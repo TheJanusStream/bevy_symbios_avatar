@@ -818,10 +818,11 @@ pub fn adopt_bodies(
 /// **Through [`symbios_avatar::anim::Driver::drive`] directly rather than
 /// through [`drive_avatar_bodies`](crate::drive_avatar_bodies)**, and that is
 /// the door the component form leaves open rather than a road around it. This
-/// window needs two things no component can hold: a ground closure, because the
-/// grade and camber sliders put the body on a plane rather than a level floor,
-/// and two overlay closures, because a baked clip, a gesture, a gaze and a face
-/// all ride over the motion. Both are borrows of things a system holds.
+/// window needs two overlay closures no component can hold, because a baked
+/// clip, a gesture, a gaze and a face all ride over the motion, and both are
+/// borrows of things a system holds. Its ground is a closure too: the grade and
+/// camber sliders put the body on an exact plane, which a
+/// [`GroundPatch`](crate::GroundPatch) would only sample (#56).
 ///
 /// Three cases, and the middle one is the one that is easy to get wrong.
 ///

@@ -66,6 +66,8 @@
 //! different. Put an [`AvatarDriver`] and a [`Drive`] on a body, write the
 //! [`Drive`] each frame from whatever moves it, and [`AvatarPlugin`] does the
 //! rest — no resource, no GUI, no clip library. [`driver`] has the details.
+//! The feet stand on the level floor at the body's root unless the [`Drive`]
+//! carries the real ground under them, sampled into a [`GroundPatch`] (#56).
 //!
 //! ```no_run
 //! use bevy::prelude::*;
@@ -88,8 +90,8 @@
 //! the question is always "what is it doing now". [`AnimatorPlugin`] adds an
 //! [`Animator`] resource — every switch a walk can be judged through, and no
 //! motion of its own. It steers the same [`AvatarDriver`], and what it adds is
-//! the two things a component cannot hold: a sloped ground for the feet, and
-//! the layers a baked clip, a gesture, a gaze and a face ride on.
+//! a ground its sliders tilt under the feet, and the one thing a component
+//! cannot hold: the layers a baked clip, a gesture, a gaze and a face ride on.
 //!
 //! **The two never fight, and the rule is one line: a body carrying a [`Drive`]
 //! belongs to whatever writes it.** An application's chassis writes one every
@@ -163,6 +165,7 @@ pub mod convert;
 pub mod driver;
 #[cfg(feature = "editor")]
 pub mod editor;
+pub mod ground;
 pub mod spawn;
 pub mod strips;
 
@@ -173,6 +176,7 @@ pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bev
 pub use driver::{AvatarDriver, Drive, Drove, drive_avatar_bodies};
 #[cfg(feature = "editor")]
 pub use editor::{EditedAvatar, RecordEditor, RecordEditorPlugin};
+pub use ground::GroundPatch;
 pub use spawn::{
     AvatarBody, AvatarClosure, AvatarJoints, AvatarPose, HAIR_MARGIN, HAIR_SWITCH, HairLod,
     HairTier, SpawnAvatar, spawn_avatar,

@@ -157,6 +157,13 @@ the engine's `anim::driver`, and it is the same code the application and this
 crate now both run. `Drive::moved_to` derives a velocity for a body whose motion
 arrives as positions rather than as a speed, which is what a remote peer is.
 
+The feet stand on the level floor at the body's root unless `Drive::ground`
+carries the real ground under them: a `GroundPatch`, a small square of heights
+in the body's own frame that the owner samples from its world each frame and
+the drive answers the engine from bilinearly. `GroundPatch::reach` sizes it from
+the rig, to the stance and as far again as the legs reach. A body without one is
+driven exactly as it always was.
+
 `Drove` carries back what the frame decided, and `AvatarDriver::new` takes the
 one decision that has no safe default: whether the body's root is moved by
 something else or by the motion itself. A leap carries the root through its own
@@ -164,8 +171,8 @@ parabola, which is right for a body that owns its root and doubles the flight of
 one hanging off a physics capsule.
 
 A body with an `AvatarDriver` and no `Drive` is left alone — that is how a
-consumer that needs real terrain under the feet, or its own layer over the pose,
-opts out and calls the engine's driver itself.
+consumer that needs its own layer over the pose, or a ground it can only answer
+live (a physics ray per probe), opts out and calls the engine's driver itself.
 
 ### From one control surface, for a viewer
 
@@ -175,11 +182,11 @@ gaze, the face — and no motion of its own. One subject, and the question is
 always "what is it doing now".
 
 It steers the same `AvatarDriver`, so the walk a viewer judges is the walk an
-application draws, down to the code that decides it. What it adds is the two
-things a component cannot hold: a **sloped ground** for the feet, and the
-**layers** a baked clip, a procedural gesture, a deliberate gaze and a face ride
-on. That is what `Driver::drive` takes closures for, and this is the consumer
-the door was left open for.
+application draws, down to the code that decides it. What it adds is a **sloped
+ground** its sliders tilt under the feet, and the one thing a component cannot
+hold: the **layers** a baked clip, a procedural gesture, a deliberate gaze and a
+face ride on. That is what `Driver::drive` takes closures for, and this is the
+consumer the door was left open for.
 
 **The two never fight, and the rule is one line: a body carrying a `Drive`
 belongs to whatever writes it.** An application's chassis writes one every frame
