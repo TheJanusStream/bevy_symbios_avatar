@@ -178,7 +178,7 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_egui::EguiPlugin;
 use bevy_panorbit_camera::{PanOrbitCamera, PanOrbitCameraPlugin, PanOrbitCameraSystemSet};
 use bevy_symbios_avatar::animator::{Animator, AnimatorPlugin, GaitKind, floor_tilt};
-use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
+use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin, triangle_ceiling};
 use bevy_symbios_avatar::strips::{AccelClock, PaceStep, Row, Sample, StripPlan, stitch};
 use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, AvatarSystems, Clips};
 use symbios_avatar::anim::driver::Carriage;
@@ -1206,8 +1206,9 @@ fn shortcuts(
         for body in &bodies {
             let budget = body.avatar.budget;
             info!(
-                "{} tris / 30000, {} draws / 3, {} joints, {} KiB texture",
+                "{} tris / {}, {} draws / 3, {} joints, {} KiB texture",
                 budget.tris,
+                triangle_ceiling(&editor.record.archetype),
                 budget.meshes,
                 budget.joints,
                 budget.texture_bytes / 1024

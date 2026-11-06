@@ -261,8 +261,11 @@ sources and the clip's root travel taken out so the two stay comparable.
 across archetype, composites, skin, eyes, face, five hair regions, outfit, name,
 seed and the per-category locks a re-roll honours, and on a quadruped its own
 body, face and coat in place of the person's. A winged body - a bird, a bat, a
-glider or a cross - has its family, its size and six axes; its coat is its
-family's own for now and has no section. Drag one and the body follows. A
+glider or a cross - has its family, its size and six axes, a bird's beak and
+disc, and the surface its leading family wears: a bird's plumage (a colour per
+feather tract, a pattern, a gloss and the engine's owl, crow, parrot and
+songbird presets) or a bat's or a glider's coat, which shows its family's own
+until one is picked. Drag one and the body follows. A
 test pins the exact count, so an axis added to the record cannot quietly miss the
 panel.
 

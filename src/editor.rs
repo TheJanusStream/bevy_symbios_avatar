@@ -100,7 +100,8 @@ use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
 use symbios_avatar::plan::kin::{Blended, Kin, Lineage};
 use symbios_avatar::plan::{
     Agouti, CURVE_RANGE, FLUTES_RANGE, FORK_RANGE, Fantasy, LENGTH_RANGE, ORNAMENT_SWATCHES,
-    POINTS_RANGE, Pattern, Pigment, TAPER_RANGE, THICKNESS_RANGE, TWIST_RANGE, White,
+    POINTS_RANGE, Pattern, Pigment, Plumage, PlumagePattern, TAPER_RANGE, THICKNESS_RANGE,
+    TWIST_RANGE, White,
 };
 use symbios_avatar::texture::{coat_colour, coat_swatches};
 use symbios_avatar::{
@@ -700,12 +701,13 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         // A beast's fur is its own (symbios-avatar #369), and the hair lock
         // keeps it: said here, or the note and the lock row disagree.
         //
-        // A winged body's coat is its leading family's stand-in, stored
-        // nowhere until its plumage and pelts land (symbios-avatar #423), so
-        // it has no coat or fur section: said here for the same reason.
+        // A winged body's surface is its plumage or its coat (symbios-avatar
+        // #423), whichever its leading family wears, and is set in the body
+        // section beside the family rather than in a section of its own:
+        // said here for the same reason.
         let fur = match record.archetype {
             Archetype::Quadruped(_) => " Its fur has a section and a lock of its own.",
-            Archetype::Winged(_) => " Its coat is its family's for now, and has no section yet.",
+            Archetype::Winged(_) => " Its plumage or its coat is set under body, by its family.",
             Archetype::Humanoid(_) | Archetype::Unknown { .. } => "",
         };
         ui.small(format!(
@@ -780,7 +782,8 @@ fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let anatomy = record.archetype.anatomy();
     let frame = record.archetype.composite_priors().frame;
     // A beast rolls its fur under the hair lock (symbios-avatar #369). A
-    // winged body rolls none: its coat is its family's (symbios-avatar #420).
+    // winged body rolls no hair: its plumage or its coat is its colouring's
+    // (symbios-avatar #423).
     let furred = matches!(record.archetype, Archetype::Quadruped(_));
     let mut noted = false;
     ui.horizontal_wrapped(|ui| {
@@ -1074,13 +1077,11 @@ fn quadruped_axes(
 }
 
 /// A winged body (symbios-avatar #420): its family, its size and the six axes
-/// rolled around it, over the engine's envelopes.
+/// rolled around it, over the engine's envelopes; a bird's head (#422); and
+/// its surface (#423), a bird's plumage or a bat's or a glider's coat.
 ///
-/// **Nothing else is stored yet.** Its head, its feet and its coat are its
-/// leading family's stand-ins until later phases store a beak, a bird's feet
-/// and plumage, and its wings are markers until a wing part draws them, so
-/// there is nothing more here to set; the panel says how the body stands,
-/// since that follows the family and no slider.
+/// The panel says how the body stands, since that follows the family and no
+/// slider, and which of the head and the surface it does not wear.
 fn winged_axes(
     ui: &mut egui::Ui,
     params: &mut WingedParams,
@@ -1123,8 +1124,167 @@ fn winged_axes(
     } else {
         ui.small("a bat's and a glider's head has no beak or disc: those sliders are a bird's");
     }
-    // Last, as on a beast: drawn over everything above, toward the young.
+    // Last of the axes, as on a beast: drawn over everything above, toward the
+    // young.
     changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
+    // Its surface (symbios-avatar #423), the leading family's as the head is:
+    // both are stored on every winged body and carried across a change of
+    // family, and each paints only the family it belongs to, so the one that
+    // does not is said rather than offered.
+    if params.lineage().leading() == WingedFamily::Bird {
+        changed |= plumage_axes(ui, params);
+        ui.small(
+            "a bird's coat paints only its bare toes and talons: its feathers are its plumage",
+        );
+    } else {
+        changed |= winged_coat(ui, params);
+        ui.small("plumage is a bird's: a bat's and a glider's fur and membrane are its coat");
+    }
+    changed
+}
+
+/// The four kinds of bird the engine has a plumage preset for (symbios-avatar
+/// #423), by the name the panel shows them under.
+const PLUMAGE_PRESETS: [(&str, Plumage); 4] = [
+    ("owl", Plumage::OWL),
+    ("crow", Plumage::CROW),
+    ("parrot", Plumage::PARROT),
+    ("songbird", Plumage::SONGBIRD),
+];
+
+/// A bird's plumage (symbios-avatar #423): a colour per feather tract, the
+/// pattern drawn over them, the gloss, and the seed its marks are laid out
+/// from, with the engine's four kind presets and the one its head reads as
+/// above them.
+///
+/// **Edited on a copy, written back only on a change**: every colour is the
+/// free sRGB picker, which holds bytes where the record holds thousandths, and
+/// a widget that wrote back what it showed would move a stored colour by
+/// drawing it. The gloss is a slider on the wire's thousandths over the
+/// engine's own `0..=1`, so a stored gloss is always on it.
+///
+/// A colour that shows nowhere yet - the mark on a plain plumage, the disc and
+/// ruff on a head with no disc - says so, painted under its row rather than
+/// hovered, and stays live: it is kept for when it shows.
+fn plumage_axes(ui: &mut egui::Ui, params: &mut WingedParams) -> bool {
+    let mut plumage = params.plumage;
+    let head = params.plumage_for_head();
+    // The panel's own word for the head axis (see `winged_axes`): the disc is
+    // gone at -1.
+    let discless = params.facial_disc <= -1.0;
+    let mut changed = false;
+    egui::CollapsingHeader::new("plumage").show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("preset");
+            for (name, preset) in PLUMAGE_PRESETS {
+                if ui.selectable_label(plumage == preset, name).clicked() && plumage != preset {
+                    plumage = preset;
+                    changed = true;
+                }
+            }
+            if ui.button("match the head").clicked() && plumage != head {
+                plumage = head;
+                changed = true;
+            }
+        });
+        if let Some((name, _)) = PLUMAGE_PRESETS.iter().find(|(_, preset)| *preset == head) {
+            ui.weak(format!("its head reads as a {name}'s"));
+        }
+        let plain = plumage.pattern == PlumagePattern::Plain;
+        for (name, colour, unseen) in [
+            ("head", &mut plumage.head, None),
+            ("back and coverts", &mut plumage.upper, None),
+            ("breast and belly", &mut plumage.under, None),
+            ("flight feathers", &mut plumage.flight, None),
+            ("tail feathers", &mut plumage.tail, None),
+            (
+                "mark colour",
+                &mut plumage.mark,
+                plain.then_some("a plain plumage draws no marks: give it a pattern"),
+            ),
+            (
+                "disc",
+                &mut plumage.disc,
+                discless.then_some("this head has no disc to show it: see facial disc"),
+            ),
+            (
+                "ruff",
+                &mut plumage.ruff,
+                discless.then_some("this head has no ruff to show it: see facial disc"),
+            ),
+        ] {
+            ui.push_id(name, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(name);
+                    changed |= free_colour(ui, colour);
+                });
+                if let Some(unseen) = unseen {
+                    ui.weak(unseen);
+                }
+            });
+        }
+        changed |= chooser(
+            ui,
+            "pattern",
+            &mut plumage.pattern,
+            &PlumagePattern::ALL,
+            PlumagePattern::name,
+        );
+        changed |= axis(ui, "gloss", &mut plumage.gloss, 0.0..=1.0);
+        ui.horizontal(|ui| {
+            ui.label(format!("marks {}", plumage.marks));
+            if ui.button("throw again").clicked() {
+                plumage.marks = next_marks(plumage.marks);
+                changed = true;
+            }
+        });
+    });
+    if changed {
+        params.plumage = plumage;
+    }
+    changed
+}
+
+/// The names a winged body's coat channels are shown by: a beast's, but for
+/// the bare parts, since a bat or a glider has no hooves and no pads.
+const WINGED_CHANNELS: [(&str, CoatChannel); 7] = [
+    ("dark", CoatChannel::Dark),
+    ("light", CoatChannel::Light),
+    ("white markings", CoatChannel::White),
+    ("bare skin", CoatChannel::Leather),
+    ("claws", CoatChannel::Horn),
+    ("mane", CoatChannel::Mane),
+    ("tail", CoatChannel::Tail),
+];
+
+/// A bat's or a glider's coat (symbios-avatar #423): the beast's own section
+/// ([`coat_loci`]) on `WingedParams::coat`.
+///
+/// **Absent until somebody picks**: while the record stores none the body
+/// wears its leading family's own (`WingedFamily::default_coat`), and the
+/// section shows that and writes nothing - it edits a copy, and stores it only
+/// on the first edit. A stored coat has a way back to the family's own, which
+/// stores none again, so a body changed family later wears the new family's.
+fn winged_coat(ui: &mut egui::Ui, params: &mut WingedParams) -> bool {
+    let stored = params.coat;
+    let mut coat = stored.unwrap_or_else(|| params.lineage().leading().default_coat());
+    let mut changed = false;
+    let mut back = false;
+    egui::CollapsingHeader::new("coat").show(ui, |ui| {
+        if stored.is_none() {
+            ui.weak("wears its family's own coat until one is picked");
+        } else if ui.button("back to its family's own").clicked() {
+            back = true;
+        }
+        changed |= coat_loci(ui, &mut coat, &WINGED_CHANNELS, |_, _| None);
+    });
+    if back {
+        params.coat = None;
+        return true;
+    }
+    if changed {
+        params.coat = Some(coat);
+    }
     changed
 }
 
@@ -1423,7 +1583,7 @@ fn swatch(tone: symbios_avatar::Vec3) -> egui::Color32 {
 /// Drawn for every body painted from one, which a quadruped is not
 /// (symbios-avatar #368): it wears a coat, [`coat_axes`], and its stored
 /// complexion moves nothing on it. Nor is a winged body (symbios-avatar
-/// #420), painted in its leading family's stand-in coat.
+/// #420), painted in its plumage or its coat (#423).
 pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     if matches!(
         record.archetype,
@@ -1481,11 +1641,11 @@ pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// A quadruped's coat (symbios-avatar #368): its loci, how rich its red
 /// runs, an unnatural palette, and the seed its marks are laid out from.
 ///
-/// Drawn only for a quadruped, which wears a coat where a person wears a
-/// complexion. A winged body wears one too, but its leading family's
-/// stand-in, stored nowhere (symbios-avatar #420): nothing here would write
-/// anything it reads, so it is not drawn for one until its plumage and pelts
-/// are stored (#423). The loci are a row of choices or a box each, as the stored
+/// Drawn here only for a quadruped, which wears a coat where a person wears a
+/// complexion. A bat- or glider-led winged body wears one too (symbios-avatar
+/// #423), and its section is in the body's own panel beside its family, since
+/// whether it wears a coat or a plumage follows the family (`winged_axes`);
+/// both draw `coat_loci`. The loci are a row of choices or a box each, as the stored
 /// parts are, because the engine derives the colours from them: a liver dog
 /// is the black dog's coat with one locus turned, and this is where it is
 /// turned. The marks are a seed, thrown again rather than slid, because
@@ -1500,66 +1660,87 @@ pub fn coat_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
         return false;
     };
     let (nose, feet, mane) = (params.nose, params.feet, params.fur.mane);
-    let coat = &mut params.coat;
     let mut changed = false;
     egui::CollapsingHeader::new("coat").show(ui, |ui| {
-        changed |= chooser(
-            ui,
-            "pigment",
-            &mut coat.pigment,
-            &Pigment::ALL,
-            Pigment::name,
-        );
-        changed |= ui.checkbox(&mut coat.dilute, "dilute").changed();
-        changed |= chooser(ui, "agouti", &mut coat.agouti, &Agouti::ALL, Agouti::name);
-        changed |= chooser(
-            ui,
-            "pattern",
-            &mut coat.pattern,
-            &Pattern::ALL,
-            Pattern::name,
-        );
-        changed |= chooser(ui, "white", &mut coat.white, &White::ALL, White::name);
-        ui.horizontal_wrapped(|ui| {
-            for (name, locus) in [
-                ("points", &mut coat.points),
-                ("merle", &mut coat.merle),
-                ("roan", &mut coat.roan),
-                ("dun", &mut coat.dun),
-                ("tortie", &mut coat.tortie),
-            ] {
-                changed |= ui.checkbox(locus, name).changed();
-            }
+        changed |= coat_loci(ui, &mut params.coat, &BEAST_CHANNELS, |channel, coat| {
+            unseen_channel(channel, coat, nose, feet, mane)
         });
-        changed |= explored(ui, "intensity", &mut coat.intensity, 0.0, (-1.0, 1.0));
-        changed |= chooser(
-            ui,
-            "palette",
-            &mut coat.fantasy,
-            &Fantasy::ALL,
-            Fantasy::name,
-        );
-        ui.horizontal(|ui| {
-            ui.label(format!("marks {}", coat.marks));
-            if ui.button("throw again").clicked() {
-                coat.marks = next_marks(coat.marks);
-                changed = true;
-            }
-        });
-        egui::CollapsingHeader::new("colours").show(ui, |ui| {
-            for (name, channel) in [
-                ("dark", CoatChannel::Dark),
-                ("light", CoatChannel::Light),
-                ("white markings", CoatChannel::White),
-                ("nose and pads", CoatChannel::Leather),
-                ("claws and hooves", CoatChannel::Horn),
-                ("mane", CoatChannel::Mane),
-                ("tail", CoatChannel::Tail),
-            ] {
-                let unseen = unseen_channel(channel, coat, nose, feet, mane);
-                changed |= coat_channel(ui, name, channel, coat, unseen);
-            }
-        });
+    });
+    changed
+}
+
+/// The names a beast's coat channels are shown by, in [`coat_loci`]'s order.
+const BEAST_CHANNELS: [(&str, CoatChannel); 7] = [
+    ("dark", CoatChannel::Dark),
+    ("light", CoatChannel::Light),
+    ("white markings", CoatChannel::White),
+    ("nose and pads", CoatChannel::Leather),
+    ("claws and hooves", CoatChannel::Horn),
+    ("mane", CoatChannel::Mane),
+    ("tail", CoatChannel::Tail),
+];
+
+/// What a coat's section holds, whoever wears it: the loci, the intensity, the
+/// palette, the marks' seed, and under them its colours, each channel by the
+/// name `channels` gives it and saying what `unseen` says of it. Whether
+/// anything was written.
+///
+/// A beast's [`coat_axes`] and a bat's or a glider's (symbios-avatar #423,
+/// `winged_coat`) both draw it, inside a "coat" header of their own.
+fn coat_loci(
+    ui: &mut egui::Ui,
+    coat: &mut Coat,
+    channels: &[(&str, CoatChannel)],
+    unseen: impl Fn(CoatChannel, &Coat) -> Option<&'static str>,
+) -> bool {
+    let mut changed = chooser(
+        ui,
+        "pigment",
+        &mut coat.pigment,
+        &Pigment::ALL,
+        Pigment::name,
+    );
+    changed |= ui.checkbox(&mut coat.dilute, "dilute").changed();
+    changed |= chooser(ui, "agouti", &mut coat.agouti, &Agouti::ALL, Agouti::name);
+    changed |= chooser(
+        ui,
+        "pattern",
+        &mut coat.pattern,
+        &Pattern::ALL,
+        Pattern::name,
+    );
+    changed |= chooser(ui, "white", &mut coat.white, &White::ALL, White::name);
+    ui.horizontal_wrapped(|ui| {
+        for (name, locus) in [
+            ("points", &mut coat.points),
+            ("merle", &mut coat.merle),
+            ("roan", &mut coat.roan),
+            ("dun", &mut coat.dun),
+            ("tortie", &mut coat.tortie),
+        ] {
+            changed |= ui.checkbox(locus, name).changed();
+        }
+    });
+    changed |= explored(ui, "intensity", &mut coat.intensity, 0.0, (-1.0, 1.0));
+    changed |= chooser(
+        ui,
+        "palette",
+        &mut coat.fantasy,
+        &Fantasy::ALL,
+        Fantasy::name,
+    );
+    ui.horizontal(|ui| {
+        ui.label(format!("marks {}", coat.marks));
+        if ui.button("throw again").clicked() {
+            coat.marks = next_marks(coat.marks);
+            changed = true;
+        }
+    });
+    egui::CollapsingHeader::new("colours").show(ui, |ui| {
+        for &(name, channel) in channels {
+            let why = unseen(channel, &*coat);
+            changed |= coat_channel(ui, name, channel, coat, why);
+        }
     });
     changed
 }
@@ -1982,12 +2163,21 @@ fn swatch_row(
 ///
 /// Written back only when the picker changed, so a colour nobody touches keeps
 /// the value the record was loaded with rather than the byte the picker holds.
+///
+/// **And only when the bytes moved** (symbios-avatar #423): with its popup
+/// open and nothing touched, egui's button can report a change while handing
+/// back the very bytes it was shown, from its own HSV round trip. Taken at its
+/// word, that stored a coat channel that was only following the coat, and
+/// with it the whole coat of a bat that stored none, merely by being looked
+/// at. The same bytes are the same colour, so nothing is written.
 fn free_colour(ui: &mut egui::Ui, colour: &mut [f32; 3]) -> bool {
-    let mut free = swatch(symbios_avatar::Vec3::from_array(*colour));
+    let shown = swatch(symbios_avatar::Vec3::from_array(*colour));
+    let mut free = shown;
     let changed = ui
         .color_edit_button_srgba(&mut free)
         .on_hover_text("any colour, sRGB")
-        .changed();
+        .changed()
+        && free != shown;
     if changed {
         *colour = [
             f32::from(free.r()) / 255.0,
@@ -2719,14 +2909,43 @@ fn to_json(record: &AvatarRecord) -> String {
     serde_json::to_string_pretty(record).unwrap_or_else(|error| format!("// {error}"))
 }
 
+/// The triangle target a person and a beast are judged by: the engine's
+/// `TRIANGLE_TARGET`, 33,500 on the WebGL2 tier (symbios-avatar's
+/// docs/budget.md, "The numbers and where they live").
+///
+/// **A copy, because the engine does not export it**: it lives in the
+/// engine's `tests/budget.rs`, where the sweeps that hold every body under it
+/// are. Re-read that table when the engine moves it. A winged body's is
+/// public, and read from the engine itself ([`triangle_ceiling`]).
+pub const TRIANGLE_TARGET: usize = 33_500;
+
+/// The triangle ceiling the body a record describes is built under: a winged
+/// body's own (`symbios_avatar::wing::MAX_TRIANGLES`, symbios-avatar #421 and
+/// #423), which its cards are fitted to, and [`TRIANGLE_TARGET`] for a person,
+/// a beast and an archetype this build does not know.
+#[must_use]
+pub fn triangle_ceiling(archetype: &Archetype) -> usize {
+    match archetype {
+        Archetype::Winged(_) => symbios_avatar::wing::MAX_TRIANGLES,
+        Archetype::Humanoid(_) | Archetype::Quadruped(_) | Archetype::Unknown { .. } => {
+            TRIANGLE_TARGET
+        }
+    }
+}
+
 /// What the body costs, how long it took, and the one measurement worth a
 /// button.
+///
+/// The triangles are read against the ceiling of the plan being edited
+/// ([`triangle_ceiling`]); for the few frames between a change of archetype
+/// and the build that answers it, the count is still the old body's.
 fn readout(ui: &mut egui::Ui, editor: &mut RecordEditor, bodies: &Query<&AvatarBody>) {
     if let Some(body) = bodies.iter().next() {
         let budget = body.avatar.budget;
         ui.small(format!(
-            "{} tris / 30000 · {} draws · {} KiB texture",
+            "{} tris / {} · {} draws · {} KiB texture",
             budget.tris,
+            triangle_ceiling(&editor.record.archetype),
             budget.meshes,
             budget.texture_bytes / 1024
         ));
@@ -2857,6 +3076,82 @@ mod tests {
         ]
     }
 
+    /// A winged body's axes, for [`axes`]: its own list, as a beast's is, since
+    /// its surfaces put it past a dozen lines.
+    fn winged_axes_of(p: &WingedParams) -> Vec<(&'static str, f32)> {
+        // symbios-avatar #420: the size, the six axes and the blend; #422:
+        // the head's three.
+        let mut out = vec![
+            ("size", p.size),
+            ("wing_length", p.wing_length),
+            ("neck_length", p.neck_length),
+            ("leg_length", p.leg_length),
+            ("tail_length", p.tail_length),
+            ("head_size", p.head_size),
+            ("appeal", p.appeal),
+            ("beak_length", p.beak_length),
+            ("beak_hook", p.beak_hook),
+            ("facial_disc", p.facial_disc),
+            ("blend", p.blend),
+        ];
+        // symbios-avatar #423: every channel of the plumage's eight colours,
+        // its gloss, and a coat's one axis and a part of each colour it can
+        // pick, or a value none is while it stores none.
+        let plumage = &p.plumage;
+        for (names, colour) in [
+            (
+                ["plumage head r", "plumage head g", "plumage head b"],
+                plumage.head,
+            ),
+            (
+                ["plumage upper r", "plumage upper g", "plumage upper b"],
+                plumage.upper,
+            ),
+            (
+                ["plumage under r", "plumage under g", "plumage under b"],
+                plumage.under,
+            ),
+            (
+                ["plumage flight r", "plumage flight g", "plumage flight b"],
+                plumage.flight,
+            ),
+            (
+                ["plumage tail r", "plumage tail g", "plumage tail b"],
+                plumage.tail,
+            ),
+            (
+                ["plumage mark r", "plumage mark g", "plumage mark b"],
+                plumage.mark,
+            ),
+            (
+                ["plumage disc r", "plumage disc g", "plumage disc b"],
+                plumage.disc,
+            ),
+            (
+                ["plumage ruff r", "plumage ruff g", "plumage ruff b"],
+                plumage.ruff,
+            ),
+        ] {
+            out.extend(names.into_iter().zip(colour));
+        }
+        out.push(("plumage gloss", plumage.gloss));
+        let coat = p.coat;
+        let part = |pick: fn(&Coat) -> Option<[f32; 3]>, at: usize| {
+            coat.as_ref().and_then(pick).map_or(-1.0, |c| c[at])
+        };
+        out.extend([
+            ("coat intensity", coat.map_or(-1.0, |c| c.intensity)),
+            ("coat dark", part(|c| c.colours.dark, 0)),
+            ("coat light", part(|c| c.colours.light, 1)),
+            ("coat white", part(|c| c.colours.white, 2)),
+            ("coat leather", part(|c| c.colours.leather, 0)),
+            ("coat horn", part(|c| c.colours.horn, 1)),
+            ("coat mane", part(|c| c.colours.mane, 2)),
+            ("coat tail", part(|c| c.colours.tail, 0)),
+        ]);
+        out
+    }
+
     /// A piece's length, or a value no length is if it is not worn.
     fn ornament(p: &QuadrupedParams, kind: OrnamentKind) -> f32 {
         p.ornaments.get(kind).map_or(-1.0, |piece| piece.length)
@@ -2888,20 +3183,7 @@ mod tests {
                 ("chest_fullness", p.chest_fullness),
             ],
             Archetype::Quadruped(p) => beast_axes(p),
-            // symbios-avatar #420: the size, the six axes and the blend.
-            Archetype::Winged(p) => vec![
-                ("size", p.size),
-                ("wing_length", p.wing_length),
-                ("neck_length", p.neck_length),
-                ("leg_length", p.leg_length),
-                ("tail_length", p.tail_length),
-                ("head_size", p.head_size),
-                ("appeal", p.appeal),
-                ("beak_length", p.beak_length),
-                ("beak_hook", p.beak_hook),
-                ("facial_disc", p.facial_disc),
-                ("blend", p.blend),
-            ],
+            Archetype::Winged(p) => winged_axes_of(p),
             Archetype::Unknown { .. } => Vec::new(),
         };
         out.extend([
@@ -3084,7 +3366,17 @@ mod tests {
         // it went with the sculpted shell whose rim it cut into (symbios-avatar
         // #202): a head of hair is five regions of cards now and nothing about
         // it is a whole number a person sets.
-        vec![("age", record.composites.age)]
+        let mut out = vec![("age", record.composites.age)];
+        // symbios-avatar #423: the seeds a winged body's marks are laid out
+        // from, thrown rather than slid.
+        if let Archetype::Winged(p) = &record.archetype {
+            out.push(("plumage marks", u32::from(p.plumage.marks)));
+            out.push((
+                "coat marks",
+                p.coat.map_or(u32::MAX, |c| u32::from(c.marks)),
+            ));
+        }
+        out
     }
 
     /// The hair half of [`fiddled`], which is two thirds of the record's axes.
@@ -4431,10 +4723,12 @@ mod tests {
 
     #[test]
     fn a_winged_body_is_offered_no_coat_fur_skin_face_hair_or_outfit() {
-        // symbios-avatar #420: its coat is its leading family's stand-in and
-        // stored nowhere, it grows no fur, and its complexion paints nothing,
-        // so none of those is offered; its eyes are its own. Said where the
-        // body is chosen, and no lock is offered on what it never rolls.
+        // symbios-avatar #420: it grows no fur a section sets, and its
+        // complexion paints nothing, so none of those is offered; its eyes are
+        // its own. Its surface, a plumage or a coat (#423), is set under body
+        // by its family, so no top-level coat section is offered either. Said
+        // where the body is chosen, and no lock is offered on what it never
+        // rolls.
         let mut record = AvatarRecord::new("Bird", Archetype::Winged(WingedParams::default()));
         let shown = offered(&mut record);
         for section in ["coat", "fur", "skin", "face", "hair", "outfit"] {
@@ -4448,7 +4742,7 @@ mod tests {
             identity(ui, &mut record);
         });
         let note = "This body has no face, hair or outfit yet: those are a person's. \
-                    Its coat is its family's for now, and has no section yet.";
+                    Its plumage or its coat is set under body, by its family.";
         assert!(
             identity_shown.iter().any(|label| label == note),
             "{identity_shown:?}"
@@ -4582,6 +4876,36 @@ mod tests {
                 family: WingedFamily::Glider,
                 hybrid: Some(WingedFamily::Bird),
                 blend: 0.345_67,
+                // symbios-avatar #423: both surfaces off their defaults,
+                // every colour and the gloss off a thousandth, so the round
+                // trip proves the panel's grid for them too.
+                plumage: Plumage {
+                    head: [0.123_45, 0.234_56, 0.345_67],
+                    upper: [0.456_78, 0.567_89, 0.678_91],
+                    under: [0.789_12, 0.891_23, 0.912_34],
+                    flight: [0.012_34, 0.987_65, 0.876_54],
+                    tail: [0.765_43, 0.654_32, 0.543_21],
+                    mark: [0.432_19, 0.321_98, 0.219_87],
+                    disc: [0.198_76, 0.987_61, 0.876_12],
+                    ruff: [0.761_23, 0.612_34, 0.123_46],
+                    pattern: PlumagePattern::Barred,
+                    gloss: 0.654_32,
+                    marks: 54_321,
+                },
+                coat: Some(Coat {
+                    pigment: Pigment::Liver,
+                    dilute: true,
+                    pattern: Pattern::Brindle,
+                    intensity: -0.456_78,
+                    marks: 1_234,
+                    colours: CoatColours {
+                        dark: Some([0.111_11, 0.222_22, 0.333_33]),
+                        leather: Some([0.444_44, 0.555_55, 0.666_66]),
+                        tail: Some([0.777_77, 0.888_88, 0.999_99]),
+                        ..CoatColours::default()
+                    },
+                    ..Coat::default()
+                }),
             }),
         );
         winged.sanitize();
@@ -4591,6 +4915,12 @@ mod tests {
         let mut back: AvatarRecord = serde_json::from_str(&json).expect("its own JSON parses");
         back.sanitize();
         assert_eq!(axes(&editor.record).len(), axes(&back).len());
+        for ((name, before), (_, after)) in counts(&editor.record).iter().zip(counts(&back)) {
+            assert_eq!(
+                *before, after,
+                "{name} went out as {before} and came back as {after}"
+            );
+        }
         for ((name, before), (_, after)) in axes(&editor.record).iter().zip(axes(&back)) {
             assert_eq!(
                 before.to_bits(),
@@ -4606,6 +4936,347 @@ mod tests {
         assert_eq!(
             editor.record, back,
             "the record did not survive its own JSON"
+        );
+    }
+
+    /// `frames` frames of a record's body section with every header and popup
+    /// open (`set_everything_is_visible`, so a section added later cannot hide
+    /// from a guard), and no input: the labels of the last frame, and whether
+    /// any frame said it changed something.
+    fn drawn_open(record: &mut AvatarRecord, frames: usize) -> (Vec<String>, bool) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        ctx.memory_mut(|memory| memory.set_everything_is_visible(true));
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0));
+        let mut changed = false;
+        let mut shown = Vec::new();
+        for _ in 0..frames {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| {
+                    changed |= body_axes(ui, record);
+                },
+            );
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            shown = update
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| node.label().or_else(|| node.value()).map(str::to_owned))
+                .collect();
+        }
+        (shown, changed)
+    }
+
+    /// A bird whose every surface number sits on a thousandth and off the
+    /// colour picker's byte grid, with no disc for its disc and ruff to show
+    /// on, carrying a coat a bird never wears.
+    fn plumed() -> AvatarRecord {
+        let mut record = AvatarRecord::new(
+            "Bird",
+            Archetype::Winged(WingedParams {
+                facial_disc: -1.0,
+                plumage: Plumage {
+                    head: [0.123, 0.457, 0.789],
+                    upper: [0.001, 0.999, 0.333],
+                    under: [0.777, 0.111, 0.555],
+                    flight: [0.321, 0.654, 0.987],
+                    tail: [0.013, 0.502, 0.998],
+                    mark: [0.249, 0.751, 0.499],
+                    disc: [0.611, 0.389, 0.177],
+                    ruff: [0.903, 0.097, 0.441],
+                    pattern: PlumagePattern::Streaked,
+                    gloss: 0.457,
+                    marks: 777,
+                },
+                coat: Some(Coat {
+                    intensity: 0.333,
+                    ..Coat::default()
+                }),
+                ..WingedParams::default()
+            }),
+        );
+        record.sanitize();
+        record
+    }
+
+    #[test]
+    fn a_winged_body_s_surfaces_write_nothing_merely_by_being_drawn() {
+        // symbios-avatar #423. Every colour is a free sRGB picker, which holds
+        // bytes where the record holds thousandths, and egui's colour button
+        // writes its own round trip back each frame; the gloss is a slider
+        // with a step, which rewrites a value off it. Drawn idle with every
+        // header and popup open, nothing moves and nothing says it changed:
+        // an absent coat stays absent, a stored one stays as it was.
+        let bat = |coat: Option<Coat>| {
+            AvatarRecord::new(
+                "Bat",
+                Archetype::Winged(WingedParams {
+                    family: WingedFamily::Bat,
+                    coat,
+                    ..WingedParams::default()
+                }),
+            )
+        };
+        let mut glider = WingedParams::default();
+        glider.set_kind(WingedFamily::Glider, None, 0.0);
+        glider.coat = Some(Coat {
+            pigment: Pigment::Red,
+            intensity: -0.457,
+            marks: 4_321,
+            colours: CoatColours {
+                dark: Some([0.123, 0.457, 0.789]),
+                tail: Some([0.001, 0.999, 0.333]),
+                ..CoatColours::default()
+            },
+            ..Coat::default()
+        });
+        let mut glider = AvatarRecord::new("Glider", Archetype::Winged(glider));
+        glider.sanitize();
+        let mut default_bird =
+            AvatarRecord::new("Bird", Archetype::Winged(WingedParams::default()));
+        let mut plumed = plumed();
+        let mut bare_bat = bat(None);
+        let bird_says =
+            "a bird's coat paints only its bare toes and talons: its feathers are its plumage";
+        let beast_says =
+            "plumage is a bird's: a bat's and a glider's fur and membrane are its coat";
+        for (record, shows, hides) in [
+            (
+                &mut default_bird,
+                &["plumage", "gloss", "back and coverts", "ruff", bird_says][..],
+                &["coat", "bare skin", beast_says][..],
+            ),
+            (
+                &mut plumed,
+                &[
+                    "plumage",
+                    "this head has no disc to show it: see facial disc",
+                    "this head has no ruff to show it: see facial disc",
+                    "marks 777",
+                    bird_says,
+                ][..],
+                &["coat", "a plain plumage draws no marks: give it a pattern"][..],
+            ),
+            (
+                &mut bare_bat,
+                &[
+                    "coat",
+                    "bare skin",
+                    "claws",
+                    "wears its family's own coat until one is picked",
+                    beast_says,
+                ][..],
+                &["plumage", "gloss", "back to its family's own", bird_says][..],
+            ),
+            (
+                &mut glider,
+                &["coat", "back to its family's own", "marks 4321", beast_says][..],
+                &["plumage", "wears its family's own coat until one is picked"][..],
+            ),
+        ] {
+            let before = record.clone();
+            let (shown, changed) = drawn_open(record, 10);
+            for label in shows {
+                assert!(
+                    shown.iter().any(|shown| shown == label),
+                    "{}: {label} is not shown: {shown:?}",
+                    record.name
+                );
+            }
+            for label in hides {
+                assert!(
+                    !shown.iter().any(|shown| shown == label),
+                    "{}: {label} is shown: {shown:?}",
+                    record.name
+                );
+            }
+            assert!(
+                !changed,
+                "{}: reported as changed with no input",
+                record.name
+            );
+            assert_eq!(*record, before, "{}: rewritten on sight", record.name);
+        }
+    }
+
+    /// The body section on `record`, the headers named in `open` clicked open in
+    /// turn, with a runner of frames handed to `go` (symbios-avatar #423).
+    fn with_open_body(
+        record: &mut AvatarRecord,
+        open: &[&str],
+        mut go: impl FnMut(&mut Frame, &mut AvatarRecord),
+    ) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0));
+        let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
+            let mut changed = false;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    changed |= body_axes(ui, record);
+                },
+            );
+            let update = output
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            let nodes: Nodes = update
+                .nodes
+                .iter()
+                .filter_map(|(_, node)| {
+                    let text = node.label().or(node.value())?;
+                    Some((text.to_owned(), node.bounds()?))
+                })
+                .collect();
+            (nodes, changed)
+        };
+        for &header in open {
+            tap_label(header, &mut run, record);
+        }
+        go(&mut run, record);
+    }
+
+    /// Click the topmost node labelled `label` over the frames a click takes,
+    /// and let the frames after it settle; whether the click's frame said it
+    /// changed something.
+    fn tap_label(label: &str, run: &mut Frame, record: &mut AvatarRecord) -> bool {
+        let (nodes, _) = run(Vec::new(), record);
+        let bounds = nodes
+            .iter()
+            .filter(|(found, _)| found == label)
+            .map(|(_, bounds)| *bounds)
+            .min_by(|a, b| a.y0.total_cmp(&b.y0))
+            .unwrap_or_else(|| panic!("no {label}: {nodes:?}"));
+        let at = centre(
+            f64::midpoint(bounds.x0, bounds.x1),
+            f64::midpoint(bounds.y0, bounds.y1),
+        );
+        run(vec![egui::Event::PointerMoved(at), press(at, true)], record);
+        let (_, changed) = run(vec![press(at, false)], record);
+        for _ in 0..10 {
+            run(Vec::new(), record);
+        }
+        changed
+    }
+
+    /// The winged params of `record`.
+    fn winged_of(record: &AvatarRecord) -> WingedParams {
+        let Archetype::Winged(params) = &record.archetype else {
+            panic!("a winged body");
+        };
+        *params
+    }
+
+    #[test]
+    fn a_plumage_preset_sets_the_plumage_it_names_and_the_head_s_is_matched() {
+        // symbios-avatar #423: each kind's button wears the engine's preset
+        // whole, and "match the head" the one the head reads as - a parrot's
+        // for a parrot's beak, which the panel names.
+        let mut record = AvatarRecord::new(
+            "Bird",
+            Archetype::Winged(WingedParams {
+                beak_length: 0.3,
+                beak_hook: 1.0,
+                facial_disc: -1.0,
+                ..WingedParams::default()
+            }),
+        );
+        with_open_body(&mut record, &["plumage"], |run, record| {
+            let (nodes, _) = run(Vec::new(), record);
+            assert!(
+                nodes
+                    .iter()
+                    .any(|(label, _)| label == "its head reads as a parrot's"),
+                "{nodes:?}"
+            );
+            for (name, preset) in [
+                ("crow", Plumage::CROW),
+                ("songbird", Plumage::SONGBIRD),
+                ("parrot", Plumage::PARROT),
+                ("owl", Plumage::OWL),
+            ] {
+                // The owl's is the default, so the last pick comes back to it
+                // from the parrot's.
+                assert!(tap_label(name, run, record), "{name} reported no change");
+                assert_eq!(winged_of(record).plumage, preset, "{name}");
+                assert!(
+                    !tap_label(name, run, record),
+                    "{name} again changes nothing"
+                );
+            }
+            assert!(tap_label("match the head", run, record));
+            let bird = winged_of(record);
+            assert_eq!(bird.plumage, bird.plumage_for_head());
+            assert_eq!(bird.plumage, Plumage::PARROT);
+            // Nothing but the plumage moved, and the coat stays absent.
+            assert_eq!(
+                bird,
+                WingedParams {
+                    beak_length: 0.3,
+                    beak_hook: 1.0,
+                    facial_disc: -1.0,
+                    plumage: Plumage::PARROT,
+                    ..WingedParams::default()
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn a_bat_s_coat_is_stored_on_its_first_edit_and_goes_back_to_its_family_s() {
+        // symbios-avatar #423: absent reads as the family's own and the
+        // section shows that, writing nothing; the first edit stores the coat
+        // it was made on, and the way back stores none again.
+        let mut record = AvatarRecord::new(
+            "Bat",
+            Archetype::Winged(WingedParams {
+                family: WingedFamily::Bat,
+                ..WingedParams::default()
+            }),
+        );
+        with_open_body(&mut record, &["coat"], |run, record| {
+            assert_eq!(winged_of(record).coat, None, "opening it stored nothing");
+            assert!(tap_label("throw again", run, record));
+            let family = WingedFamily::Bat.default_coat();
+            assert_eq!(
+                winged_of(record).coat,
+                Some(Coat {
+                    marks: next_marks(family.marks),
+                    ..family
+                }),
+                "the family's own, its marks thrown"
+            );
+            assert!(tap_label("back to its family's own", run, record));
+            assert_eq!(winged_of(record).coat, None);
+        });
+    }
+
+    #[test]
+    fn the_budget_readout_reads_each_plan_s_own_ceiling() {
+        // A winged body is built under its own ceiling, the engine's, and a
+        // person and a beast under the target the engine's budget sweeps hold
+        // them to (docs/budget.md); none of them is the 30,000 the readout
+        // printed before.
+        assert_eq!(
+            triangle_ceiling(&Archetype::Winged(WingedParams::default())),
+            symbios_avatar::wing::MAX_TRIANGLES
+        );
+        assert_eq!(symbios_avatar::wing::MAX_TRIANGLES, 27_200);
+        assert_eq!(triangle_ceiling(&Archetype::default()), 33_500);
+        assert_eq!(
+            triangle_ceiling(&Archetype::Quadruped(QuadrupedParams::default())),
+            33_500
         );
     }
 
