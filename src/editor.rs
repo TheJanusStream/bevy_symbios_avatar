@@ -1104,6 +1104,25 @@ fn winged_axes(
     ] {
         changed |= explored(ui, name, value, 0.0, (-1.0, 1.0));
     }
+    // A bird's head (symbios-avatar #422): stored on every winged body, so a
+    // change of family carries them across and back, and drawn only where the
+    // head is a bird's. Over the engine's own envelope, as every axis here.
+    if params.lineage().leading() == WingedFamily::Bird {
+        for (name, value) in [
+            ("beak length", &mut params.beak_length),
+            ("beak hook", &mut params.beak_hook),
+            ("facial disc", &mut params.facial_disc),
+        ] {
+            changed |= explored(ui, name, value, 0.0, (-1.0, 1.0));
+        }
+        ui.small(
+            "at 0 an owl's: a short hooked beak in a full disc; a crow's beak is long and \
+             straight, a parrot's deep and hooked, and the disc is gone at -1. A hooked beak \
+             grips with two toes back, as an owl's and a parrot's do",
+        );
+    } else {
+        ui.small("a bat's and a glider's head has no beak or disc: those sliders are a bird's");
+    }
     // Last, as on a beast: drawn over everything above, toward the young.
     changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
     changed
@@ -2878,6 +2897,9 @@ mod tests {
                 ("tail_length", p.tail_length),
                 ("head_size", p.head_size),
                 ("appeal", p.appeal),
+                ("beak_length", p.beak_length),
+                ("beak_hook", p.beak_hook),
+                ("facial_disc", p.facial_disc),
                 ("blend", p.blend),
             ],
             Archetype::Unknown { .. } => Vec::new(),
@@ -4554,6 +4576,9 @@ mod tests {
                 tail_length: -0.912_34,
                 head_size: 0.123_45,
                 appeal: 1.123_45,
+                beak_length: 0.567_89,
+                beak_hook: -0.345_67,
+                facial_disc: -0.789_12,
                 family: WingedFamily::Glider,
                 hybrid: Some(WingedFamily::Bird),
                 blend: 0.345_67,

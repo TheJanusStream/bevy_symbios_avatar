@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -113,7 +113,11 @@ bevy = "0.19"
 # sugar glider and their crosses, with their wings. Breaking for a 0.x crate:
 # `Archetype` grew the `Winged` variant, which every match here had to answer,
 # and `Rig` and `Parts` grew public `wings` fields.
-symbios-avatar = "0.20"
+#
+# **0.21 for a bird's head and feet** (#59, engine #422): a beak, an owl's
+# disc, toes and talons. Breaking for a 0.x crate: `WingedParams` grew the
+# public `beak_length`, `beak_hook` and `facial_disc` fields the editor sets.
+symbios-avatar = "0.21"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
