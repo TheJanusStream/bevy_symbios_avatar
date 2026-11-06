@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.21.0"
+version = "0.22.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -108,7 +108,12 @@ bevy = "0.19"
 # strafe crosses over in a split stance, a heading's shorter stride steps at
 # the cadence that covers the travel, and a body turning where it stands steps
 # round. Breaking for a 0.x crate: `Stride` grew a public `split` field.
-symbios-avatar = "0.19"
+#
+# **0.20 for winged bodies** (#57, engine #420 and #421): a bird, a bat, a
+# sugar glider and their crosses, with their wings. Breaking for a 0.x crate:
+# `Archetype` grew the `Winged` variant, which every match here had to answer,
+# and `Rig` and `Parts` grew public `wings` fields.
+symbios-avatar = "0.20"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,

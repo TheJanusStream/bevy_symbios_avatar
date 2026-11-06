@@ -19,6 +19,7 @@
 //! cargo run --release -F builtin-clips --example viewer -- --seed 7
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped --gesture Sit  # down, and held
+//! cargo run --release -F builtin-clips --example viewer -- --winged --family bat   # a bird, a bat or a glider
 //! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
@@ -181,7 +182,8 @@ use bevy_symbios_avatar::editor::{RecordEditor, RecordEditorPlugin};
 use bevy_symbios_avatar::strips::{AccelClock, PaceStep, Row, Sample, StripPlan, stitch};
 use bevy_symbios_avatar::{AvatarBody, AvatarPlugin, AvatarSystems, Clips};
 use symbios_avatar::anim::driver::Carriage;
-use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams};
+use symbios_avatar::plan::kin::{Blended, Kin, Lineage};
+use symbios_avatar::{Archetype, AvatarRecord, QuadrupedParams, WingedParams};
 
 /// How far the camera starts from the body, as a multiple of its longest side.
 const START_BACK: f32 = 1.9;
@@ -618,6 +620,16 @@ fn stage(
     ));
 }
 
+/// Makes `params` a body of the family `name`, or says it has none such.
+fn pick_family<P: Blended>(params: &mut P, name: &str) {
+    if let Some(family) = P::Kin::parse(name) {
+        params.set_lineage(Lineage::pure(family));
+    } else {
+        let names: Vec<&str> = P::Kin::ALL.iter().map(|kin| kin.name()).collect();
+        eprintln!("--family {name}: not one of {}", names.join(", "));
+    }
+}
+
 /// The record named on the command line, in an editor holding it.
 ///
 /// The editor spawns the body itself, so the record the panel shows and the
@@ -627,6 +639,8 @@ fn starting_editor() -> RecordEditor {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let archetype = if args.iter().any(|arg| arg == "--quadruped") {
         Archetype::Quadruped(QuadrupedParams::default())
+    } else if args.iter().any(|arg| arg == "--winged") {
+        Archetype::Winged(WingedParams::default())
     } else {
         Archetype::default()
     };
@@ -638,6 +652,17 @@ fn starting_editor() -> RecordEditor {
         .and_then(|seed| seed.parse::<i64>().ok())
     {
         record.reroll(seed);
+    }
+    // `--family bat`: a family of the plan, picked as the panel picks one, so
+    // a seeded body keeps its character. After the reroll, which draws one.
+    if let Some(name) = word("--family") {
+        match &mut record.archetype {
+            Archetype::Quadruped(params) => pick_family(params, &name),
+            Archetype::Winged(params) => pick_family(params, &name),
+            Archetype::Humanoid(_) | Archetype::Unknown { .. } => {
+                eprintln!("--family {name}: a person has no family");
+            }
+        }
     }
     // `--mane 0` for a bald judgement shot: hair is the loudest thing on a head
     // and the first thing in the way of judging a jaw, and the panel's controls

@@ -97,15 +97,16 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use symbios_avatar::dress::{self, GarmentParams, GarmentTexture, SurfaceConfig};
+use symbios_avatar::plan::kin::{Blended, Kin, Lineage};
 use symbios_avatar::plan::{
     Agouti, CURVE_RANGE, FLUTES_RANGE, FORK_RANGE, Fantasy, LENGTH_RANGE, ORNAMENT_SWATCHES,
     POINTS_RANGE, Pattern, Pigment, TAPER_RANGE, THICKNESS_RANGE, TWIST_RANGE, White,
 };
 use symbios_avatar::texture::{coat_colour, coat_swatches};
 use symbios_avatar::{
-    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Coat, CoatChannel, Family,
-    Feet, GENERATOR_VERSION, HumanoidParams, Limb, Nose, Ornament, OrnamentKind, Ornaments, Pupil,
-    QuadrupedParams, Rig, Zone,
+    Archetype, Avatar, AvatarConfig, AvatarRecord, BodyPlan, Category, Coat, CoatChannel, Feet,
+    GENERATOR_VERSION, HumanoidParams, Limb, Nose, Ornament, OrnamentKind, Ornaments, Pupil,
+    QuadrupedParams, Rig, WingedFamily, WingedParams, Zone,
 };
 
 use crate::spawn::{AvatarBody, spawn_avatar};
@@ -670,6 +671,13 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
             record.archetype = Archetype::Quadruped(QuadrupedParams::default());
             changed = true;
         }
+        // The third plan (symbios-avatar #420), switched to as a beast is: its
+        // own default body, a bird, which the seed arrows then roll from.
+        let winged = matches!(record.archetype, Archetype::Winged(_));
+        if ui.selectable_label(winged, "winged").clicked() && !winged {
+            record.archetype = Archetype::Winged(WingedParams::default());
+            changed = true;
+        }
     });
     // Said where the body is chosen, because the sections it hides are
     // further down and their absence is otherwise a puzzle (#365) - naming
@@ -691,10 +699,14 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
         };
         // A beast's fur is its own (symbios-avatar #369), and the hair lock
         // keeps it: said here, or the note and the lock row disagree.
-        let fur = if matches!(record.archetype, Archetype::Quadruped(_)) {
-            " Its fur has a section and a lock of its own."
-        } else {
-            ""
+        //
+        // A winged body's coat is its leading family's stand-in, stored
+        // nowhere until its plumage and pelts land (symbios-avatar #423), so
+        // it has no coat or fur section: said here for the same reason.
+        let fur = match record.archetype {
+            Archetype::Quadruped(_) => " Its fur has a section and a lock of its own.",
+            Archetype::Winged(_) => " Its coat is its family's for now, and has no section yet.",
+            Archetype::Humanoid(_) | Archetype::Unknown { .. } => "",
         };
         ui.small(format!(
             "This body has no {named} yet: those are a person's.{fur}"
@@ -767,7 +779,8 @@ pub fn identity(ui: &mut egui::Ui, record: &mut AvatarRecord) -> (bool, bool) {
 fn lock_row(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
     let anatomy = record.archetype.anatomy();
     let frame = record.archetype.composite_priors().frame;
-    // A beast rolls its fur under the hair lock (symbios-avatar #369).
+    // A beast rolls its fur under the hair lock (symbios-avatar #369). A
+    // winged body rolls none: its coat is its family's (symbios-avatar #420).
     let furred = matches!(record.archetype, Archetype::Quadruped(_));
     let mut noted = false;
     ui.horizontal_wrapped(|ui| {
@@ -1007,6 +1020,7 @@ pub fn body_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
                 );
             }
             Archetype::Quadruped(params) => changed |= quadruped_axes(ui, params, composites),
+            Archetype::Winged(params) => changed |= winged_axes(ui, params, composites),
             // An archetype this build does not know about is kept verbatim
             // rather than edited into something else — a panel that offered
             // sliders for it would write a body over one it cannot read.
@@ -1055,6 +1069,42 @@ fn quadruped_axes(
     );
     // Last, because it is drawn over everything above (symbios-avatar #366):
     // naturalistic to cute, the head, the face, the body and the legs at once.
+    changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
+    changed
+}
+
+/// A winged body (symbios-avatar #420): its family, its size and the six axes
+/// rolled around it, over the engine's envelopes.
+///
+/// **Nothing else is stored yet.** Its head, its feet and its coat are its
+/// leading family's stand-ins until later phases store a beak, a bird's feet
+/// and plumage, and its wings are markers until a wing part draws them, so
+/// there is nothing more here to set; the panel says how the body stands,
+/// since that follows the family and no slider.
+fn winged_axes(
+    ui: &mut egui::Ui,
+    params: &mut WingedParams,
+    composites: &mut symbios_avatar::Composites,
+) -> bool {
+    let mut changed = family_picker(ui, params, composites);
+    ui.small(match params.lineage().leading() {
+        WingedFamily::Bird => "It perches on its hind legs, as a bird does.",
+        WingedFamily::Bat => "It crawls on its wrists and its feet, as a bat does.",
+        WingedFamily::Glider => "It stands on all four, as a glider does.",
+    });
+    let size = WingedParams::size_envelope();
+    changed |= axis(ui, "size", &mut params.size, size.0..=size.1);
+    ui.small("size is its length from the bill or the nose to the root of the tail, in metres");
+    for (name, value) in [
+        ("wing length", &mut params.wing_length),
+        ("neck length", &mut params.neck_length),
+        ("leg length", &mut params.leg_length),
+        ("tail length", &mut params.tail_length),
+        ("head size", &mut params.head_size),
+    ] {
+        changed |= explored(ui, name, value, 0.0, (-1.0, 1.0));
+    }
+    // Last, as on a beast: drawn over everything above, toward the young.
     changed |= explored(ui, "appeal", &mut params.appeal, 0.0, (-1.0, 1.0));
     changed
 }
@@ -1228,22 +1278,28 @@ fn chooser<T: Copy + PartialEq>(
     changed
 }
 
-/// Which kind of animal a quadruped is, and whether it is a cross
-/// (symbios-avatar #366).
+/// Which kind of animal a body is, and whether it is a cross: a quadruped's
+/// (symbios-avatar #366) and a winged body's (#420), any plan blended from
+/// families, through the engine's own [`Blended`] and [`Kin`].
 ///
-/// **A pick goes through `QuadrupedParams::set_kind`, never into the fields.**
+/// **A pick goes through [`Blended::set_lineage`], never into the fields.**
 /// The geometry reads only the axes, and a family is where a roll centres
-/// them, so writing the field alone would change nothing on screen; `set_kind`
-/// carries the body's character to the new centre instead - a long-legged dog
-/// becomes a long-legged cat - and a cross's blend slider morphs the body
-/// between its two families as it is dragged. Picking a cross starts it half
-/// way, and the blend is only offered on a cross. The composites the family
-/// centres are carried the same way (`CompositePriors::carry`).
-fn family_picker(
+/// them, so writing the field alone would change nothing on screen;
+/// `set_lineage` - what `QuadrupedParams::set_kind` and
+/// `WingedParams::set_kind` call - carries the body's character to the new
+/// centre instead - a long-legged dog becomes a long-legged cat - and a
+/// cross's blend slider morphs the body between its two families as it is
+/// dragged. Picking a cross starts it half way, and the blend is only offered
+/// on a cross. The composites the family centres are carried the same way
+/// (`CompositePriors::carry`).
+fn family_picker<P>(
     ui: &mut egui::Ui,
-    params: &mut QuadrupedParams,
+    params: &mut P,
     composites: &mut symbios_avatar::Composites,
-) -> bool {
+) -> bool
+where
+    P: Blended + BodyPlan + Copy + Send + Sync + 'static,
+{
     // **A drag re-kinds from where it began** (the P1 critic). Each frame of a
     // dragged blend used to re-centre from the last frame's body, and every
     // frame quantises, so the rounding summed over the drag: a dog crossed with
@@ -1252,13 +1308,18 @@ fn family_picker(
     // it was when the gesture began is kept, and every frame of it re-kinds
     // from that: a drag lands where a jump would (#1599's lesson in the
     // overlands editor - remember what was asked, not what was last shown).
-    let origin_id = ui.id().with("quadruped kind origin");
-    let origin: Option<(QuadrupedParams, symbios_avatar::Composites)> =
-        ui.data(|data| data.get_temp(origin_id));
-    let (mut family, mut hybrid, mut blend) = (params.family, params.hybrid, params.blend);
+    // Kept per plan, so a body switched mid-drag finds no other plan's origin.
+    let origin_id = ui.id().with(("kind origin", std::any::type_name::<P>()));
+    let origin: Option<(P, symbios_avatar::Composites)> = ui.data(|data| data.get_temp(origin_id));
+    let was = params.lineage();
+    let Lineage {
+        mut family,
+        mut hybrid,
+        mut blend,
+    } = was;
     ui.horizontal(|ui| {
         ui.label("family");
-        for kind in Family::ALL {
+        for &kind in P::Kin::ALL {
             if ui.selectable_label(family == kind, kind.name()).clicked() {
                 family = kind;
             }
@@ -1269,7 +1330,7 @@ fn family_picker(
         if ui.selectable_label(hybrid.is_none(), "none").clicked() {
             hybrid = None;
         }
-        for kind in Family::ALL.into_iter().filter(|&kind| kind != family) {
+        for &kind in P::Kin::ALL.iter().filter(|&&kind| kind != family) {
             if ui
                 .selectable_label(hybrid == Some(kind), kind.name())
                 .clicked()
@@ -1301,17 +1362,21 @@ fn family_picker(
         if held {
             data.insert_temp(origin_id, base);
         } else {
-            data.remove::<(QuadrupedParams, symbios_avatar::Composites)>(origin_id);
+            data.remove::<(P, symbios_avatar::Composites)>(origin_id);
         }
     });
-    if (family, hybrid, blend) == (params.family, params.hybrid, params.blend) {
+    if (family, hybrid, blend) == (was.family, was.hybrid, was.blend) {
         return false;
     }
     // The family centres the composites too (symbios-avatar #178), so they are
     // carried with the plan's own axes: a slight dog becomes a slight horse.
     let (mut kind, mut carried) = base;
     let before = kind.composite_priors();
-    kind.set_kind(family, hybrid, blend);
+    kind.set_lineage(Lineage {
+        family,
+        hybrid,
+        blend,
+    });
     before.carry(&kind.composite_priors(), &mut carried);
     *params = kind;
     *composites = carried;
@@ -1338,9 +1403,13 @@ fn swatch(tone: symbios_avatar::Vec3) -> egui::Color32 {
 ///
 /// Drawn for every body painted from one, which a quadruped is not
 /// (symbios-avatar #368): it wears a coat, [`coat_axes`], and its stored
-/// complexion moves nothing on it.
+/// complexion moves nothing on it. Nor is a winged body (symbios-avatar
+/// #420), painted in its leading family's stand-in coat.
 pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
-    if matches!(record.archetype, Archetype::Quadruped(_)) {
+    if matches!(
+        record.archetype,
+        Archetype::Quadruped(_) | Archetype::Winged(_)
+    ) {
         return false;
     }
     let mut changed = false;
@@ -1394,7 +1463,10 @@ pub fn skin_axes(ui: &mut egui::Ui, record: &mut AvatarRecord) -> bool {
 /// runs, an unnatural palette, and the seed its marks are laid out from.
 ///
 /// Drawn only for a quadruped, which wears a coat where a person wears a
-/// complexion. The loci are a row of choices or a box each, as the stored
+/// complexion. A winged body wears one too, but its leading family's
+/// stand-in, stored nowhere (symbios-avatar #420): nothing here would write
+/// anything it reads, so it is not drawn for one until its plumage and pelts
+/// are stored (#423). The loci are a row of choices or a box each, as the stored
 /// parts are, because the engine derives the colours from them: a liver dog
 /// is the black dog's coat with one locus turned, and this is where it is
 /// turned. The marks are a seed, thrown again rather than slid, because
@@ -1567,7 +1639,8 @@ fn coat_channel(
 /// A quadruped's fur (symbios-avatar #369): how long it grows in each zone
 /// where a beast grows long hair, none at zero.
 ///
-/// Drawn only for a quadruped. A slider each, over the engine's envelope for
+/// Drawn only for a quadruped: a winged body grows no fur the engine builds
+/// (symbios-avatar #420). A slider each, over the engine's envelope for
 /// a length: none to long, and past long into the exploration range, where
 /// the engine's own ceiling thins the cards rather than letting the body
 /// past its budget. And one that is not a length (symbios-avatar #389): how
@@ -2420,9 +2493,13 @@ pub fn explored(
 /// shown cannot lag what is set.
 pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
     egui::CollapsingHeader::new("derived").show(ui, |ui| {
-        let stature = match &record.archetype {
-            Archetype::Humanoid(params) => params.height,
-            Archetype::Quadruped(params) => params.height,
+        // A winged body's size is a length along it, not a height (symbios-avatar
+        // #420), so its fractions are of that and it is not set against the
+        // height the cage reaches.
+        let (stature, measure) = match &record.archetype {
+            Archetype::Humanoid(params) => (params.height, "stature"),
+            Archetype::Quadruped(params) => (params.height, "stature"),
+            Archetype::Winged(params) => (params.size, "length"),
             Archetype::Unknown { .. } => {
                 ui.small("nothing to derive from a body this build cannot read");
                 return;
@@ -2441,8 +2518,8 @@ pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
             .iter()
             .map(|node| node.position.y + node.radius)
             .fold(f32::MIN, f32::max);
-        ui.small(format!("stature      {stature:.3} m nominal"));
-        if (built - stature).abs() > 0.002 {
+        ui.small(format!("{measure:<12} {stature:.3} m nominal"));
+        if measure == "stature" && (built - stature).abs() > 0.002 {
             ui.small(format!(
                 "             {built:.3} m to the crown of the cage, {:+.1} cm",
                 (built - stature) * 100.0
@@ -2462,7 +2539,7 @@ pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
                 continue;
             };
             ui.small(format!(
-                "{name:<8} r   {:5.1} cm   {:.4} of stature",
+                "{name:<8} r   {:5.1} cm   {:.4} of {measure}",
                 node.radius * 100.0,
                 node.radius / stature
             ));
@@ -2479,7 +2556,7 @@ pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
                 };
                 let span = rig.joints[chain[0]].position.x.abs() * 2.0;
                 ui.small(format!(
-                    "{name:<8} span{:5.1} cm   {:.4} of stature",
+                    "{name:<8} span{:5.1} cm   {:.4} of {measure}",
                     span * 100.0,
                     span / stature
                 ));
@@ -2487,7 +2564,9 @@ pub fn derived(ui: &mut egui::Ui, record: &AvatarRecord) {
         }
 
         ui.small("cage radii — the rendered surface sits inside these");
-        ui.small("fractions are of nominal stature, not of rendered height");
+        ui.small(format!(
+            "fractions are of nominal {measure}, not of rendered height"
+        ));
     });
 }
 
@@ -2699,7 +2778,7 @@ pub fn measure_aperture(body: Option<&AvatarBody>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use symbios_avatar::{CoatColours, Fur, LockSet};
+    use symbios_avatar::{CoatColours, Family, Fur, LockSet};
 
     /// A quadruped's axes, for [`axes`]: its own list, since a beast's
     /// body, face, coat and fur put [`axes`] past a hundred lines.
@@ -2790,6 +2869,17 @@ mod tests {
                 ("chest_fullness", p.chest_fullness),
             ],
             Archetype::Quadruped(p) => beast_axes(p),
+            // symbios-avatar #420: the size, the six axes and the blend.
+            Archetype::Winged(p) => vec![
+                ("size", p.size),
+                ("wing_length", p.wing_length),
+                ("neck_length", p.neck_length),
+                ("leg_length", p.leg_length),
+                ("tail_length", p.tail_length),
+                ("head_size", p.head_size),
+                ("appeal", p.appeal),
+                ("blend", p.blend),
+            ],
             Archetype::Unknown { .. } => Vec::new(),
         };
         out.extend([
@@ -4277,6 +4367,215 @@ mod tests {
                 before.to_bits(),
                 after.to_bits(),
                 "{name} went out as {before} and came back as {after}"
+            );
+        }
+        assert_eq!(
+            editor.record, back,
+            "the record did not survive its own JSON"
+        );
+    }
+
+    #[test]
+    fn a_winged_body_is_the_third_choice_and_switched_to_as_a_beast_is() {
+        // symbios-avatar #420: three plans, each a choice in the body row, and
+        // a switch to the winged one gives its own default body, as a switch
+        // to a beast gives a beast's.
+        let mut record = AvatarRecord::new("Person", Archetype::default());
+        let shown = labels(|ui| {
+            identity(ui, &mut record);
+        });
+        for body in ["humanoid", "quadruped", "winged"] {
+            assert!(shown.iter().any(|label| label == body), "{shown:?}");
+        }
+        click(
+            |ui| {
+                identity(ui, &mut record);
+            },
+            "winged",
+        );
+        assert_eq!(record.archetype, Archetype::Winged(WingedParams::default()));
+        // And back to a beast the way it always went.
+        click(
+            |ui| {
+                identity(ui, &mut record);
+            },
+            "quadruped",
+        );
+        assert_eq!(
+            record.archetype,
+            Archetype::Quadruped(QuadrupedParams::default())
+        );
+    }
+
+    #[test]
+    fn a_winged_body_is_offered_no_coat_fur_skin_face_hair_or_outfit() {
+        // symbios-avatar #420: its coat is its leading family's stand-in and
+        // stored nowhere, it grows no fur, and its complexion paints nothing,
+        // so none of those is offered; its eyes are its own. Said where the
+        // body is chosen, and no lock is offered on what it never rolls.
+        let mut record = AvatarRecord::new("Bird", Archetype::Winged(WingedParams::default()));
+        let shown = offered(&mut record);
+        for section in ["coat", "fur", "skin", "face", "hair", "outfit"] {
+            assert!(
+                !shown.iter().any(|label| label == section),
+                "{section} was offered for a winged body: {shown:?}"
+            );
+        }
+        assert!(shown.iter().any(|label| label == "eyes"), "{shown:?}");
+        let identity_shown = labels(|ui| {
+            identity(ui, &mut record);
+        });
+        let note = "This body has no face, hair or outfit yet: those are a person's. \
+                    Its coat is its family's for now, and has no section yet.";
+        assert!(
+            identity_shown.iter().any(|label| label == note),
+            "{identity_shown:?}"
+        );
+        for lock in ["hair", "fur", "outfit", "frame"] {
+            assert!(
+                !identity_shown.iter().any(|label| label == lock),
+                "a winged body was offered a {lock} lock: {identity_shown:?}"
+            );
+        }
+        assert!(
+            identity_shown.iter().any(|label| label == "family"),
+            "{identity_shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_winged_body_is_offered_its_families_and_its_seven_axes() {
+        // symbios-avatar #420: the three families, a cross with either other,
+        // the size and the six axes, and how it stands, which follows its
+        // leading family.
+        let mut record = AvatarRecord::new("Bird", Archetype::Winged(WingedParams::default()));
+        let shown = labels(|ui| {
+            body_axes(ui, &mut record);
+        });
+        for label in [
+            "bird",
+            "bat",
+            "glider",
+            "none",
+            "size",
+            "wing length",
+            "neck length",
+            "leg length",
+            "tail length",
+            "head size",
+            "appeal",
+            "It perches on its hind legs, as a bird does.",
+        ] {
+            assert!(
+                shown.iter().any(|shown| shown == label),
+                "{label}: {shown:?}"
+            );
+        }
+        assert!(!shown.iter().any(|label| label == "blend"), "{shown:?}");
+        // No beast's axis leaks onto it.
+        for beast in ["dog", "stance", "muzzle length", "feet", "height"] {
+            assert!(
+                !shown.iter().any(|label| label == beast),
+                "{beast}: {shown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_winged_family_pick_carries_its_character_to_the_new_family() {
+        // symbios-avatar #420 on the shared picker: a long-winged, heavy bird
+        // becomes a long-winged, heavy bat - what `set_kind` and
+        // `CompositePriors::carry` say - and a cross is offered its blend.
+        let bird = WingedParams {
+            wing_length: 0.45,
+            tail_length: -0.3,
+            ..WingedParams::default()
+        };
+        let mut record = AvatarRecord::new("Bird", Archetype::Winged(bird));
+        record.composites.mass = 0.6;
+        let before = record.composites;
+        click(
+            |ui| {
+                body_axes(ui, &mut record);
+            },
+            "bat",
+        );
+        let mut expected = bird;
+        expected.set_kind(WingedFamily::Bat, None, 0.0);
+        assert_eq!(record.archetype, Archetype::Winged(expected));
+        let mut carried = before;
+        bird.composite_priors()
+            .carry(&expected.composite_priors(), &mut carried);
+        assert_eq!(record.composites, carried);
+        let shown = labels(|ui| {
+            body_axes(ui, &mut record);
+        });
+        assert!(
+            shown
+                .iter()
+                .any(|label| label == "It crawls on its wrists and its feet, as a bat does."),
+            "{shown:?}"
+        );
+
+        // A cross is offered its blend, and a body of one family none.
+        assert!(!shown.iter().any(|label| label == "blend"), "{shown:?}");
+        let mut crossed = AvatarRecord::new(
+            "Crossed",
+            Archetype::Winged(WingedParams {
+                hybrid: Some(WingedFamily::Bat),
+                blend: 0.5,
+                ..WingedParams::default()
+            }),
+        );
+        let shown = labels(|ui| {
+            body_axes(ui, &mut crossed);
+        });
+        assert!(shown.iter().any(|label| label == "blend"), "{shown:?}");
+        // At half the cross stands as its hybrid does (Lineage::leading).
+        assert!(
+            shown
+                .iter()
+                .any(|label| label == "It crawls on its wrists and its feet, as a bat does."),
+            "{shown:?}"
+        );
+    }
+
+    #[test]
+    fn a_winged_body_with_every_axis_set_survives_the_wire_exactly() {
+        // The quadruped's wire test for the third plan (symbios-avatar #420):
+        // a cross with every axis off its neutral, out and back exactly.
+        let mut winged = AvatarRecord::new(
+            "Winged",
+            Archetype::Winged(WingedParams {
+                size: 0.876_54,
+                wing_length: 0.456_78,
+                neck_length: -0.678_91,
+                leg_length: 0.234_56,
+                tail_length: -0.912_34,
+                head_size: 0.123_45,
+                appeal: 1.123_45,
+                family: WingedFamily::Glider,
+                hybrid: Some(WingedFamily::Bird),
+                blend: 0.345_67,
+            }),
+        );
+        winged.sanitize();
+        let mut editor = RecordEditor::new(winged);
+        editor.touched();
+        let json = to_json(&editor.record);
+        let mut back: AvatarRecord = serde_json::from_str(&json).expect("its own JSON parses");
+        back.sanitize();
+        assert_eq!(axes(&editor.record).len(), axes(&back).len());
+        for ((name, before), (_, after)) in axes(&editor.record).iter().zip(axes(&back)) {
+            assert_eq!(
+                before.to_bits(),
+                after.to_bits(),
+                "{name} went out as {before} and came back as {after}"
+            );
+            let thousandths = before * 1000.0;
+            assert!(
+                (thousandths - thousandths.round()).abs() < 1e-3,
+                "{name} shows {before}, which is not a thousandth"
             );
         }
         assert_eq!(

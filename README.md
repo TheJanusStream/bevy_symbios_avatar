@@ -260,7 +260,9 @@ sources and the clip's root travel taken out so the two stay comparable.
 `AvatarRecord` can carry: on a person 126 of them plus one whole-number count,
 across archetype, composites, skin, eyes, face, five hair regions, outfit, name,
 seed and the per-category locks a re-roll honours, and on a quadruped its own
-body, face and coat in place of the person's. Drag one and the body follows. A
+body, face and coat in place of the person's. A winged body - a bird, a bat, a
+glider or a cross - has its family, its size and six axes; its coat is its
+family's own for now and has no section. Drag one and the body follows. A
 test pins the exact count, so an axis added to the record cannot quietly miss the
 panel.
 
@@ -304,6 +306,7 @@ them adds `EguiPlugin` alongside these plugins, as the viewer does.
 cargo run --release -F builtin-clips --example viewer
 cargo run --release -F builtin-clips --example viewer -- --seed 7
 cargo run --release -F builtin-clips --example viewer -- --quadruped
+cargo run --release -F builtin-clips --example viewer -- --winged --family bat
 cargo run --release -F builtin-clips --example viewer -- --shot body.png
 cargo run --release -F builtin-clips --example viewer -- --scalp bun 0.8 --chin sculpted
 ```

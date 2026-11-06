@@ -87,6 +87,41 @@ const GESTURE_TIME: f32 = 1.5;
 /// blinks and nothing a capture can see, since every capture holds the lids.
 const VIEWER_SEED: u64 = 0x1de;
 
+/// Which of the motion window's rows a body is offered: what it stands on, as
+/// its plan declares it ([`Rig::four_legged`]), and whether it has hands.
+/// **Declared, never counted** (symbios-avatar #419), so a body whose posture
+/// follows its family - a winged one (#420) - is offered its own.
+#[cfg(feature = "editor")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stands {
+    /// On two legs with hands: a person, and the person a build draws for a
+    /// body it cannot read. A person's gaits and gestures.
+    Person,
+    /// On four legs: a beast, and a bat or a glider. The patterns, and a
+    /// beast's roster, which is what the engine plays on four legs
+    /// (`gesture::for_body`).
+    FourLegged,
+    /// On two legs with no hands: a perching bird, whose fore limbs are
+    /// folded wings and not arms. A two-legged walk and no gesture: a person's
+    /// would be laid over wings, and a bird's own are the motion phase's
+    /// (symbios-avatar #424).
+    Handless,
+}
+
+#[cfg(feature = "editor")]
+impl Stands {
+    /// What `rig` stands on.
+    fn of(rig: &Rig) -> Self {
+        if rig.four_legged() {
+            Stands::FourLegged
+        } else if rig.anatomy.hands {
+            Stands::Person
+        } else {
+            Stands::Handless
+        }
+    }
+}
+
 /// How wide the motion window opens, in points.
 #[cfg(feature = "editor")]
 const WINDOW_WIDTH: f32 = 260.0;
@@ -172,9 +207,10 @@ impl GaitKind {
         match self {
             // Its duty is the speed's, which the driver builds it at: this is
             // the order the feet land in, for anything that asks.
-            GaitKind::Pattern(pattern) if rig.ground_contacts().len() == 4 => {
-                Gait::pattern(rig, pattern, 0.5)
-            }
+            // Four DECLARED legs (symbios-avatar #419, #420): a bat or a
+            // glider is four-legged and a perched bird two-legged, as its plan
+            // says, however low a wing tip hangs.
+            GaitKind::Pattern(pattern) if rig.four_legged() => Gait::pattern(rig, pattern, 0.5),
             // A pattern is a four-legged body's, and a person left with one
             // picked - the picker is not drawn on two legs, so it cannot be
             // cleared there - walks as a person, at a person's speed.
@@ -909,7 +945,7 @@ pub fn steer(
             gesturable |= animator
                 .gesture
                 .as_ref()
-                .is_some_and(|(name, _)| gesture::for_body(rig, name).is_some());
+                .is_some_and(|(name, _)| gesture_for(rig, name).is_some());
             let told = animator.told.bodies.get(&entity);
             let picked = animator.gait.of(rig);
             let stirred = stirred(animator, &driver, animator.speed_of(rig, &picked), gaiting);
@@ -1160,6 +1196,17 @@ impl Gesturing<'_> {
     }
 }
 
+/// The gesture `name` as `rig` plays it: the engine's
+/// ([`gesture::for_body`]), a beast's roster on four legs and a person's
+/// otherwise, except on a body with two legs and no hands - a perching bird
+/// (symbios-avatar #420) - which plays none until its motion phase (#424):
+/// a person's would be laid over its folded wings.
+fn gesture_for(rig: &Rig, name: &str) -> Option<Clip> {
+    (rig.four_legged() || rig.anatomy.hands)
+        .then(|| gesture::for_body(rig, name))
+        .flatten()
+}
+
 /// Whether `clip` aims the head: it carries a [`Target::Gaze`] track.
 fn aims(clip: &Clip) -> bool {
     clip.tracks.iter().any(|track| track.target == Target::Gaze)
@@ -1258,17 +1305,17 @@ fn plan_gesture<'a>(
         // nothing, which would leave the driver's own state showing under a
         // slider that says the beast is standing.
         Some((name, through)) if scrubbing => {
-            gesture::for_body(rig, name).map(|clip| (clip, through.max(f32::EPSILON)))
+            gesture_for(rig, name).map(|clip| (clip, through.max(f32::EPSILON)))
         }
         // A state, or anything else the driver was handed, is the driver's.
         Some((name, _)) if beast && (state(rig, name) || handed) => None,
-        Some((name, through)) => gesture::for_body(rig, name).map(|clip| (clip, through)),
+        Some((name, through)) => gesture_for(rig, name).map(|clip| (clip, through)),
         None => None,
     };
     let driver_aims = playing
         .into_iter()
         .chain(ask)
-        .any(|name| gesture::for_body(rig, name).is_some_and(|clip| aims(&clip)));
+        .any(|name| gesture_for(rig, name).is_some_and(|clip| aims(&clip)));
     Gesturing {
         anew,
         stirred,
@@ -1826,11 +1873,12 @@ pub fn animator_panel(
     // `natural` IS wave on two legs and IS trot on four, and trot falls back
     // to wave off four corners — so a picker listing all of them offers four
     // labels for two behaviours, and the owner rightly could not tell them
-    // apart (#27). Read before the window so the closure borrows nothing.
+    // apart (#27). Read before the window so the closure borrows nothing; the
+    // legs the plan declares, not a count (#57).
     let legs = bodies
         .iter()
         .next()
-        .map_or(2, |body| body.avatar.rig.ground_contacts().len());
+        .map_or(Stands::Person, |body| Stands::of(&body.avatar.rig));
     // Which of the row's gestures are states on this body (#53), which the
     // row says, and whose slider works otherwise.
     let states: Vec<&str> = bodies.iter().next().map_or_else(Vec::new, |body| {
@@ -1876,7 +1924,7 @@ fn locomotion_section(
     ui: &mut bevy_egui::egui::Ui,
     clips: &Clips,
     animator: &mut Animator,
-    legs: usize,
+    legs: Stands,
     states: &[&str],
 ) {
     use bevy_egui::egui;
@@ -1928,7 +1976,7 @@ fn locomotion_section(
         clip_controls(ui, clips, animator);
     }
     // Two legs walk one way; only four corners have a choice to make.
-    if walking && legs == 4 {
+    if walking && legs == Stands::FourLegged {
         pattern_picker(ui, animator);
     }
     if !standing {
@@ -2008,7 +2056,7 @@ fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
 fn gesture_row(
     ui: &mut bevy_egui::egui::Ui,
     animator: &mut Animator,
-    legs: usize,
+    legs: Stands,
     states: &[&str],
     phase_hold: bool,
 ) {
@@ -2019,11 +2067,16 @@ fn gesture_row(
     // the picker above.
     ui.separator();
     ui.label(egui::RichText::new("gesture").strong());
-    // A beast's roster on four legs (#370), a person's otherwise.
-    let roster = if legs == 4 {
-        emote::ROSTER
-    } else {
-        gesture::ROSTER
+    // A beast's roster on four legs (#370), a person's on a person, and on a
+    // bird none (#57): it plays none (`gesture_for`), so a pick left from
+    // another body is let go of as one no body here can make.
+    let roster: &[&str] = match legs {
+        Stands::FourLegged => emote::ROSTER,
+        Stands::Person => gesture::ROSTER,
+        Stands::Handless => {
+            ui.small("no gestures for this body yet");
+            &[]
+        }
     };
     ui.horizontal_wrapped(|ui| {
         for name in roster {
@@ -3144,6 +3197,117 @@ mod tests {
         }
     }
 
+    /// The rig a body of `archetype` builds, as the window reads it.
+    fn rig_built(archetype: Archetype) -> Rig {
+        Rig::from_skeleton(&AvatarRecord::new("Rigged", archetype).skeleton()).expect("a rig")
+    }
+
+    /// A winged body of `family`, at its own anchor (symbios-avatar #420).
+    fn winged(family: symbios_avatar::WingedFamily) -> Archetype {
+        Archetype::Winged(symbios_avatar::WingedParams {
+            family,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_winged_body_walks_and_gestures_on_the_legs_its_family_declares() {
+        // #57: a bird perches on two legs and a bat and a glider stand on
+        // four (symbios-avatar #420), as the plan declares and not as the
+        // limbs are counted. So a pattern walks a bird as its natural gait and
+        // a bat in the pattern; a bat is played a beast's roster, and a bird,
+        // whose fore limbs are wings, nothing - neither a beast's nor a person's.
+        use symbios_avatar::WingedFamily;
+        let bird = rig_built(winged(WingedFamily::Bird));
+        assert!(
+            !bird.four_legged() && !bird.anatomy.hands,
+            "fixture: a bird"
+        );
+        for kind in GaitKind::PATTERNS {
+            assert_eq!(kind.of(&bird), GaitKind::Natural.of(&bird), "{kind:?}");
+        }
+        for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
+            assert!(gesture_for(&bird, name).is_none(), "a bird played {name}");
+        }
+        for family in [WingedFamily::Bat, WingedFamily::Glider] {
+            let rig = rig_built(winged(family));
+            assert!(rig.four_legged(), "fixture: a {family:?} stands on four");
+            let GaitKind::Pattern(pattern) = GaitKind::PATTERNS[1] else {
+                unreachable!("the patterns are patterns");
+            };
+            assert_eq!(
+                GaitKind::PATTERNS[1].of(&rig),
+                Gait::pattern(&rig, pattern, 0.5),
+                "{family:?}"
+            );
+            assert!(gesture_for(&rig, "Sit").is_some(), "{family:?}");
+        }
+        // And a person and a beast play what the engine gives them.
+        let person = rig_built(Archetype::default());
+        let beast = rig_built(Archetype::Quadruped(
+            symbios_avatar::QuadrupedParams::default(),
+        ));
+        for name in gesture::ROSTER {
+            assert_eq!(
+                gesture_for(&person, name).is_some(),
+                gesture::for_body(&person, name).is_some(),
+                "{name}"
+            );
+        }
+        for name in emote::ROSTER.iter().chain(gesture::ROSTER) {
+            assert_eq!(
+                gesture_for(&beast, name).is_some(),
+                gesture::for_body(&beast, name).is_some(),
+                "{name}"
+            );
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn the_motion_window_offers_a_winged_body_its_own_rows() {
+        // #57: the rows follow `Stands`, read off the declared legs.
+        use symbios_avatar::WingedFamily;
+        assert_eq!(
+            Stands::of(&rig_built(winged(WingedFamily::Bird))),
+            Stands::Handless
+        );
+        for family in [WingedFamily::Bat, WingedFamily::Glider] {
+            assert_eq!(Stands::of(&rig_built(winged(family))), Stands::FourLegged);
+        }
+        assert_eq!(Stands::of(&rig_built(Archetype::default())), Stands::Person);
+        assert_eq!(
+            Stands::of(&rig_built(Archetype::Quadruped(
+                symbios_avatar::QuadrupedParams::default()
+            ))),
+            Stands::FourLegged
+        );
+
+        let mut animator = Animator {
+            walking: true,
+            ..Animator::default()
+        };
+        let bird = offered(&mut animator, Stands::Handless, &[]);
+        assert!(
+            bird.iter()
+                .any(|label| label == "no gestures for this body yet"),
+            "{bird:?}"
+        );
+        for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
+            assert!(!bird.iter().any(|label| label == name), "{name}: {bird:?}");
+        }
+        let pattern = GaitKind::PATTERNS[1].label();
+        assert!(!bird.iter().any(|label| label == pattern), "{bird:?}");
+        let bat = offered(&mut animator, Stands::FourLegged, &[]);
+        assert!(bat.iter().any(|label| label == pattern), "{bat:?}");
+        assert!(bat.iter().any(|label| label == "Wag"), "{bat:?}");
+        assert!(
+            !bat.iter()
+                .any(|label| label == "no gestures for this body yet"),
+            "{bat:?}"
+        );
+    }
+
     /// Picks a gesture in the row, or lets go of the pick, as a click does.
     fn pick(app: &mut App, name: Option<&str>) {
         app.world_mut().resource_mut::<Animator>().gesture =
@@ -3831,7 +3995,7 @@ mod tests {
     /// The text one frame of the motion window's locomotion section shows
     /// for `animator`, read through AccessKit.
     #[cfg(feature = "editor")]
-    fn offered(animator: &mut Animator, legs: usize, states: &[&str]) -> Vec<String> {
+    fn offered(animator: &mut Animator, legs: Stands, states: &[&str]) -> Vec<String> {
         use bevy_egui::egui;
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -3879,14 +4043,14 @@ mod tests {
         let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
         assert!(animator.scrub, "the hold was let go of on its own");
         assert!(
-            offered(&mut animator, 4, &states)
+            offered(&mut animator, Stands::FourLegged, &states)
                 .iter()
                 .any(|label| label == "hold"),
             "a hold left on over a standing beast was drawn nowhere"
         );
         animator.gesture = Some(("Wag".to_string(), 0.0));
         assert!(
-            offered(&mut animator, 4, &states)
+            offered(&mut animator, Stands::FourLegged, &states)
                 .iter()
                 .any(|label| label == "hold"),
             "a wag frozen under hold was offered no hold"
@@ -3899,7 +4063,7 @@ mod tests {
         tick(&mut app);
         let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
         assert!(
-            offered(&mut animator, 2, &[])
+            offered(&mut animator, Stands::Person, &[])
                 .iter()
                 .any(|label| label == "hold"),
             "a person's wave frozen under hold was offered no hold"
