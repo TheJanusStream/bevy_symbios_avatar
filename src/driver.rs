@@ -51,11 +51,11 @@
 //! [`drive_avatar_bodies`] for the two reasons to.
 
 use bevy::prelude::*;
-use symbios_avatar::anim::Pattern;
 use symbios_avatar::anim::driver::{
     Driven, Driver, DriverConfig, Hold, Inputs, Showing, Source, WalkFlags, level_ground,
     velocity_of,
 };
+use symbios_avatar::anim::{Flight, Pattern};
 use symbios_avatar::{Expression, Gait, Heading};
 
 use crate::ground::GroundPatch;
@@ -156,6 +156,18 @@ pub struct Drive {
     pub pattern: Option<Pattern>,
     /// The walk's ablation switches.
     pub walk: WalkFlags,
+    /// A winged body in the air and what it is doing there, or [`None`] on
+    /// the ground (engine #424): the mode its owner flies it in, the air past
+    /// it, its beat's phase if the owner keeps that clock, and the time to
+    /// what it lands on. See the engine's `Inputs::flight`.
+    ///
+    /// **The owner's to hand off**, as it is the engine's to pose: a takeoff
+    /// is followed by whatever mode the owner flies next, and a landing hands
+    /// back to the ground by the owner writing [`None`] once
+    /// [`Driver::flight`](symbios_avatar::anim::Driver::flight) says it has
+    /// come down. Read only on a body with wings: a person or a beast handed
+    /// one moves exactly as without it.
+    pub flight: Option<Flight>,
     /// How fast the body is turning, in radians a second, positive toward its
     /// own left.
     pub turn: f32,
@@ -198,6 +210,7 @@ impl Default for Drive {
             gait: None,
             pattern: None,
             walk: WalkFlags::default(),
+            flight: None,
             turn: 0.0,
             lids: None,
             face: Expression::NEUTRAL,
@@ -368,6 +381,7 @@ fn inputs_of<'a>(
         gait: drive.gait.as_ref(),
         pattern: drive.pattern,
         walk: drive.walk,
+        flight: drive.flight,
         turn: drive.turn,
         lids: drive.lids,
         face: drive.face,
@@ -633,6 +647,63 @@ mod tests {
             Source::Gait,
             "a body travelling at 1.4 m/s is walking"
         );
+    }
+
+    #[test]
+    fn a_drive_s_flight_flies_a_winged_body_and_nobody_else() {
+        // Engine #424: `Drive::flight` reaches `Inputs::flight`, so a bird
+        // handed one flies and reports what it is doing, and a person or a
+        // beast handed the same flight stands as it would without one.
+        use symbios_avatar::anim::FlightMode;
+        let flying = || Drive {
+            flight: Some(Flight::new(FlightMode::Flap)),
+            ..Drive::default()
+        };
+        let bird = Archetype::Winged(symbios_avatar::WingedParams::default());
+        let mut flier = app();
+        let [body] = spawn_small(&mut flier, &bird, 7, vec![flying()])[..] else {
+            unreachable!("one drive, one body");
+        };
+        for _ in 0..10 {
+            tick(&mut flier);
+        }
+        assert_eq!(
+            flier.world().get::<Drove>(body).expect("driven").source,
+            Source::Fly,
+            "a bird handed a flight did not fly"
+        );
+        let built = flier.world().get::<AvatarBody>(body).expect("built");
+        let flown = flier
+            .world()
+            .get::<AvatarDriver>(body)
+            .expect("a driver")
+            .flight(&built.avatar.rig)
+            .expect("a flying bird reports its flight");
+        assert_eq!(flown.mode, FlightMode::Flap);
+
+        for archetype in [Archetype::default(), beast()] {
+            let mut app = app();
+            let bodies = spawn_small(&mut app, &archetype, 7, vec![flying(), Drive::default()]);
+            for _ in 0..10 {
+                tick(&mut app);
+            }
+            let poses: Vec<_> = bodies
+                .iter()
+                .map(|&body| {
+                    let drove = app.world().get::<Drove>(body).expect("driven");
+                    assert_ne!(drove.source, Source::Fly, "{archetype:?} flew");
+                    app.world()
+                        .get::<AvatarPose>(body)
+                        .expect("posed")
+                        .0
+                        .clone()
+                })
+                .collect();
+            assert_eq!(
+                poses[0].rotations, poses[1].rotations,
+                "a flight moved a {archetype:?}"
+            );
+        }
     }
 
     /// Spawns a body of `archetype` for each drive in `drives`, all seeded

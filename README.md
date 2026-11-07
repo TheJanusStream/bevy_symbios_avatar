@@ -213,7 +213,7 @@ App::new()
 
 The resource is the whole control surface: the gait pattern and its cadence,
 pace and phase; a swim or a leap instead of the walk and a gesture over it;
-baked clips, layered or not; the ground's grade and camber, a turn rate and a
+a winged body's flight; baked clips, layered or not; the ground's grade and camber, a turn rate and a
 travel heading; blinking, a held lid closure, speech, a held jaw angle, a resting
 expression and a held viseme; where the gaze is aimed and how far the chain may
 turn; and, as readouts, how far the footing solve had to move the feet and how
@@ -234,6 +234,27 @@ gets the beast up from that point; "hold" is drawn beside the slider for as
 long as it is on and the phase row is not showing it. A body the record editor
 rebuilds while it sits is drawn sitting from its first frame, so a sitting
 beast can be tuned as it sits.
+
+**The gesture row is the body's own roster** (`gesture::roster`): a person's, a
+beast's, or a winged body's by its family - a bird's Perch and Roost, a bat's
+Rest and a glider's Curl, which are states as a beast's sit is, and their
+Preen or Groom, Wing Stretch or Stretch, Shake and Head Tilt.
+
+**A winged body flies from the flight row**: a mode (take off, flap, glide,
+soar, dive, flare, land), the air speed past it or the walk's, its own beat or
+a host's at a rate of its own (with a "beat early" the engine catches up on),
+the time to contact a flare reads, and whether it carries itself - hovering,
+risen by its takeoff - or is carried in place, a carriage the flight's alone
+that no walk, leap, person or beast reads. The window hands the flight on as a
+host does, by the driver's report: a takeoff into a flap two beats after its
+feet leave the ground, and a landing back to the ground once the driver
+reports it settled. Under the controls is what the driver posed: the mode in
+effect, the beat and the wings. The host beat's slider runs from half to twice
+the body's own rate, all of which the engine catches. A flight plays no rest
+and no emote, so the gesture row is disabled while one flies, the reason
+painted beside it. A person's or a beast's flight row is drawn disabled, with the reason
+beside it. `Drive::flight` carries the same flight for a body an application
+drives.
 
 The two ground controls are two axes rather than one because a plane has two:
 **grade** is the hill the body walks up or down, along `+z` where it faces, and

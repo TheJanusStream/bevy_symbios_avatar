@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.24.0"
+version = "0.25.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -121,7 +121,12 @@ bevy = "0.19"
 # **0.22 for winged surfaces** (#60, engine #423): a bird's plumage, a bat's
 # and a glider's coat, contour feathers and fur. Breaking for a 0.x crate:
 # `WingedParams` grew the public `plumage` and `coat` fields the editor sets.
-symbios-avatar = "0.22"
+#
+# **0.23 for winged motion** (#61, engine #424): ground gaits, a sustained
+# flight the motion window drives, and rests and emotes by body. Breaking for
+# a 0.x crate: `Inputs` grew the public `flight` field every literal here
+# sets, and `Flown` is `#[non_exhaustive]`.
+symbios-avatar = "0.23"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,

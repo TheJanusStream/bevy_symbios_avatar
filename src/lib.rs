@@ -170,7 +170,8 @@ pub mod spawn;
 pub mod strips;
 
 pub use animator::{
-    Animator, AnimatorPlugin, Clips, GaitKind, adopt_bodies, floor_tilt, ground_normal, steer,
+    Animator, AnimatorPlugin, Beat, Clips, Flying, GaitKind, adopt_bodies, floor_tilt,
+    ground_normal, steer,
 };
 pub use convert::{atlas_image, mesh_of, normal_image, orm_image, polymesh_to_bevy};
 pub use driver::{AvatarDriver, Drive, Drove, drive_avatar_bodies};

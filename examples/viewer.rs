@@ -20,6 +20,7 @@
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped
 //! cargo run --release -F builtin-clips --example viewer -- --quadruped --gesture Sit  # down, and held
 //! cargo run --release -F builtin-clips --example viewer -- --winged --family bat   # a bird, a bat or a glider
+//! cargo run --release -F builtin-clips --example viewer -- --winged --fly takeoff  # up, and flapping
 //! cargo run --release -F builtin-clips --example viewer -- --shot body.png   # one frame, then quit
 //! cargo run --release -F builtin-clips --example viewer -- --face --shot face.png  # framed on the head
 //! cargo run --release -F builtin-clips --example viewer -- --walk --shot walking.png
@@ -992,6 +993,23 @@ fn starting_animator() -> Animator {
                 )
             })
         });
+    // A winged body in the air (engine #424), by the motion window's own
+    // names for the modes: `--fly takeoff` pushes off and leads into a flap
+    // as the window does, and `--fly glide` or `flare` holds that mode for a
+    // capture. A body with no wings is let go of it, as in the window.
+    animator.flying.mode = word("--fly").and_then(|name| {
+        use symbios_avatar::anim::FlightMode;
+        Some(match name.replace(['-', ' '], "").as_str() {
+            "takeoff" => FlightMode::Takeoff,
+            "flap" => FlightMode::Flap,
+            "glide" => FlightMode::Glide,
+            "soar" => FlightMode::Soar,
+            "dive" => FlightMode::Dive,
+            "flare" => FlightMode::Flare,
+            "land" => FlightMode::Land,
+            _ => return None,
+        })
+    });
     animator.layered = flag("--layer");
     // A strip is a set of stills taken by a machine, so everything stochastic
     // is held: a blink caught in one cell of a sheet reads as a defect, a

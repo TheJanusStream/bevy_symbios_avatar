@@ -32,7 +32,21 @@
 //! beast is, and a state the beast is not in is let go - and leads it only
 //! under hold, where the slider poses the way down itself. Each body's
 //! driver is asked for itself, so one built under a pick is asked it too.
-//! [`Animator::gesture`] has the rules.
+//! [`Animator::gesture`] has the rules. A winged body's rests (engine #424) -
+//! a bird's perch and roost, a bat's rest, a glider's curl - are states in
+//! the same sense, and the row offers every body its own roster
+//! (`gesture::roster`).
+//!
+//! ## A flight is the window's to hand on
+//!
+//! A winged body in the air is posed by the driver frame by frame, in
+//! whatever mode it is handed (engine #424), and what comes next is its
+//! host's to say. So the window flies it as a host does - [`Flying`], handed
+//! over as `Inputs::flight` - and hands it on by the driver's own report: a
+//! takeoff into a flap two beats after its feet leave the ground
+//! ([`Flown::lifted`]), and a landing back onto the feet once the driver
+//! reports it settled ([`Flown::settled`]). Its carriage is the flight's
+//! alone: nothing but a flight reads it.
 //!
 //! ## Why a window rather than more keys
 //!
@@ -51,7 +65,8 @@ use bevy::prelude::*;
 use symbios_avatar::Heading;
 use symbios_avatar::anim::driver::{Carriage, DriverConfig, Inputs, Showing, WalkFlags};
 use symbios_avatar::anim::{
-    Clip, GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn, emote, gaze, gesture,
+    Clip, Flight, FlightMode, Flown, GazeConfig, IdleConfig, Lead, Pattern, Speed, Target, Turn,
+    emote, gaze, gesture,
 };
 use symbios_avatar::{
     ClipLibrary, Expression, FootingConfig, Gait, Ground, Leap, Pose, Rig, Stride, Swim, Talk,
@@ -102,9 +117,8 @@ enum Stands {
     /// (`gesture::for_body`).
     FourLegged,
     /// On two legs with no hands: a perching bird, whose fore limbs are
-    /// folded wings and not arms. A two-legged walk and no gesture: a person's
-    /// would be laid over wings, and a bird's own are the motion phase's
-    /// (symbios-avatar #424).
+    /// folded wings and not arms. A two-legged walk, and its own roster
+    /// (symbios-avatar #424), which [`Subject::roster`] reads.
     Handless,
 }
 
@@ -118,6 +132,54 @@ impl Stands {
             Stands::Person
         } else {
             Stands::Handless
+        }
+    }
+}
+
+/// What the motion window reads off its subject before it draws (#424):
+/// which rows to offer, from the body's own declarations rather than a
+/// count of its limbs.
+#[cfg(feature = "editor")]
+#[derive(Clone, Debug, PartialEq)]
+struct Subject {
+    /// What it stands on: whether the pattern row is drawn.
+    legs: Stands,
+    /// The gestures it can be asked for: its own roster
+    /// ([`gesture::roster`]), a bird's, a bat's or a glider's by its family,
+    /// a beast's on four legs and a person's otherwise.
+    roster: &'static [&'static str],
+    /// Which of them are states, which its driver plays at its own pace: a
+    /// beast's sit and lying down (#53), a winged body's rests (#424).
+    states: Vec<&'static str>,
+    /// Whether it has wings, and so a flight row it can use.
+    wings: bool,
+}
+
+#[cfg(feature = "editor")]
+impl Subject {
+    /// What `rig` is offered.
+    fn of(rig: &Rig) -> Self {
+        let roster = gesture::roster(rig);
+        Self {
+            legs: Stands::of(rig),
+            roster,
+            states: roster
+                .iter()
+                .copied()
+                .filter(|name| state(rig, name))
+                .collect(),
+            wings: rig.wings.is_some(),
+        }
+    }
+
+    /// What a window with no body in it offers: a person's rows, as it
+    /// always has.
+    fn nobody() -> Self {
+        Self {
+            legs: Stands::Person,
+            roster: gesture::ROSTER,
+            states: Vec::new(),
+            wings: false,
         }
     }
 }
@@ -256,6 +318,178 @@ impl Clips {
     }
 }
 
+/// How many beats after its feet leave the ground the window hands a
+/// takeoff on into flapping: the takeoff's two big beats.
+///
+/// **The engine's documented rule** (its flight's "Handing on", #424): the
+/// driver reports when the push is over ([`Flown::lifted`]), and two beats of
+/// [`Flown::phase`] from there are two of the takeoff's beats at any size -
+/// a bird at size 2.4 beats about once a second, a songbird at 0.1 ten times
+/// in 0.6 s, so no one duration suits both.
+pub const TAKEOFF_BEATS: f32 = 2.0;
+
+/// The air speed a named air starts at, in metres a second: the engine's
+/// cruise at its reference body, where a beat stops bobbing it.
+#[cfg(feature = "editor")]
+const CRUISE: f32 = 6.5;
+
+/// The rate a host's beat starts at before the body has flown, in beats a
+/// second: the engine's cruise rate for its reference bird.
+#[cfg(feature = "editor")]
+const HOST_RATE: f32 = 3.0;
+
+/// The host-beat slider's range before the body has flown, in beats a
+/// second: from a size-2.4 bird's half beat a second to past twice a
+/// size-0.1 songbird's nineteen.
+#[cfg(feature = "editor")]
+const HOST_RANGE: std::ops::RangeInclusive<f32> = 0.25..=40.0;
+
+/// What the motion window says beside a flight row it cannot offer.
+///
+/// **Painted, not hovered**: egui fires no hover text over a disabled
+/// widget, so a reason given only on hover is never seen.
+#[cfg(feature = "editor")]
+const NO_WINGS: &str = "no wings: only a bird, a bat or a glider flies";
+
+/// What the gesture row says beside its picks while the body flies, which
+/// are disabled: painted, as [`NO_WINGS`] is.
+#[cfg(feature = "editor")]
+const IN_THE_AIR: &str = "in the air: a flying body plays no rest and no emote";
+
+/// Every flight mode the window offers, in the order a flight goes through
+/// them, and the name each is shown by.
+#[cfg(feature = "editor")]
+const FLIGHT_MODES: [(FlightMode, &str); 7] = [
+    (FlightMode::Takeoff, "take off"),
+    (FlightMode::Flap, "flap"),
+    (FlightMode::Glide, "glide"),
+    (FlightMode::Soar, "soar"),
+    (FlightMode::Dive, "dive"),
+    (FlightMode::Flare, "flare"),
+    (FlightMode::Land, "land"),
+];
+
+/// Where a flying body's beat comes from (engine #424).
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub enum Beat {
+    /// The engine keeps the beat's clock, at the body's own rate.
+    #[default]
+    Own,
+    /// A host keeps it, as the consuming application does: a clock this
+    /// window runs at `rate` beats a second and hands the driver as
+    /// `Flight::phase`, which the engine follows rather than copies.
+    Host {
+        /// The host's beats a second.
+        rate: f32,
+        /// Where the host's beat is, in beats: `0` the top of a downstroke.
+        /// Advanced by the window each frame it flies.
+        phase: f32,
+    },
+}
+
+/// How the window flies a winged body (engine #424): everything a host
+/// hands the driver as [`Flight`], kept across landings so the next takeoff
+/// flies as the last one did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flying {
+    /// What the body is doing in the air, or [`None`] on the ground.
+    ///
+    /// **The window hands it on as a host does, by the driver's report**: a
+    /// takeoff flaps [`TAKEOFF_BEATS`] after its feet leave the ground
+    /// ([`Flown::lifted`]), and a landing hands the body back to the ground -
+    /// [`None`] - once the driver reports it settled ([`Flown::settled`]):
+    /// down, absorbed, folded and, carrying itself, at the ground. A flight
+    /// on a body with no wings is let go.
+    pub mode: Option<FlightMode>,
+    /// The air speed past the body, in metres a second, or [`None`] for the
+    /// walk's speed, which is the same thing in still air.
+    ///
+    /// **A speed, not a vector**: the engine takes the air as a velocity and
+    /// reads only how fast it is, which a slow beat bobs at and a fast one
+    /// does not. The window hands it down the body's own forward, as it does
+    /// the walk's velocity.
+    pub air: Option<f32>,
+    /// Where the beat comes from.
+    pub beat: Beat,
+    /// How long until the body reaches what it is landing on, in seconds, or
+    /// [`None`] for nothing ahead. Under the engine's `FLARE_TAU` the body
+    /// flares whatever the mode says.
+    pub contact: Option<f32>,
+    /// What carries a flying body: itself, hovering on the spot - risen by
+    /// its takeoff and brought down by its landing - or a host, under whose
+    /// attitude it flies in place.
+    ///
+    /// **The flight's alone**: the driver is handed it only while a winged
+    /// body flies, and [`Animator::carriage`] on every other frame, so a
+    /// walk's footholds, a leap and every person and beast never read it.
+    /// [`Carriage::Own`] by default, as the window's is.
+    pub carriage: Carriage,
+}
+
+impl Default for Flying {
+    fn default() -> Self {
+        Self {
+            mode: None,
+            air: None,
+            beat: Beat::Own,
+            contact: None,
+            carriage: Carriage::Own,
+        }
+    }
+}
+
+impl Flying {
+    /// What the driver is handed this frame, or [`None`] on the ground.
+    #[must_use]
+    pub fn flight(&self) -> Option<Flight> {
+        let mut flight = Flight::new(self.mode?);
+        flight.air = self.air.map(|speed| Vec3::Z * speed);
+        flight.phase = match self.beat {
+            Beat::Own => None,
+            Beat::Host { phase, .. } => Some(phase),
+        };
+        flight.contact = self.contact;
+        Some(flight)
+    }
+}
+
+/// The mode the window flies next, after a frame the driver posed as
+/// `flown`: a takeoff flaps [`TAKEOFF_BEATS`] after its feet leave the ground,
+/// and a landing hands the body back to the ground once it has settled. Any
+/// other mode is the hand's to change.
+///
+/// `lifted_at` is where the beat's clock stood on the first frame of this
+/// takeoff the driver reported its feet off, kept here between frames.
+fn next_mode(
+    mode: Option<FlightMode>,
+    flown: Option<&Flown>,
+    lifted_at: &mut Option<f32>,
+) -> Option<FlightMode> {
+    let taking_off = flown.filter(|flown| {
+        mode == Some(FlightMode::Takeoff) && flown.mode == FlightMode::Takeoff && flown.lifted
+    });
+    let Some(flown) = flown else {
+        *lifted_at = None;
+        return mode;
+    };
+    let Some(lifted) = taking_off else {
+        *lifted_at = None;
+        return match mode {
+            Some(FlightMode::Land) if flown.mode == FlightMode::Land && flown.settled => None,
+            mode => mode,
+        };
+    };
+    let from = *lifted_at.get_or_insert(lifted.phase);
+    // The engine keeps its clock small by taking 64 beats off it now and
+    // then, so the growth is read round that.
+    if (lifted.phase - from).rem_euclid(64.0) >= TAKEOFF_BEATS {
+        *lifted_at = None;
+        Some(FlightMode::Flap)
+    } else {
+        mode
+    }
+}
+
 /// What every body in the world is doing.
 ///
 /// One resource rather than a component per body: this drives a viewer, where
@@ -353,6 +587,17 @@ pub struct Animator {
     /// scrubs a gait: `0` is the start of the wind-up and `1` is standing
     /// again.
     pub leap: Option<Leap>,
+    /// How a winged body is flown (engine #424): its mode, the air past it,
+    /// where its beat comes from and the time to what it lands on.
+    ///
+    /// **Outranked by a swim and a leap**, as the engine orders them, and
+    /// ignored by a body with no wings, which the window lets it go for. A
+    /// flight plays no rest and no emote, so the gesture row is disabled while
+    /// one flies, and a pick left from before is let go of, as the engine
+    /// lets go of one asked mid-flight.
+    /// What gets the body up into the air and back down is in
+    /// [`Flying::mode`].
+    pub flying: Flying,
     /// How long a step is, as a multiple of what the legs would take.
     ///
     /// **A route to a speed now rather than a stride of its own** (#43). The
@@ -567,6 +812,20 @@ pub struct Animator {
     /// What the drivers have been told of [`Self::gesture`], and what they
     /// are doing with it. Bypass-written: it is a readout.
     told: Told,
+    /// What the first winged body's driver posed its flight doing on the
+    /// last frame (`Driver::flight`). Bypass-written: it is a readout.
+    flown: Option<Flown>,
+    /// How much longer to drive after a flight ends, in seconds: the frame
+    /// after and the blend out of the landing, which a still body left there
+    /// would freeze part way through. Bypass-written.
+    aground: f32,
+    /// Where the beat's clock stood when the takeoff being flown first
+    /// reported its feet off the ground, which [`TAKEOFF_BEATS`] count from.
+    /// Bypass-written: it is the window's clock, not an instruction.
+    lifted_at: Option<f32>,
+    /// The body's own beat rate, as the driver last reported it outside a
+    /// takeoff: what the host-beat slider is ranged from. Bypass-written.
+    beat_rate: Option<f32>,
 }
 
 /// What the drivers this window steers have been told of the gesture row's
@@ -682,6 +941,11 @@ impl Default for Animator {
             talk: Talk::seeded(7),
             elapsed: 0.0,
             told: Told::default(),
+            flying: Flying::default(),
+            flown: None,
+            aground: 0.0,
+            lifted_at: None,
+            beat_rate: None,
         }
     }
 }
@@ -722,6 +986,20 @@ impl Animator {
             // one: a beast's state keeps its own clock, which writes nothing
             // here to wake on.
             && self.told.settling <= 0.0
+            // And a flight, which the driver poses frame by frame, and the
+            // blend out of its landing.
+            && self.flying.mode.is_none()
+            && self.aground <= 0.0
+    }
+
+    /// What the driver posed the flight doing on the last frame, or [`None`]
+    /// when no winged body was flying: the mode in effect - a glider asked to
+    /// flap glides, and anything but a landing flares near what it lands on -
+    /// the beat's clock and rate, how far the wings were drawn open, the
+    /// flare's depth and the seconds in that mode.
+    #[must_use]
+    pub fn flown(&self) -> Option<Flown> {
+        self.flown
     }
 
     /// How fast the body is travelling, in metres a second.
@@ -906,6 +1184,7 @@ pub fn steer(
         animator.elapsed += delta;
     }
     advance_gesture(&mut animator, delta, resting);
+    advance_beat(&mut animator, delta);
     // The cursor is bypass-written for the same reason `strained` is — it is
     // this frame's readout, not an instruction.
     let showing = ease_expression(animator.showing, animator.expression, delta, animator.blend);
@@ -1029,6 +1308,7 @@ pub fn steer(
     if any_body && (!gesturable || after.ended || getting_up) && animator.gesture.is_some() {
         animator.gesture = None;
     }
+    hand_on(&mut animator, any_body && !after.winged, after.flown, delta);
     if any_body {
         after.tell(animator.bypass_change_detection(), delta);
     } else {
@@ -1041,6 +1321,46 @@ pub fn steer(
         animator.bypass_change_detection().cycle = cycle;
     }
     animator.bypass_change_detection().strained = strained;
+}
+
+/// Hands the window's flight on after a frame whose first winged body's
+/// driver posed it as `flown`, `delta` seconds after the last (engine #424).
+///
+/// **As a host does**: a takeoff flaps [`TAKEOFF_BEATS`] after its feet leave
+/// the ground, and a landing hands the body back to the ground once the
+/// driver reports it settled - the engine poses
+/// whatever mode it is handed, for as long as it is handed it. A flight no
+/// body here can fly - `wingless` - is let go, as a gesture none can make is.
+/// The mode is written only when it changes, so the resource is marked
+/// changed once; the report and the settling after a landing are readouts.
+fn hand_on(animator: &mut ResMut<Animator>, wingless: bool, flown: Option<Flown>, delta: f32) {
+    let mut lifted_at = animator.lifted_at;
+    let next = if wingless {
+        lifted_at = None;
+        None
+    } else {
+        next_mode(animator.flying.mode, flown.as_ref(), &mut lifted_at)
+    };
+    let beat_rate = match flown {
+        Some(flown) if flown.mode != FlightMode::Takeoff => Some(flown.rate),
+        _ if wingless => None,
+        _ => animator.beat_rate,
+    };
+    if next != animator.flying.mode {
+        animator.flying.mode = next;
+    }
+    let aground = if flown.is_some() {
+        0.0
+    } else if animator.flown.is_some() {
+        animator.blend.max(f32::EPSILON)
+    } else {
+        (animator.aground - delta).max(0.0)
+    };
+    let readout = animator.bypass_change_detection();
+    readout.flown = flown;
+    readout.aground = aground;
+    readout.lifted_at = lifted_at;
+    readout.beat_rate = beat_rate;
 }
 
 /// What the drivers made of the gesture row's pick this frame, gathered over
@@ -1065,6 +1385,10 @@ struct After {
     finished: bool,
     /// How far through the pick a driver is, `0..1`.
     readout: Option<f32>,
+    /// Whether any body has wings (engine #424).
+    winged: bool,
+    /// What the first winged body's driver posed its flight doing.
+    flown: Option<Flown>,
 }
 
 impl After {
@@ -1079,6 +1403,8 @@ impl After {
     ) {
         let now = driver.gesture();
         self.playing |= now.is_some();
+        self.winged |= rig.wings.is_some();
+        self.flown = self.flown.or_else(|| driver.flight(rig));
         if gesturing.scrubbing {
             self.scrubbed = gesturing.own.as_ref().map(|(_, through)| *through);
         }
@@ -1087,6 +1413,9 @@ impl After {
             handed: gesturing.handed,
             since: gesturing.since,
         };
+        // A pick on a flying body is let go of, as the engine lets go of one
+        // asked mid-flight rather than keeping it for the landing.
+        self.ended |= gesturing.aloft && animator.gesture.is_some();
         if let Some((pick, _)) = &animator.gesture
             && rests(rig)
         {
@@ -1187,6 +1516,9 @@ struct Gesturing<'a> {
     handed: bool,
     /// Whether `own` is a state posed from the slider.
     scrubbing: bool,
+    /// Whether the body is flying, which plays no rest and no emote: see
+    /// [`aloft`].
+    aloft: bool,
 }
 
 impl Gesturing<'_> {
@@ -1197,12 +1529,12 @@ impl Gesturing<'_> {
 }
 
 /// The gesture `name` as `rig` plays it: the engine's
-/// ([`gesture::for_body`]), a beast's roster on four legs and a person's
-/// otherwise, except on a body with two legs and no hands - a perching bird
-/// (symbios-avatar #420) - which plays none until its motion phase (#424):
-/// a person's would be laid over its folded wings.
+/// ([`gesture::for_body`]), which answers each body its own roster
+/// ([`gesture::roster`]) - a winged body its family's (engine #424), a beast's
+/// on four legs and a person's otherwise. A body with two legs, no hands and
+/// no wings plays none: a person's would be laid over whatever it has.
 fn gesture_for(rig: &Rig, name: &str) -> Option<Clip> {
-    (rig.four_legged() || rig.anatomy.hands)
+    (rig.four_legged() || rig.anatomy.hands || rig.wings.is_some())
         .then(|| gesture::for_body(rig, name))
         .flatten()
 }
@@ -1213,15 +1545,17 @@ fn aims(clip: &Clip) -> bool {
 }
 
 /// Whether `name` is a state on `rig`: a beast's sit or lying down (#53),
-/// the emotes that keep their own time and so the only ones
-/// `emote::seconds` answers for.
+/// or a winged body's rest (engine #424) - a bird's perch and roost, a bat's
+/// rest and a glider's curl - the emotes that keep their own time and so the
+/// only ones `emote::seconds` answers for.
 fn state(rig: &Rig, name: &str) -> bool {
     emote::seconds(rig, name).is_some()
 }
 
-/// Whether `rig` has states in its roster: whether it is a beast's.
+/// Whether `rig` has states in its own roster ([`gesture::roster`]): whether
+/// it is a beast's or a winged body's.
 fn rests(rig: &Rig) -> bool {
-    emote::ROSTER.iter().any(|name| state(rig, name))
+    gesture::roster(rig).iter().any(|name| state(rig, name))
 }
 
 /// What the window's pick is to the bodies before their frame (#53):
@@ -1312,6 +1646,11 @@ fn plan_gesture<'a>(
         Some((name, through)) => gesture_for(rig, name).map(|clip| (clip, through)),
         None => None,
     };
+    // **A flying body plays no rest and no emote** (engine #424): nothing
+    // is asked of its driver, which would let it go, and nothing is laid
+    // over its flight by this window. The pick is let go of after the frame.
+    let aloft = aloft(animator, rig);
+    let (ask, own) = if aloft { (None, None) } else { (ask, own) };
     let driver_aims = playing
         .into_iter()
         .chain(ask)
@@ -1323,9 +1662,17 @@ fn plan_gesture<'a>(
         ask,
         own,
         driver_aims,
-        handed,
-        scrubbing,
+        handed: handed && !aloft,
+        scrubbing: scrubbing && !aloft,
+        aloft,
     }
+}
+
+/// Whether the window flies `rig` this frame (engine #424): a flight is
+/// asked, the body has wings to fly it with, and no swim or leap is shown,
+/// which outrank it.
+fn aloft(animator: &Animator, rig: &Rig) -> bool {
+    animator.flying.mode.is_some() && rig.wings.is_some() && showing(animator).is_none()
 }
 
 /// Whether the window is moving a body this frame as the engine counts it
@@ -1337,6 +1684,7 @@ fn stirred(animator: &Animator, driver: &AvatarDriver, speed: f32, gaiting: bool
     driver.stirred(&Inputs {
         velocity: Vec3::Z * if gaiting { speed } else { 0.0 },
         showing: showing(animator),
+        flight: animator.flying.flight(),
         ..Inputs::default()
     })
 }
@@ -1526,7 +1874,13 @@ fn drive_body(
     // The synthetic chassis in `examples/viewer.rs` is what asks for the
     // other answer, and it is the one flag that changes this.
     driver.set_config(DriverConfig {
-        carriage: animator.carriage,
+        // The flight's own carriage while a winged body flies, and the
+        // window's on every other frame: nothing but a flight reads it.
+        carriage: if aloft(animator, rig) {
+            animator.flying.carriage
+        } else {
+            animator.carriage
+        },
         idle: animator.idle,
         blend: animator.blend,
         pace_response: animator.pace_response,
@@ -1586,6 +1940,11 @@ fn drive_body(
             // shown as bare legs.
             gaze: (animator.posture && animator.turn != 0.0).then(GazeConfig::default),
         },
+        // A winged body in the air (engine #424), outranked by a swim and a
+        // leap shown above and ignored on a body with no wings, both by the
+        // engine: the window hands it on from takeoff to flap and from a
+        // landing to the ground (`next_mode`).
+        flight: animator.flying.flight(),
         turn: animator.turn.to_radians(),
         // A blink is stochastic, so a single captured frame almost never
         // catches one; holding the lids at a chosen point is what makes
@@ -1698,6 +2057,20 @@ fn advance_gesture(animator: &mut Animator, delta: f32, resting: bool) {
         && !held
     {
         *through = (*through + delta / GESTURE_TIME).min(1.0);
+    }
+}
+
+/// Moves a host's beat by `delta` while the window flies (engine #424), as
+/// the consuming application's runs: its clock, and only the engine's to
+/// follow. Bypass-written, as the cursor is - a clock, not an instruction.
+fn advance_beat(animator: &mut ResMut<Animator>, delta: f32) {
+    if animator.flying.mode.is_some()
+        && let Beat::Host { rate, phase } = animator.flying.beat
+    {
+        animator.bypass_change_detection().flying.beat = Beat::Host {
+            rate,
+            phase: (phase + rate * delta).rem_euclid(1.0),
+        };
     }
 }
 
@@ -1874,20 +2247,12 @@ pub fn animator_panel(
     // to wave off four corners — so a picker listing all of them offers four
     // labels for two behaviours, and the owner rightly could not tell them
     // apart (#27). Read before the window so the closure borrows nothing; the
-    // legs the plan declares, not a count (#57).
-    let legs = bodies
+    // legs the plan declares, not a count (#57). So are its own roster, which
+    // of it are states (#53), and whether it has wings to fly with (#424).
+    let subject = bodies
         .iter()
         .next()
-        .map_or(Stands::Person, |body| Stands::of(&body.avatar.rig));
-    // Which of the row's gestures are states on this body (#53), which the
-    // row says, and whose slider works otherwise.
-    let states: Vec<&str> = bodies.iter().next().map_or_else(Vec::new, |body| {
-        emote::ROSTER
-            .iter()
-            .copied()
-            .filter(|name| state(&body.avatar.rig, name))
-            .collect()
-    });
+        .map_or_else(Subject::nobody, |body| Subject::of(&body.avatar.rig));
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -1904,7 +2269,9 @@ pub fn animator_panel(
         .default_pos(opens_at)
         .default_width(WINDOW_WIDTH)
         .show(ctx, |ui| {
-            locomotion_section(ui, &clips, &mut animator, legs, &states);
+            locomotion_section(ui, &clips, &mut animator, &subject);
+            ui.separator();
+            flight_section(ui, &mut animator, subject.wings);
             ui.separator();
             ground_section(ui, &mut animator);
             ui.separator();
@@ -1924,8 +2291,7 @@ fn locomotion_section(
     ui: &mut bevy_egui::egui::Ui,
     clips: &Clips,
     animator: &mut Animator,
-    legs: Stands,
-    states: &[&str],
+    subject: &Subject,
 ) {
     use bevy_egui::egui;
     let clipping = animator.clip.is_some();
@@ -1976,7 +2342,7 @@ fn locomotion_section(
         clip_controls(ui, clips, animator);
     }
     // Two legs walk one way; only four corners have a choice to make.
-    if walking && legs == Stands::FourLegged {
+    if walking && subject.legs == Stands::FourLegged {
         pattern_picker(ui, animator);
     }
     if !standing {
@@ -2017,7 +2383,7 @@ fn locomotion_section(
         ui.toggle_value(&mut swim.carriage, "carriage");
     }
 
-    gesture_row(ui, animator, legs, states, !standing);
+    gesture_row(ui, animator, subject, !standing);
 }
 
 /// A four-legged body's gait: by speed, as the body would choose for itself,
@@ -2040,13 +2406,15 @@ fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
     });
 }
 
-/// The gestures a body can be asked for, and how far into one it is.
+/// The gestures a body can be asked for, and how far into one it is: its
+/// own roster ([`Subject::roster`]), so a bird is offered its perch, roost,
+/// preen, wing stretch, shake and head tilt (#424).
 ///
-/// On a beast, `states` names the gestures that are states (#53): its driver
-/// plays them, so the slider follows it rather than leading, and poses one
-/// only under hold - which is offered beside it, because the phase row's hold
-/// is not drawn for a body standing still, and a beast that is not standing
-/// still does not sit.
+/// On a beast or a winged body, [`Subject::states`] names the gestures that
+/// are states (#53): its driver plays them, so the slider follows it rather
+/// than leading, and poses one only under hold - which is offered beside it,
+/// because the phase row's hold is not drawn for a body standing still, and a
+/// body that is not standing still does not rest.
 ///
 /// **And hold is offered here whenever it is on and `phase_hold` says the
 /// phase row is not offering it** (#53): a hold left on with nothing drawn to
@@ -2056,56 +2424,60 @@ fn pattern_picker(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
 fn gesture_row(
     ui: &mut bevy_egui::egui::Ui,
     animator: &mut Animator,
-    legs: Stands,
-    states: &[&str],
+    subject: &Subject,
     phase_hold: bool,
 ) {
     use bevy_egui::egui;
+    let states = &subject.states;
     // **The gestures sit apart from the locomotion**, because they are not one
     // of the things being chosen between: a gesture is laid over whatever the
     // body is already doing, so it is its own row rather than another entry in
     // the picker above.
     ui.separator();
     ui.label(egui::RichText::new("gesture").strong());
-    // A beast's roster on four legs (#370), a person's on a person, and on a
-    // bird none (#57): it plays none (`gesture_for`), so a pick left from
+    // The body's own roster (#424): a winged body's by its family, a beast's
+    // on four legs (#370) and a person's on a person. A pick left from
     // another body is let go of as one no body here can make.
-    let roster: &[&str] = match legs {
-        Stands::FourLegged => emote::ROSTER,
-        Stands::Person => gesture::ROSTER,
-        Stands::Handless => {
-            ui.small("no gestures for this body yet");
-            &[]
-        }
-    };
-    ui.horizontal_wrapped(|ui| {
-        for name in roster {
-            let playing = animator
-                .gesture
-                .as_ref()
-                .is_some_and(|(chosen, _)| chosen == name);
-            let label = ui.selectable_label(playing, *name);
-            let label = if states.contains(name) {
-                label.on_hover_text(
-                    "a state: the beast goes down at its own pace and stays \
+    if subject.roster.is_empty() {
+        ui.small("no gestures for this body");
+    }
+    // **A body in the air plays no rest and no emote** (engine #424), so the
+    // row is disabled while one flies, the reason painted beside it as the
+    // flight row's is: a pick there would light for a frame and be let go.
+    let flying = subject.wings && animator.flying.mode.is_some() && showing(animator).is_none();
+    if flying {
+        ui.small(IN_THE_AIR);
+    }
+    ui.add_enabled_ui(!flying, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for name in subject.roster {
+                let playing = animator
+                    .gesture
+                    .as_ref()
+                    .is_some_and(|(chosen, _)| chosen == name);
+                let label = ui.selectable_label(playing, *name);
+                let label = if states.contains(name) {
+                    label.on_hover_text(
+                        "a state: the body goes down at its own pace and stays \
                      down. Get Up, letting go of it or another gesture gets it \
                      up, and the other gesture plays once it is; moving it gets \
                      it up in a hurry, and it will not go down while it moves",
-                )
-            } else if *name == emote::GET_UP {
-                label.on_hover_text("gets a sitting or lying beast up where it is")
-            } else if playing && animator.told.busy {
-                label.on_hover_text(
-                    "the beast is playing it, and finishes what it has started; \
+                    )
+                } else if *name == emote::GET_UP {
+                    label.on_hover_text("gets a sitting, lying or resting body up where it is")
+                } else if playing && animator.told.busy {
+                    label.on_hover_text(
+                        "the body is playing it, and finishes what it has started; \
                      another gesture plays in its place",
-                )
-            } else {
-                label
-            };
-            if label.clicked() {
-                click_gesture(animator, name);
+                    )
+                } else {
+                    label
+                };
+                if label.clicked() {
+                    click_gesture(animator, name);
+                }
             }
-        }
+        })
     });
     let handed = animator.told.handed;
     let state = animator
@@ -2127,7 +2499,7 @@ fn gesture_row(
                     .fixed_decimals(2),
             )
             .on_disabled_hover_text(
-                "the beast keeps its own pace: a state's way down, or a \
+                "the body keeps its own pace: a state's way down, or a \
                  gesture played once it is up. Hold poses a state at any \
                  point of its way down",
             );
@@ -2158,6 +2530,220 @@ fn click_gesture(animator: &mut Animator, name: &str) {
         return;
     }
     animator.gesture = (!lit).then(|| (name.to_string(), 0.0));
+}
+
+/// A winged body in the air (engine #424): the mode it flies in, the air past
+/// it, where its beat comes from, the time to what it lands on and what
+/// carries it - and what the driver posed it doing.
+///
+/// **Drawn for every body, and usable on a winged one**: a person's or a
+/// beast's row is disabled with the reason painted beside it, because egui
+/// fires no hover text over a disabled widget.
+#[cfg(feature = "editor")]
+fn flight_section(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator, wings: bool) {
+    use bevy_egui::egui;
+    ui.label(egui::RichText::new("flight").strong());
+    if !wings {
+        ui.small(NO_WINGS);
+    }
+    ui.add_enabled_ui(wings, |ui| flight_controls(ui, animator));
+}
+
+/// The flight row's controls, and the driver's report under them.
+#[cfg(feature = "editor")]
+fn flight_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    // The modes as a host flies them. Take off leads into flap and land back
+    // onto the feet by themselves (`next_mode`); the rest are the hand's.
+    ui.horizontal_wrapped(|ui| {
+        for (mode, name) in FLIGHT_MODES {
+            let lit = animator.flying.mode == Some(mode);
+            if ui.selectable_label(lit, name).clicked() && !lit {
+                animator.flying.mode = Some(mode);
+            }
+        }
+    });
+    for line in flight_report(animator) {
+        ui.small(line);
+    }
+    // **A checkbox rather than a bare slider**, as the cadence is: the
+    // default is the walk's speed, which is the air in still air.
+    ui.horizontal(|ui| {
+        let mut naming = animator.flying.air.is_some();
+        if ui.toggle_value(&mut naming, "air m/s").changed() {
+            animator.flying.air = naming.then_some(CRUISE);
+        }
+        if let Some(air) = &mut animator.flying.air {
+            ui.add(
+                egui::Slider::new(air, 0.0..=20.0)
+                    .text("")
+                    .fixed_decimals(1),
+            );
+        } else {
+            ui.label("from the walk's speed");
+        }
+    });
+    beat_controls(ui, animator);
+    ui.horizontal(|ui| {
+        let mut naming = animator.flying.contact.is_some();
+        if ui
+            .toggle_value(&mut naming, "contact s")
+            .on_hover_text(
+                "how long until the body reaches what it lands on: under 0.45 s \
+                 it flares whatever the mode says, deeper the nearer",
+            )
+            .changed()
+        {
+            animator.flying.contact = naming.then_some(0.3);
+        }
+        if let Some(contact) = &mut animator.flying.contact {
+            ui.add(
+                egui::Slider::new(contact, 0.0..=1.0)
+                    .text("")
+                    .fixed_decimals(2),
+            );
+        } else {
+            ui.label("nothing ahead");
+        }
+    });
+    // **The flight's carriage, and nothing else's**: a body that carries
+    // itself hovers, risen by its takeoff and brought down by its landing;
+    // one a host carries flies in place under the attitude the host writes.
+    // The driver is handed it only while a winged body flies, so the walk,
+    // a leap and every person and beast keep the window's own.
+    ui.horizontal(|ui| {
+        let carriage = &mut animator.flying.carriage;
+        ui.selectable_value(carriage, Carriage::Own, "carries itself")
+            .on_hover_text(
+                "hovers on the spot, risen by its takeoff and brought down by its landing",
+            );
+        ui.selectable_value(carriage, Carriage::Chassis, "carried")
+            .on_hover_text("a host carries the body and writes its attitude: it flies in place");
+    });
+}
+
+/// Where a flight's beat comes from: the body's own clock or a host's, and
+/// the host's rate and its early beat.
+#[cfg(feature = "editor")]
+fn beat_controls(ui: &mut bevy_egui::egui::Ui, animator: &mut Animator) {
+    use bevy_egui::egui;
+    ui.horizontal(|ui| {
+        let host = matches!(animator.flying.beat, Beat::Host { .. });
+        if ui
+            .selectable_label(!host, "own beat")
+            .on_hover_text("the engine keeps the beat's clock, at the body's own rate")
+            .clicked()
+        {
+            animator.flying.beat = Beat::Own;
+        }
+        if ui
+            .selectable_label(host, "host beat")
+            .on_hover_text(
+                "a host keeps the beat's clock, as an application does: the \
+                 engine follows it, running between half and twice its own \
+                 rate to catch it, never backward",
+            )
+            .clicked()
+            && !host
+        {
+            animator.flying.beat = Beat::Host {
+                rate: own_rate(animator).unwrap_or(HOST_RATE),
+                phase: 0.0,
+            };
+        }
+    });
+    let range = host_range(animator);
+    if let Beat::Host { rate, phase } = &mut animator.flying.beat {
+        ui.horizontal(|ui| {
+            // Edits only: a rate left from another body outside this one's
+            // range is not rewritten by being drawn.
+            ui.add(
+                egui::Slider::new(rate, range)
+                    .clamping(egui::SliderClamping::Edits)
+                    .text("beats /s")
+                    .fixed_decimals(2),
+            );
+            if ui
+                .button("beat early")
+                .on_hover_text(
+                    "jumps the host's beat half a beat on, as a press that beats \
+                     early does: the engine catches up rather than snapping",
+                )
+                .clicked()
+            {
+                *phase = (*phase + 0.5).rem_euclid(1.0);
+            }
+        });
+    }
+}
+
+/// The body's own beat rate, in beats a second, as the driver last reported
+/// it outside a takeoff - which beats a fifth faster - or in one.
+#[cfg(feature = "editor")]
+fn own_rate(animator: &Animator) -> Option<f32> {
+    animator
+        .beat_rate
+        .or_else(|| animator.flown.map(|flown| flown.rate))
+}
+
+/// The host-beat slider's range, in beats a second: half to twice the body's
+/// own rate, the whole of what the engine's clock runs at to catch a host's,
+/// so any rate on it is caught (engine #424). Before the body has flown its
+/// rate is unknown, and the range reaches every size's.
+#[cfg(feature = "editor")]
+fn host_range(animator: &Animator) -> std::ops::RangeInclusive<f32> {
+    own_rate(animator).map_or(HOST_RANGE, |own| own * 0.5..=own * 2.0)
+}
+
+/// What the flight row says the driver posed, a line at a time: the mode in
+/// effect and how long it has held - with the mode asked for and the time to
+/// contact where those made it another - then the beat and the wings.
+#[cfg(feature = "editor")]
+fn flight_report(animator: &Animator) -> Vec<String> {
+    let name = |mode: FlightMode| {
+        FLIGHT_MODES
+            .iter()
+            .find(|(candidate, _)| *candidate == mode)
+            .map_or("?", |(_, name)| *name)
+    };
+    let Some(flown) = animator.flown else {
+        return vec![match animator.flying.mode {
+            None => "on the ground".to_string(),
+            Some(_) if showing(animator).is_some() => {
+                "the swim or the leap shown outranks the flight".to_string()
+            }
+            Some(mode) => format!("asked to {}", name(mode)),
+        }];
+    };
+    let asked = match animator.flying.mode.filter(|&asked| asked != flown.mode) {
+        None => String::new(),
+        Some(asked) => match animator
+            .flying
+            .contact
+            .filter(|_| flown.mode == FlightMode::Flare)
+        {
+            Some(contact) => format!(" (asked {}, contact {contact:.2} s)", name(asked)),
+            None => format!(" (asked {})", name(asked)),
+        },
+    };
+    let posed = format!(
+        "posed: {} for {:.2} s{asked}",
+        name(flown.mode),
+        flown.seconds
+    );
+    vec![
+        posed,
+        format!(
+            "beat {:.2} at {:.2} /s, down {:.0}%",
+            flown.phase,
+            flown.rate,
+            flown.downstroke * 100.0
+        ),
+        format!(
+            "wings {:.2} open, {:.2} rad wide; flare {:.2}; level {:.2}",
+            flown.extension, flown.amplitude, flown.flare, flown.level
+        ),
+    ]
 }
 
 /// The controls that only mean anything while the gait is walking: its pace,
@@ -3198,8 +3784,22 @@ mod tests {
     }
 
     /// The rig a body of `archetype` builds, as the window reads it.
+    ///
+    /// **The whole build, not the skeleton's rig**: a winged body's wings
+    /// are grown onto its rig by the build (`Rig::wings`), and a rig made
+    /// from the skeleton alone has none - so it is offered, and played, a
+    /// beast's or a person's roster and no flight. A 64-texel atlas, as
+    /// nothing here is drawn.
     fn rig_built(archetype: Archetype) -> Rig {
-        Rig::from_skeleton(&AvatarRecord::new("Rigged", archetype).skeleton()).expect("a rig")
+        symbios_avatar::Avatar::build_with(
+            &AvatarRecord::new("Rigged", archetype),
+            &symbios_avatar::AvatarConfig {
+                atlas: 64,
+                ..symbios_avatar::AvatarConfig::default()
+            },
+        )
+        .expect("a body")
+        .rig
     }
 
     /// A winged body of `family`, at its own anchor (symbios-avatar #420).
@@ -3215,8 +3815,10 @@ mod tests {
         // #57: a bird perches on two legs and a bat and a glider stand on
         // four (symbios-avatar #420), as the plan declares and not as the
         // limbs are counted. So a pattern walks a bird as its natural gait and
-        // a bat in the pattern; a bat is played a beast's roster, and a bird,
-        // whose fore limbs are wings, nothing - neither a beast's nor a person's.
+        // a bat in the pattern. And since #424 each is played its own roster,
+        // read through `gesture::roster`: every name of it, and nothing of a
+        // person's or a beast's - no wave over a bird's folded wings, and no
+        // sit for a bat or a glider.
         use symbios_avatar::WingedFamily;
         let bird = rig_built(winged(WingedFamily::Bird));
         assert!(
@@ -3225,9 +3827,6 @@ mod tests {
         );
         for kind in GaitKind::PATTERNS {
             assert_eq!(kind.of(&bird), GaitKind::Natural.of(&bird), "{kind:?}");
-        }
-        for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
-            assert!(gesture_for(&bird, name).is_none(), "a bird played {name}");
         }
         for family in [WingedFamily::Bat, WingedFamily::Glider] {
             let rig = rig_built(winged(family));
@@ -3240,13 +3839,34 @@ mod tests {
                 Gait::pattern(&rig, pattern, 0.5),
                 "{family:?}"
             );
-            assert!(gesture_for(&rig, "Sit").is_some(), "{family:?}");
         }
-        // And a person and a beast play what the engine gives them.
+        for family in [WingedFamily::Bird, WingedFamily::Bat, WingedFamily::Glider] {
+            let rig = rig_built(winged(family));
+            let roster = gesture::roster(&rig);
+            assert_eq!(roster, symbios_avatar::anim::winged::rests::roster(&rig));
+            assert!(!roster.is_empty(), "{family:?} has no roster");
+            for name in roster {
+                assert!(gesture_for(&rig, name).is_some(), "{family:?}: {name}");
+            }
+            for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
+                assert_eq!(
+                    gesture_for(&rig, name).is_some(),
+                    roster.contains(name),
+                    "{family:?}: {name}"
+                );
+            }
+            // Its rests are states the driver plays, as a beast's sit is.
+            assert!(rests(&rig), "{family:?} has no rest");
+        }
+        // A person and a beast are played what the engine gives them, and
+        // offered their own rosters, as before.
         let person = rig_built(Archetype::default());
         let beast = rig_built(Archetype::Quadruped(
             symbios_avatar::QuadrupedParams::default(),
         ));
+        assert_eq!(gesture::roster(&person), gesture::ROSTER);
+        assert_eq!(gesture::roster(&beast), emote::ROSTER);
+        assert!(!rests(&person) && rests(&beast));
         for name in gesture::ROSTER {
             assert_eq!(
                 gesture_for(&person, name).is_some(),
@@ -3266,7 +3886,8 @@ mod tests {
     #[cfg(feature = "editor")]
     #[test]
     fn the_motion_window_offers_a_winged_body_its_own_rows() {
-        // #57: the rows follow `Stands`, read off the declared legs.
+        // #57: the rows follow `Stands`, read off the declared legs; and
+        // since #424 the gesture row is the body's own roster.
         use symbios_avatar::WingedFamily;
         assert_eq!(
             Stands::of(&rig_built(winged(WingedFamily::Bird))),
@@ -3287,25 +3908,83 @@ mod tests {
             walking: true,
             ..Animator::default()
         };
-        let bird = offered(&mut animator, Stands::Handless, &[]);
-        assert!(
-            bird.iter()
-                .any(|label| label == "no gestures for this body yet"),
-            "{bird:?}"
-        );
-        for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
-            assert!(!bird.iter().any(|label| label == name), "{name}: {bird:?}");
-        }
         let pattern = GaitKind::PATTERNS[1].label();
-        assert!(!bird.iter().any(|label| label == pattern), "{bird:?}");
-        let bat = offered(&mut animator, Stands::FourLegged, &[]);
-        assert!(bat.iter().any(|label| label == pattern), "{bat:?}");
-        assert!(bat.iter().any(|label| label == "Wag"), "{bat:?}");
-        assert!(
-            !bat.iter()
-                .any(|label| label == "no gestures for this body yet"),
-            "{bat:?}"
+        let bird = offered(
+            &mut animator,
+            &Subject::of(&rig_built(winged(WingedFamily::Bird))),
         );
+        assert!(!bird.iter().any(|label| label == pattern), "{bird:?}");
+        let bat = offered(
+            &mut animator,
+            &Subject::of(&rig_built(winged(WingedFamily::Bat))),
+        );
+        assert!(bat.iter().any(|label| label == pattern), "{bat:?}");
+        assert!(!bat.iter().any(|label| label == "Wag"), "{bat:?}");
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn a_winged_body_s_picker_lists_its_own_roster() {
+        // #424: the picker offers a bird its perch, roost, preen, wing
+        // stretch, shake and head tilt, a bat and a glider theirs - each name
+        // `gesture::roster` gives it, and none of a person's or a beast's -
+        // and says which are rests. A person and a beast are offered what
+        // they always were.
+        use symbios_avatar::WingedFamily;
+        let mut animator = Animator {
+            walking: true,
+            ..Animator::default()
+        };
+        for family in [WingedFamily::Bird, WingedFamily::Bat, WingedFamily::Glider] {
+            let rig = rig_built(winged(family));
+            let subject = Subject::of(&rig);
+            assert_eq!(subject.roster, gesture::roster(&rig));
+            assert!(subject.wings);
+            let shown = offered(&mut animator, &subject);
+            for name in subject.roster {
+                assert!(
+                    shown.iter().any(|label| label == name),
+                    "{family:?} {name}: {shown:?}"
+                );
+            }
+            for name in gesture::ROSTER.iter().chain(emote::ROSTER) {
+                if !subject.roster.contains(name) {
+                    assert!(
+                        !shown.iter().any(|label| label == name),
+                        "{family:?} {name}: {shown:?}"
+                    );
+                }
+            }
+            let rests: &[&str] = match family {
+                WingedFamily::Bird => &["Perch", "Roost"],
+                WingedFamily::Bat => &["Rest"],
+                WingedFamily::Glider => &["Curl"],
+            };
+            assert_eq!(subject.states, rests, "{family:?}");
+        }
+        let bird = Subject::of(&rig_built(winged(WingedFamily::Bird)));
+        assert_eq!(
+            bird.roster,
+            [
+                "Perch",
+                "Roost",
+                emote::GET_UP,
+                "Preen",
+                "Wing Stretch",
+                "Shake",
+                "Head Tilt"
+            ]
+        );
+        let person = Subject::of(&rig_built(Archetype::default()));
+        assert_eq!((person.roster, person.wings), (gesture::ROSTER, false));
+        assert_eq!(person.roster, Subject::nobody().roster);
+        let beast = Subject::of(&rig_built(Archetype::Quadruped(
+            symbios_avatar::QuadrupedParams::default(),
+        )));
+        assert_eq!((beast.roster, beast.wings), (emote::ROSTER, false));
+        assert_eq!(beast.states, ["Sit", "Lie Down"]);
+        let shown = offered(&mut animator, &beast);
+        assert!(shown.iter().any(|label| label == "Wag"), "{shown:?}");
     }
 
     /// Picks a gesture in the row, or lets go of the pick, as a click does.
@@ -3995,7 +4674,7 @@ mod tests {
     /// The text one frame of the motion window's locomotion section shows
     /// for `animator`, read through AccessKit.
     #[cfg(feature = "editor")]
-    fn offered(animator: &mut Animator, legs: Stands, states: &[&str]) -> Vec<String> {
+    fn offered(animator: &mut Animator, subject: &Subject) -> Vec<String> {
         use bevy_egui::egui;
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
@@ -4006,7 +4685,7 @@ mod tests {
                 screen_rect: Some(screen),
                 ..Default::default()
             },
-            |ui| locomotion_section(ui, &clips, animator, legs, states),
+            |ui| locomotion_section(ui, &clips, animator, subject),
         );
         output
             .platform_output
@@ -4027,11 +4706,7 @@ mod tests {
         // nowhere: every later gesture stood frozen at nought - a wag, and
         // after a rebuild a person's wave - with nothing to turn it off.
         let (mut app, rig, _) = sat(0.2);
-        let states: Vec<&str> = emote::ROSTER
-            .iter()
-            .copied()
-            .filter(|name| state(&rig, name))
-            .collect();
+        let beast = Subject::of(&rig);
         app.world_mut().resource_mut::<Animator>().scrub = true;
         for _ in 0..5 {
             tick(&mut app);
@@ -4043,14 +4718,14 @@ mod tests {
         let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
         assert!(animator.scrub, "the hold was let go of on its own");
         assert!(
-            offered(&mut animator, Stands::FourLegged, &states)
+            offered(&mut animator, &beast)
                 .iter()
                 .any(|label| label == "hold"),
             "a hold left on over a standing beast was drawn nowhere"
         );
         animator.gesture = Some(("Wag".to_string(), 0.0));
         assert!(
-            offered(&mut animator, Stands::FourLegged, &states)
+            offered(&mut animator, &beast)
                 .iter()
                 .any(|label| label == "hold"),
             "a wag frozen under hold was offered no hold"
@@ -4063,7 +4738,7 @@ mod tests {
         tick(&mut app);
         let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
         assert!(
-            offered(&mut animator, Stands::Person, &[])
+            offered(&mut animator, &Subject::nobody())
                 .iter()
                 .any(|label| label == "hold"),
             "a person's wave frozen under hold was offered no hold"
@@ -4128,6 +4803,525 @@ mod tests {
                 playing(&mut app).is_none_or(|(name, _)| name != "Shake"),
                 "a shake let go of before it played played anyway"
             );
+        }
+    }
+
+    /// The one body's driver's source and flight report.
+    fn flying_now(app: &mut App) -> (symbios_avatar::anim::Source, Option<Flown>) {
+        let mut bodies = app.world_mut().query::<(&AvatarBody, &AvatarDriver)>();
+        let (body, driver) = bodies.single(app.world()).expect("one driven body");
+        (driver.source(), driver.flight(&body.avatar.rig))
+    }
+
+    /// Every labelled node one frame of `draw` shows, through AccessKit, and
+    /// whether it is disabled.
+    #[cfg(feature = "editor")]
+    fn shown(mut draw: impl FnMut(&mut bevy_egui::egui::Ui)) -> Vec<(String, bool)> {
+        use bevy_egui::egui;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            &mut draw,
+        )
+        .platform_output
+        .accesskit_update
+        .expect("AccessKit is on")
+        .nodes
+        .iter()
+        .filter_map(|(_, node)| {
+            let text = node.label().or_else(|| node.value())?;
+            Some((text.to_owned(), node.is_disabled()))
+        })
+        .collect()
+    }
+
+    /// Clicks the topmost widget labelled `label` that `draw` shows, found
+    /// through AccessKit on a first frame, over the frames a click takes.
+    #[cfg(feature = "editor")]
+    fn click(mut draw: impl FnMut(&mut bevy_egui::egui::Ui), label: &str) {
+        use bevy_egui::egui;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let mut run = |events: Vec<egui::Event>| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                &mut draw,
+            )
+        };
+        let bounds = run(Vec::new())
+            .platform_output
+            .accesskit_update
+            .expect("AccessKit is on")
+            .nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label))
+            .filter_map(|(_, node)| node.bounds())
+            .min_by(|a, b| a.y0.total_cmp(&b.y0))
+            .unwrap_or_else(|| panic!("fixture: nothing labelled {label}"));
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a point on an 800 x 600 test screen fits an f32 exactly enough to click"
+        )]
+        let at = egui::pos2(
+            f64::midpoint(bounds.x0, bounds.x1) as f32,
+            f64::midpoint(bounds.y0, bounds.y1) as f32,
+        );
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(vec![egui::Event::PointerMoved(at), press(true)]);
+        run(vec![press(false)]);
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn the_flight_row_drives_inputs_flight() {
+        // #424: each control on the flight row lands in the `Flight` the
+        // driver is handed - the mode, a named air down the body's forward,
+        // a host's beat and the time to contact - and nothing is handed on
+        // the ground.
+        let mut animator = Animator::default();
+        assert_eq!(animator.flying.flight(), None, "a body starts on its feet");
+        for label in ["take off", "air m/s", "host beat", "contact s"] {
+            click(|ui| flight_section(ui, &mut animator, true), label);
+        }
+        let mut expected = Flight::new(FlightMode::Takeoff);
+        expected.air = Some(Vec3::Z * CRUISE);
+        expected.phase = Some(0.0);
+        expected.contact = Some(0.3);
+        assert_eq!(animator.flying.flight(), Some(expected));
+        click(|ui| flight_section(ui, &mut animator, true), "glide");
+        click(|ui| flight_section(ui, &mut animator, true), "own beat");
+        click(|ui| flight_section(ui, &mut animator, true), "carried");
+        expected.mode = FlightMode::Glide;
+        expected.phase = None;
+        assert_eq!(animator.flying.flight(), Some(expected));
+        assert_eq!(animator.flying.carriage, Carriage::Chassis);
+        assert_eq!(
+            animator.carriage,
+            Carriage::Own,
+            "the window's own carriage moved"
+        );
+        // And the report says what the driver did with it, before it has.
+        assert!(
+            shown(|ui| flight_section(ui, &mut animator, true))
+                .iter()
+                .any(|(label, _)| label == "asked to glide"),
+        );
+    }
+
+    #[test]
+    fn a_flown_bird_takes_off_into_a_flap_and_lands_back_onto_its_feet() {
+        // #424: the window hands a flight on as a host does. A takeoff
+        // flaps two beats after lifting off, a host's beat runs while it flies,
+        // a pick on a flying body is let go of, and a landing hands the body
+        // back to the ground once it is down - the driver then walks or
+        // idles it again.
+        use symbios_avatar::WingedFamily;
+        use symbios_avatar::anim::Source;
+        let mut app = app_of(winged(WingedFamily::Bird));
+        app.world_mut().resource_mut::<Animator>().flying = Flying {
+            mode: Some(FlightMode::Takeoff),
+            beat: Beat::Host {
+                rate: 3.0,
+                phase: 0.0,
+            },
+            ..Flying::default()
+        };
+        tick(&mut app);
+        let (source, flown) = flying_now(&mut app);
+        assert_eq!(source, Source::Fly, "a bird handed a takeoff did not fly");
+        assert_eq!(flown.map(|flown| flown.mode), Some(FlightMode::Takeoff));
+        assert_eq!(app.world().resource::<Animator>().flown(), flown);
+        assert!(
+            !app.world().resource::<Animator>().is_idle(),
+            "a flight is motion"
+        );
+
+        pick(&mut app, Some("Preen"));
+        tick(&mut app);
+        assert_eq!(picked(&app), None, "a preen was kept on a flying bird");
+        assert_eq!(playing(&mut app), None, "a flying bird preened");
+
+        let mut waited = 0;
+        while app.world().resource::<Animator>().flying.mode == Some(FlightMode::Takeoff) {
+            assert!(waited < frames(5.0), "the takeoff never led into a flap");
+            tick(&mut app);
+            waited += 1;
+        }
+        assert_eq!(
+            app.world().resource::<Animator>().flying.mode,
+            Some(FlightMode::Flap)
+        );
+        tick(&mut app);
+        assert_eq!(
+            flying_now(&mut app).1.map(|flown| flown.mode),
+            Some(FlightMode::Flap)
+        );
+        let Beat::Host { phase, .. } = app.world().resource::<Animator>().flying.beat else {
+            unreachable!("the host's beat was kept");
+        };
+        assert!(phase > 0.0, "the host's beat did not run");
+
+        app.world_mut().resource_mut::<Animator>().flying.mode = Some(FlightMode::Land);
+        let mut waited = 0;
+        while app.world().resource::<Animator>().flying.mode.is_some() {
+            assert!(waited < frames(5.0), "the landing never handed back");
+            tick(&mut app);
+            waited += 1;
+        }
+        tick(&mut app);
+        let (source, flown) = flying_now(&mut app);
+        assert_ne!(source, Source::Fly, "a landed bird still flies");
+        assert_eq!(flown, None);
+        assert_eq!(app.world().resource::<Animator>().flown(), None);
+        // And it rests again on the ground, as a bird does.
+        pick(&mut app, Some("Perch"));
+        tick(&mut app);
+        assert_eq!(
+            playing(&mut app).map(|(name, _)| name).as_deref(),
+            Some("Perch"),
+            "a landed bird would not perch"
+        );
+    }
+
+    /// An app around one winged body of `family` at `size`, built small.
+    fn winged_app(family: symbios_avatar::WingedFamily, size: f32) -> App {
+        let mut app = bare_app();
+        app.world_mut().spawn(crate::spawn::SpawnAvatar {
+            record: AvatarRecord::new(
+                "Flier",
+                Archetype::Winged(symbios_avatar::WingedParams {
+                    family,
+                    size,
+                    ..Default::default()
+                }),
+            ),
+            config: symbios_avatar::AvatarConfig {
+                atlas: 64,
+                ..symbios_avatar::AvatarConfig::default()
+            },
+            closure: 0.0,
+        });
+        tick(&mut app);
+        app
+    }
+
+    /// The most any joint turned and the root moved between two poses.
+    fn jump(a: &Pose, b: &Pose) -> (f32, f32) {
+        let turned = a
+            .rotations
+            .iter()
+            .zip(&b.rotations)
+            .map(|(a, b)| a.angle_between(*b))
+            .fold(0.0f32, f32::max);
+        (turned, a.translation.distance(b.translation))
+    }
+
+    #[test]
+    fn a_takeoff_and_a_landing_are_handed_on_by_the_engine_s_report() {
+        // #424, the engine's "Handing on": a takeoff flaps two beats after
+        // its feet leave the ground, counted on the driver's own clock, and
+        // a landing hands back once the driver reports it settled - at every
+        // size, carried or carrying itself. A carried size-2.4 bat handed
+        // back on a fixed 0.3 s left its root 0.535 m down and turned a joint
+        // 0.94 rad in a frame; handed back here, the root is where it stood
+        // and nothing jumps through the hand-back and the blend after it.
+        // (The landing itself moves faster - a songbird's wings fold through
+        // 0.9 rad a frame, a size-2.4 bird's absorb carries its root 4 cm -
+        // and is the engine's; the bound is held from the last frame it
+        // poses.)
+        use symbios_avatar::WingedFamily;
+        for family in [WingedFamily::Bird, WingedFamily::Bat, WingedFamily::Glider] {
+            for size in [0.1, symbios_avatar::WingedParams::default().size, 2.4] {
+                for carriage in [Carriage::Chassis, Carriage::Own] {
+                    let case = format!("{family:?} at {size} under {carriage:?}");
+                    let mut app = winged_app(family, size);
+                    // No blink: a lid shuts through half a radian a frame,
+                    // and this measures the body.
+                    app.world_mut().resource_mut::<Animator>().blinking = false;
+                    let rig = rig_of(&mut app);
+                    let stood = posed(&mut app).translation;
+                    app.world_mut().resource_mut::<Animator>().flying = Flying {
+                        mode: Some(FlightMode::Takeoff),
+                        carriage,
+                        ..Flying::default()
+                    };
+                    let (mut lifted_at, mut last) = (None, None);
+                    for frame in 0.. {
+                        assert!(frame < frames(10.0), "{case}: the takeoff never flapped");
+                        tick(&mut app);
+                        let animator = app.world().resource::<Animator>();
+                        let flown = animator.flown().expect("a flying body reports");
+                        if animator.flying.mode != Some(FlightMode::Takeoff) {
+                            last = Some(flown);
+                            break;
+                        }
+                        if flown.lifted && lifted_at.is_none() {
+                            lifted_at = Some(flown.phase);
+                        }
+                    }
+                    let (from, flown) = (lifted_at.expect("lifted"), last.expect("flown"));
+                    let beats = (flown.phase - from).rem_euclid(64.0);
+                    assert!(
+                        (TAKEOFF_BEATS..TAKEOFF_BEATS + flown.rate / 30.0).contains(&beats),
+                        "{case}: handed on {beats} beats after lifting off"
+                    );
+                    assert_eq!(
+                        app.world().resource::<Animator>().flying.mode,
+                        Some(FlightMode::Flap),
+                        "{case}"
+                    );
+                    for _ in 0..frames(0.5) {
+                        tick(&mut app);
+                    }
+                    app.world_mut().resource_mut::<Animator>().flying.mode = Some(FlightMode::Land);
+                    let mut poses = vec![posed(&mut app)];
+                    let mut back = None;
+                    for frame in 0..frames(10.0) {
+                        tick(&mut app);
+                        poses.push(posed(&mut app));
+                        let animator = app.world().resource::<Animator>();
+                        if back.is_none() && animator.flying.mode.is_none() {
+                            back = Some(frame);
+                            assert!(
+                                animator.flown().is_some_and(|flown| flown.settled),
+                                "{case}: handed back unsettled"
+                            );
+                        }
+                        if back.is_some_and(|back| frame >= back + frames(0.3)) {
+                            break;
+                        }
+                    }
+                    let back = back.unwrap_or_else(|| panic!("{case}: never handed back"));
+                    let down = poses[back + 1].translation.y - stood.y;
+                    assert!(
+                        down.abs() <= 0.02 * rig.extent(),
+                        "{case}: handed back with the root {down} m off where it stood"
+                    );
+                    // Through the hand-back and the blend out of the landing
+                    // after it.
+                    let blend = frames(Animator::default().blend) + 3;
+                    let (turned, moved) = poses[back..=back + blend]
+                        .windows(2)
+                        .map(|pair| jump(&pair[0], &pair[1]))
+                        .fold((0.0f32, 0.0f32), |(t, m), (a, b)| (t.max(a), m.max(b)));
+                    assert!(
+                        turned <= 0.15 && moved <= 0.01 * rig.extent(),
+                        "{case}: a joint turned {turned} rad and the root moved {moved} m \
+                         in a frame about the hand-back"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_flight_s_carriage_moves_nothing_but_a_flight() {
+        // #424: the flight row's carriage is handed to the driver only while
+        // a winged body flies. A person, a beast and a bird walking on the
+        // spot under a flight carriage of `Chassis` are posed exactly as
+        // under the window's own, and the window's own is never touched.
+        use symbios_avatar::WingedFamily;
+        for archetype in [Archetype::default(), dog(), winged(WingedFamily::Bird)] {
+            let run = |carriage: Carriage| {
+                let mut app = app_of(archetype.clone());
+                {
+                    let mut animator = app.world_mut().resource_mut::<Animator>();
+                    animator.walking = true;
+                    animator.flying.carriage = carriage;
+                }
+                let mut poses = Vec::new();
+                for _ in 0..frames(1.5) {
+                    tick(&mut app);
+                    poses.push(posed(&mut app));
+                }
+                assert_eq!(
+                    app.world().resource::<Animator>().carriage,
+                    Carriage::Own,
+                    "{archetype:?}"
+                );
+                poses
+            };
+            assert!(
+                run(Carriage::Chassis) == run(Carriage::Own),
+                "the flight's carriage moved a {archetype:?} walking on the spot"
+            );
+        }
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn the_host_beat_is_ranged_from_the_body_s_own_rate() {
+        // #424: half to twice the body's own rate, which is what the engine's
+        // clock runs between to catch a host's - so any rate on the slider
+        // is caught, a songbird's nineteen a second and a size-2.4 bird's one.
+        use symbios_avatar::WingedFamily;
+        let unflown = Animator::default();
+        assert_eq!(host_range(&unflown), HOST_RANGE);
+        let mut rates = Vec::new();
+        for size in [0.1, 2.4] {
+            let mut app = winged_app(WingedFamily::Bird, size);
+            app.world_mut().resource_mut::<Animator>().flying.mode = Some(FlightMode::Flap);
+            for _ in 0..5 {
+                tick(&mut app);
+            }
+            let mut animator = std::mem::take(&mut *app.world_mut().resource_mut::<Animator>());
+            let own = animator.flown().expect("a flapping bird reports").rate;
+            assert_eq!(host_range(&animator), own * 0.5..=own * 2.0, "size {size}");
+            assert!(
+                HOST_RANGE.contains(&own),
+                "size {size}: {own} beats a second"
+            );
+            click(|ui| beat_controls(ui, &mut animator), "host beat");
+            assert!(
+                matches!(animator.flying.beat, Beat::Host { rate, .. } if rate.to_bits() == own.to_bits()),
+                "size {size}: the host's beat did not start at the body's own"
+            );
+            rates.push(own);
+        }
+        assert!(rates[0] > 8.0 && rates[1] < 1.5, "{rates:?}");
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn a_flying_body_s_gesture_row_is_disabled_and_says_why() {
+        // #424: a flying body plays no rest and no emote, so its picks are
+        // drawn disabled with the reason painted beside them, where a click
+        // used to light one for a frame before it was let go of. On the
+        // ground, and on a body with no wings, the row is as it was.
+        use symbios_avatar::WingedFamily;
+        let bird = Subject::of(&rig_built(winged(WingedFamily::Bird)));
+        let mut animator = Animator::default();
+        animator.flying.mode = Some(FlightMode::Flap);
+        let flying = shown(|ui| locomotion_section(ui, &Clips::default(), &mut animator, &bird));
+        assert!(
+            flying.iter().any(|(label, _)| label == IN_THE_AIR),
+            "{flying:?}"
+        );
+        for name in bird.roster {
+            assert!(
+                flying
+                    .iter()
+                    .any(|(label, disabled)| label == name && *disabled),
+                "{name} was offered in the air: {flying:?}"
+            );
+        }
+        click(
+            |ui| locomotion_section(ui, &Clips::default(), &mut animator, &bird),
+            "Preen",
+        );
+        assert_eq!(animator.gesture, None, "a flying bird's preen was picked");
+        animator.flying.mode = None;
+        let grounded = shown(|ui| locomotion_section(ui, &Clips::default(), &mut animator, &bird));
+        assert!(!grounded.iter().any(|(label, _)| label == IN_THE_AIR));
+        for name in bird.roster {
+            assert!(
+                grounded
+                    .iter()
+                    .any(|(label, disabled)| label == name && !*disabled),
+                "{name}: {grounded:?}"
+            );
+        }
+        // A person under a flight left asked is offered its row as ever.
+        animator.flying.mode = Some(FlightMode::Flap);
+        let person = shown(|ui| {
+            locomotion_section(ui, &Clips::default(), &mut animator, &Subject::nobody());
+        });
+        assert!(!person.iter().any(|(label, _)| label == IN_THE_AIR));
+        assert!(
+            person
+                .iter()
+                .any(|(label, disabled)| label == "Greeting" && !*disabled),
+            "{person:?}"
+        );
+    }
+
+    #[cfg(feature = "editor")]
+    #[test]
+    fn a_wingless_body_s_flight_row_is_disabled_and_says_why() {
+        // #424: a person's and a beast's flight row is drawn disabled, the
+        // reason painted beside it - egui fires no hover text over a
+        // disabled widget - and a click on it flies nothing. A winged body's
+        // row is enabled and says nothing of the kind.
+        let mut animator = Animator::default();
+        let wingless = shown(|ui| flight_section(ui, &mut animator, false));
+        assert!(
+            wingless.iter().any(|(label, _)| label == NO_WINGS),
+            "{wingless:?}"
+        );
+        for (_, name) in FLIGHT_MODES {
+            assert!(
+                wingless
+                    .iter()
+                    .any(|(label, disabled)| label == name && *disabled),
+                "{name} was not disabled: {wingless:?}"
+            );
+        }
+        for label in ["air m/s", "own beat", "host beat", "contact s", "carried"] {
+            assert!(
+                wingless
+                    .iter()
+                    .any(|(shown, disabled)| shown == label && *disabled),
+                "{label} was not disabled: {wingless:?}"
+            );
+        }
+        click(|ui| flight_section(ui, &mut animator, false), "take off");
+        assert_eq!(animator.flying.mode, None, "a wingless click took off");
+
+        let winged = shown(|ui| flight_section(ui, &mut animator, true));
+        assert!(
+            !winged.iter().any(|(label, _)| label == NO_WINGS),
+            "{winged:?}"
+        );
+        for (_, name) in FLIGHT_MODES {
+            assert!(
+                winged
+                    .iter()
+                    .any(|(label, disabled)| label == name && !*disabled),
+                "{name} was disabled on a winged body: {winged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flight_left_asked_neither_moves_a_person_or_a_beast_nor_stays() {
+        // #424, as a beast's emote left held (#370): a flight asked of a
+        // body with no wings is ignored by the engine and let go of by the
+        // window, and the body stands exactly as one never asked.
+        for archetype in [Archetype::default(), dog()] {
+            let run = |mode: Option<FlightMode>| {
+                let mut app = app_of(archetype.clone());
+                app.world_mut().resource_mut::<Animator>().flying.mode = mode;
+                for _ in 0..10 {
+                    tick(&mut app);
+                }
+                let left = app.world().resource::<Animator>().flying.mode;
+                (posed(&mut app), left, flying_now(&mut app))
+            };
+            let (asked, left, (source, flown)) = run(Some(FlightMode::Flap));
+            let (unasked, _, _) = run(None);
+            assert_eq!(left, None, "{archetype:?} kept a flight");
+            assert_ne!(
+                source,
+                symbios_avatar::anim::Source::Fly,
+                "{archetype:?} flew"
+            );
+            assert_eq!(flown, None);
+            assert!(asked == unasked, "a flight moved a {archetype:?}");
         }
     }
 }
