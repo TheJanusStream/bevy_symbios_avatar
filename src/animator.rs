@@ -4671,6 +4671,22 @@ mod tests {
         assert_eq!(picked(&app), None, "the row kept a sit the beast refused");
     }
 
+    /// One headless frame of `draw`, its texture delta dropped as applied.
+    ///
+    /// egui 0.36 debug-asserts that a dropped `TexturesDelta` was handed to a
+    /// renderer - the font atlas rides the first frame's - and a headless test
+    /// has no renderer to hand it to, so it says it means to drop it.
+    #[cfg(feature = "editor")]
+    fn headless_frame(
+        ctx: &bevy_egui::egui::Context,
+        input: bevy_egui::egui::RawInput,
+        draw: impl FnMut(&mut bevy_egui::egui::Ui),
+    ) -> bevy_egui::egui::FullOutput {
+        let mut output = ctx.run_ui(input, draw);
+        output.textures_delta.clear();
+        output
+    }
+
     /// The text one frame of the motion window's locomotion section shows
     /// for `animator`, read through AccessKit.
     #[cfg(feature = "editor")]
@@ -4680,7 +4696,8 @@ mod tests {
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
         let clips = Clips::default();
-        let output = ctx.run_ui(
+        let output = headless_frame(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -4821,7 +4838,8 @@ mod tests {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        ctx.run_ui(
+        headless_frame(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -4849,7 +4867,8 @@ mod tests {
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
         let mut run = |events: Vec<egui::Event>| {
-            ctx.run_ui(
+            headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,

@@ -3812,12 +3812,28 @@ mod tests {
         })
     }
 
+    /// One headless frame of `draw`, its texture delta dropped as applied.
+    ///
+    /// egui 0.36 debug-asserts that a dropped `TexturesDelta` was handed to a
+    /// renderer - the font atlas rides the first frame's - and a headless test
+    /// has no renderer to hand it to, so it says it means to drop it.
+    fn headless_frame(
+        ctx: &egui::Context,
+        input: egui::RawInput,
+        draw: impl FnMut(&mut egui::Ui),
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(input, draw);
+        output.textures_delta.clear();
+        output
+    }
+
     /// The text one frame of `draw` shows, read through AccessKit.
     fn labels(draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let output = ctx.run_ui(
+        let output = headless_frame(
+            &ctx,
             egui::RawInput {
                 screen_rect: Some(screen),
                 ..Default::default()
@@ -3849,7 +3865,8 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
         let mut changed = false;
         let run = |events: Vec<egui::Event>, record: &mut AvatarRecord, changed: &mut bool| {
-            ctx.run_ui(
+            headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -3952,7 +3969,8 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 1000.0));
         let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
             let mut changed = false;
-            let output = ctx.run_ui(
+            let output = headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -4015,7 +4033,8 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0));
         let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
             let mut changed = false;
-            let output = ctx.run_ui(
+            let output = headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -4355,7 +4374,8 @@ mod tests {
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
         let mut run = |events: Vec<egui::Event>| {
-            ctx.run_ui(
+            headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -4470,7 +4490,8 @@ mod tests {
         ctx.enable_accesskit();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 900.0));
         let run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
-            ctx.run_ui(
+            headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -4951,7 +4972,8 @@ mod tests {
         let mut changed = false;
         let mut shown = Vec::new();
         for _ in 0..frames {
-            let output = ctx.run_ui(
+            let output = headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     ..Default::default()
@@ -5117,7 +5139,8 @@ mod tests {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 4000.0));
         let mut run = |events: Vec<egui::Event>, record: &mut AvatarRecord| {
             let mut changed = false;
-            let output = ctx.run_ui(
+            let output = headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -5310,7 +5333,8 @@ mod tests {
             let events = field.map(|at| input(frame, at)).unwrap_or_default();
             let shown = record.seed.to_string();
             let named = record.name.clone();
-            let output = ctx.run_ui(
+            let output = headless_frame(
+                &ctx,
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -5479,7 +5503,7 @@ mod tests {
         ctx.enable_accesskit();
         let mut text = Vec::new();
         for _ in 0..2 {
-            let output = ctx.run_ui(egui::RawInput::default(), &mut draw);
+            let output = headless_frame(&ctx, egui::RawInput::default(), &mut draw);
             text = output
                 .platform_output
                 .accesskit_update
@@ -5577,7 +5601,7 @@ mod tests {
         ctx.enable_accesskit();
         let mut selected = Vec::new();
         for _ in 0..2 {
-            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let output = headless_frame(&ctx, egui::RawInput::default(), |ui| {
                 scalp_style(ui, &mut style);
             });
             selected = output

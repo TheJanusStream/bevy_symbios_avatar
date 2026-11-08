@@ -1,6 +1,6 @@
 [package]
 name = "bevy_symbios_avatar"
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 authors = ["Janus"]
 description = "Bevy integration for parametric avatars on atproto."
@@ -39,7 +39,23 @@ name = "viewer"
 required-features = ["editor", "builtin-clips"]
 
 [dependencies]
-bevy = "0.19"
+# Only the Bevy parts this crate touches (symbios-overlands #1576). Cargo features
+# are additive, so a library asking for bevy's `default` hands every consumer the
+# whole engine back - windowing, audio, UI, text, gilrs - whether it draws with
+# them or not. The application asks for those; this crate asks for assets and the
+# log, the mesh, image and tangent code a body's upload is made of, and the
+# renderer and the PBR materials it is drawn with (`bevy_render` pulls
+# `bevy_extract` itself). The viewer example, a dev-dependency below, asks for
+# the rest.
+bevy = { version = "0.20", default-features = false, features = [
+    "bevy_asset",
+    "bevy_log",
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_mesh",
+    "bevy_image",
+    "bevy_mikktspace",
+] }
 
 # Pinned to one minor line rather than tracked loosely. This crate exists to be
 # a *second instrument* on the same body: if the two ever read a different
@@ -126,7 +142,11 @@ bevy = "0.19"
 # flight the motion window drives, and rests and emotes by body. Breaking for
 # a 0.x crate: `Inputs` grew the public `flight` field every literal here
 # sets, and `Flown` is `#[non_exhaustive]`.
-symbios-avatar = "0.23"
+#
+# **0.24 for the Bevy 0.20 line** (engine 0.24.0): the engine took glam 0.33,
+# the maths Bevy 0.20 is built on, and glam's types are in its public API, so
+# its minor moved and this crate's moves with it. No body and no motion moved.
+symbios-avatar = "0.24"
 
 # The first dependency beyond bevy and the engine, and it is deliberate rather
 # than accidental. Judging a body off-line is a slow loop — change a constant,
@@ -135,7 +155,12 @@ symbios-avatar = "0.23"
 #
 # Pinned to the pair known to work against Bevy 0.18 rather than to whatever is
 # latest, which is how the sibling project that uses it daily runs.
-bevy_egui = { version = "0.41", optional = true }
+#
+# 0.43.1 for Bevy 0.20 (egui 0.36), not 0.43.0, whose shader broke on wasm.
+# Default features off: the editor draws widgets only, and rendering, fonts and
+# the clipboard are the host's to ask for. The viewer example asks for them
+# below.
+bevy_egui = { version = "0.43.1", default-features = false, optional = true }
 # Emitting the record is the half that makes the panel worth more than a set of
 # sliders, and JSON is what a PDS holds. The engine already depends on this at
 # the same version, so it is not a new crate in the tree.
@@ -146,7 +171,7 @@ serde_json = { version = "1.0", optional = true }
 # config, so this crate draws them rather than a second copy of every range.
 # Editor-only, like the two above. The engine and this crate's own spawn path
 # never read it: the engine bakes the texture into the cloth atlas.
-bevy_symbios_texture = { version = "0.13", features = ["egui"], optional = true }
+bevy_symbios_texture = { version = "0.14", features = ["egui"], optional = true }
 
 [dev-dependencies]
 # The strip capture loop photographs frames through Bevy's own screenshot path
@@ -167,7 +192,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # privately scheduled, so a right-drag died the moment it crossed a GUI window.
 # `gate_camera_on_gui` in the example owns the equivalent, with a held-button
 # override.
-bevy_panorbit_camera = "0.35"
+bevy_panorbit_camera = "0.36"
+# The viewer opens a window, draws the two egui windows and photographs frames,
+# so it asks for the whole of Bevy and bevy_egui's defaults - the library above
+# asks for neither.
+bevy = "0.20"
+bevy_egui = "0.43.1"
 
 # The engine and the maths under it at full optimisation even in a debug build.
 # Building a body is real numeric work — subdivision, skinning, a megapixel atlas

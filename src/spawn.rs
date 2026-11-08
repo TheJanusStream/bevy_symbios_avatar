@@ -480,7 +480,7 @@ struct AtlasMaps {
 /// the far side of the locks beside a face, the back of a beard's rim.
 ///
 /// **And nothing asks for anisotropy**, though hair carries tangents and a
-/// highlight along the strands is what anisotropy is for. Bevy 0.19 builds the
+/// highlight along the strands is what anisotropy is for. Bevy 0.19 and 0.20 build the
 /// anisotropy frame only under its `pbr_anisotropy_texture` feature. Without
 /// it, a non-zero strength still switches the anisotropic lighting on, through
 /// a zero tangent, and a head of hair renders blown-out white; with it, every
@@ -1274,7 +1274,7 @@ mod tests {
 
     #[test]
     fn no_material_asks_for_anisotropy() {
-        // #46, and both ways of turning it on are closed. Bevy 0.19 builds the
+        // #46, and both ways of turning it on are closed. Bevy 0.19 and 0.20 build the
         // anisotropy frame only when bevy_pbr carries its
         // pbr_anisotropy_texture feature, which this crate does not enable -
         // yet a non-zero strength still switches the anisotropic lighting on
